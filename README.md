@@ -8,10 +8,10 @@ This repository contains the code for the SBGM_DANRA project, a work on using sc
 The model downscales ERA5 [REF] data (~31 km spatial resolution) to a higher resolution corresponding to the DANRA [REF] target dataset (2.5 km spatial resolution). The model is trained with ERA5 variables as input and DANRA variables as target. The training is done using a score-based generative model, which learns to generate high-resolution climate data conditioned on low-resolution inputs. 
 Multiple models have been trained, with different LR conditions to attempt a downscaling closer to an emulator, attempting to capture dynamic meteorological processes from various variables.
 
-Examples of the generated samples can be found in the `models_and_samples/generated_samples` directory, and the trained models are stored in the `models_and_samples/trained_models` directory.
+<!-- Examples of the generated samples can be found in the `models_and_samples/generated_samples` directory, and the trained models are stored in the `models_and_samples/trained_models` directory.
 
 To run the code, you will need to set up the environment as described in the `requirements.txt` or `environment.yml` files. The project is structured to facilitate easy data handling, model training, and evaluation.
-For training the model, you can use the scripts in the `scripts/model_runs` directory. The evaluation of the model can be done using the scripts in the `scripts/evaluation` directory.
+For training the model, you can use the scripts in the `scripts/model_runs` directory. The evaluation of the model can be done using the scripts in the `scripts/evaluation` directory. -->
 
 
 ## Directory Structure
