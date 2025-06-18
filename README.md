@@ -1,4 +1,8 @@
 # SBGM_DANRA
+
+# NOTE: This project is currently under development and the code is not yet fully functional. It is intended to be used as a reference for implementing score-based generative models for downscaling climate data. This README will be updated as the project progresses.
+
+
 This repository contains the code for the SBGM_DANRA project, a work on using score-based generative models for downscaling of climate data. The project is structured into several directories, each serving a specific purpose in the workflow from data preparation to model training and evaluation.
 
 The model downscales ERA5 [REF] data (~31 km spatial resolution) to a higher resolution corresponding to the DANRA [REF] target dataset (2.5 km spatial resolution). The model is trained with ERA5 variables as input and DANRA variables as target. The training is done using a score-based generative model, which learns to generate high-resolution climate data conditioned on low-resolution inputs. 
