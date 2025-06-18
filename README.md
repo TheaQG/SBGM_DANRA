@@ -1,6 +1,6 @@
 # SBGM_DANRA
 
-# NOTE: This project is currently under development and the code is not yet fully functional. It is intended to be used as a reference for implementing score-based generative models for downscaling climate data. This README will be updated as the project progresses.
+### NOTE: This project is currently under development and the code is not yet fully functional. It is intended to be used as a reference for implementing score-based generative models for downscaling climate data. This README will be updated as the project progresses.
 
 
 This repository contains the code for the SBGM_DANRA project, a work on using score-based generative models for downscaling of climate data. The project is structured into several directories, each serving a specific purpose in the workflow from data preparation to model training and evaluation.
