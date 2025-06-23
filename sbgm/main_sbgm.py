@@ -610,7 +610,6 @@ def main_sbgm(args):
                                         lr_scaling_params=lr_scaling_params,
                                         weight_init=True,
                                         sdf_weighted_loss=sample_w_sdf,
-                                        check_transforms=args.check_transforms,
                                         )
     
     # Check if path to pretrained model exists
@@ -668,7 +667,7 @@ def main_sbgm(args):
             PLOT_FIRST_IMG = False
 
         # Calculate the training loss
-        train_loss = pipeline.train(train_dataloader,
+        train_loss = pipeline.train_batches(train_dataloader,
                                     verbose=False,
                                     PLOT_FIRST=PLOT_FIRST_IMG,
                                     SAVE_PATH=path_samples,
@@ -677,7 +676,7 @@ def main_sbgm(args):
         train_losses.append(train_loss)
 
         # Calculate the validation loss
-        valid_loss = pipeline.validate(valid_dataloader,
+        valid_loss = pipeline.validate_batches(valid_dataloader,
                                         verbose=False,
                                         )
         valid_losses.append(valid_loss)

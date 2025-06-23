@@ -54,6 +54,7 @@ sampler:
   time_embedding: 256 # Dimension of time embedding
   last_fmap_channels: 512 # Channels in the last feature map
   num_heads: 4 # Number of attention heads
+  block_layers: [2, 2, 2, 2] # Number of layers in each block
 
 data_handling:
   cache_size: 0 # Size of the cache for data handling
@@ -83,19 +84,40 @@ stationary_conditions:
 
 visualization:
   transform_back_bf_plot: true # Whether to transform back before plotting
+  create_figs: true # Whether to create figures during visualization
   show_figs: false # Whether to show figures during visualization
   show_both_orig_scaled: false # Whether to show both original and scaled data
   show_geo: true # Whether to show geographic information
   show_ocean: true # Whether to show ocean data
 
 training:
+  device: cuda # Device to use for training (e.g., 'cuda' or 'cpu')
   batch_size: 16 # Batch size for training
   learning_rate: 0.0005 # Learning rate for training
   min_lr: 0.000001 # Minimum learning rate
+  lr_scheduler: ReduceLROnPlateau # Learning rate scheduler to use
+  lr_scheduler_params: # ReduceLROnPlateau
+    factor: 0.5 # Factor by which to reduce the learning rate
+    patience: 5 # Patience for the scheduler
+    threshold: 0.01 # Threshold for the scheduler
+    min_lr: 0.000001 # Minimum learning rate for the scheduler
+  # lr_scheduler_params: # StepLR
+    # step_size: 10 # Step size for the scheduler
+    # gamma: 0.1 # Gamma for the scheduler
+  # lr_scheduler_params: # CosineAnnealingLR
+    # T_max: 100 # Maximum number of iterations for the scheduler
+    # eta_min: 0.000001 # Minimum learning rate for the scheduler
+  weight_init: true # Whether to initialize weights
+  custom_weight_initializer: None # Custom weight initializer (if any)
+  with_ema: false # Whether to use Exponential Moving Average
+  load_ema: false # Whether to load EMA weights
+  ema_decay: 0.9999 # Decay rate for EMA
   weight_decay: 0.000001 # Weight decay for regularization
   epochs: 100 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
+  sdf_weighted_loss: true # Whether to use SDF weighted loss
   optimizer: adam # Optimizer to use for training
+  load_checkpoint: false # Whether to load a checkpoint
   early_stopping: true # Whether to use early stopping
   early_stopping_params:
     patience: 50 # Patience for early stopping

@@ -10,7 +10,8 @@ from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
-from sbgm.score_unet import ScoreNet
+from sbgm.score_unet import ScoreNet, Encoder, Decoder, DecoderBlock, marginal_prob_std_fn, diffusion_coeff_fn
+from sbgm.score_sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
 from sbgm.training import TrainingPipeline_general
 from sbgm.utils import build_data_path
 from sbgm.special_transforms import build_back_transforms
@@ -18,6 +19,15 @@ from sbgm.special_transforms import build_back_transforms
 
 
 def get_dataloader(cfg, verbose=True):
+    '''
+        Get the dataloader for training and validation datasets based on the configuration.
+        Args:
+            cfg (dict): Configuration dictionary containing data settings.
+            verbose (bool): If True, print detailed information about the data types and sizes.
+        Returns:
+            train_loader (DataLoader): DataLoader for the training dataset.
+            val_loader (DataLoader): DataLoader for the validation dataset.
+    '''
     # Print information about data types
     hr_unit, lr_units = get_units(cfg)
     print(f"\nUsing HR data type: {cfg['highres']['model']} {cfg['highres']['variable']} [{hr_unit}]")
@@ -25,8 +35,7 @@ def get_dataloader(cfg, verbose=True):
     for i, cond in enumerate(cfg['lowres']['condition_variables']):
         print(f"Using LR data type {i+1}: {cfg['lowres']['model']} {cond} [{lr_units[i]}]")
 
-    
-    # Set image dimensions vased on onfig (if None, use default values)
+    # Set image dimensions based on config (if None, use default values)
     hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else None
     if hr_data_size is None:
         hr_data_size = (128, 128)
@@ -245,81 +254,167 @@ def get_dataloader(cfg, verbose=True):
     return train_loader, val_loader
 
 def get_model(cfg):
+    '''
+        Get the model based on the configuration.
+        Args:
+            cfg (dict): Configuration dictionary containing model settings.
+        Returns:
+            score_model (ScoreNet): The score model instance.
+            checkpoint_path (str): Path to the model checkpoint.
+            checkpoint_name (str): Name of the model checkpoint file.
+    '''
+    
     # Define model parameters
     input_channels = len(cfg['lowres']['condition_variables'])  # 
-    output_channels = 1  # Assuming a single output channel for the high-resolution variable
+    output_channels = 1#len(cfg['highres']['variable'])  # Assuming a single output channel for the high-resolution variable
     
     if cfg['lowres']['condition_variables'] is not None:
         sample_w_cond_img = True
     else:
         sample_w_cond_img = False
 
-    # Setup
+    # Setup model checkpoint name and path
+    save_str = get_model_string(cfg)
+    checkpoint_name = save_str + '.pth.tar'
+
+    checkpoint_dir = os.path.join(cfg['paths']['path_save'], cfg['paths']['checkpoint_dir'])
+
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
+
+    # Create the model
+
+    encoder = Encoder(input_channels=input_channels,
+                      time_embedding=cfg['sampler']['time_embedding'],
+                      cond_on_lsm=cfg['stationary_conditions']['geographic_conditions']['sample_w_geo'],
+                      cond_on_topo=cfg['stationary_conditions']['geographic_conditions']['sample_w_geo'],
+                      cond_on_img=sample_w_cond_img,
+                      block_layers=cfg['sampler']['block_layers'],
+                      num_classes=cfg['stationary_conditions']['seasonal_conditions']['n_seasons'] if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'] else None,
+                      n_heads=cfg['sampler']['num_heads'],
+                      )
+    decoder = Decoder(last_fmap_channels=cfg['sampler']['last_fmap_channels'],
+                      output_channels=output_channels,
+                      time_embedding=cfg['sampler']['time_embedding'],
+                      n_heads=cfg['sampler']['num_heads'],
+                      )
+
+    score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
+                           encoder=encoder,
+                           decoder=decoder,
+                           )
     
-    return
+    
+    return score_model, checkpoint_path, checkpoint_name
 
 def get_model_string(cfg):
+    '''
+        Generate a string representation of the model configuration for saving and logging.
+        Args:
+            cfg (dict): Configuration dictionary containing model settings.
+        Returns:
+            save_str (str): String representation of the model configuration.
+    '''
+    # Set image dimensions vased on onfig (if None, use default values)
+    hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else None
+    if hr_data_size is None:
+        hr_data_size = (128, 128)
+
+    lr_data_size = tuple(cfg['lowres']['data_size']) if cfg['lowres']['data_size'] is not None else None    
+    if lr_data_size is None:
+        lr_data_size_use = hr_data_size
+    else:
+        lr_data_size_use = lr_data_size
+
+    # Check if resize factor is set and print sizes (if verbose)
+    if cfg['lowres']['resize_factor'] > 1:
+        hr_data_size_use = (hr_data_size[0] // cfg['lowres']['resize_factor'], hr_data_size[1] // cfg['lowres']['resize_factor'])
+        lr_data_size_use = (lr_data_size_use[0] // cfg['lowres']['resize_factor'], lr_data_size_use[1] // cfg['lowres']['resize_factor'])
+    else:
+        hr_data_size_use = hr_data_size
+        lr_data_size_use = lr_data_size_use
+
     # Setup specific names for saving
     lr_vars_str = '_'.join(cfg['lowres']['condition_variables'])
+
     save_str = (
         f"{cfg['experiment']['config_name']}__"
         f"HR_{cfg['highres']['variable']}_{cfg['highres']['model']}__"
         f"SIZE_{hr_data_size_use[0]}x{hr_data_size_use[1]}__"
-        f"LR_{lr_vars_str}_{args.lr_model}__"
-        f"LOSS_{args.loss_type}__"
-        f"HEADS_{num_heads}__"
-        f"TIMESTEPS_{args.n_timesteps}"
+        f"LR_{lr_vars_str}_{cfg['lowres']['model']}__"
+        f"LOSS_{cfg['training']['loss_type']}__"
+        f"HEADS_{cfg['sampler']['num_heads']}__"
+        f"TIMESTEPS_{cfg['sampler']['n_timesteps']}"
     )
 
     return save_str
 
 def get_optimizer(cfg, model):
+    '''
+        Get the optimizer based on the configuration.
+        Args:
+            cfg (dict): Configuration dictionary containing optimizer settings.
+            model (torch.nn.Module): The model to optimize.
+        Returns:
+            optimizer (torch.optim.Optimizer): The optimizer instance.
+    '''
+
+    if cfg['training']['optimizer'] == 'adam':
+        optimizer = Adam(model.parameters(),
+                         lr=cfg['training']['learning_rate'],
+                         weight_decay=cfg['training']['weight_decay'])
+    elif cfg['training']['optimizer'] == 'sgd':
+        optimizer = SGD(model.parameters(),
+                        lr=cfg['training']['learning_rate'],
+                        momentum=cfg['training']['momentum'],
+                        weight_decay=cfg['training']['weight_decay'])
+    elif cfg['training']['optimizer'] == 'adamw':
+        optimizer = AdamW(model.parameters(),
+                          lr=cfg['training']['learning_rate'],
+                          weight_decay=cfg['training']['weight_decay'])
+    else:
+        raise ValueError(f"Optimizer {cfg['training']['optimizer']} not recognized. Use 'adam', 'sgd', or 'adamw'.")
     
-    return
+    return optimizer
 
 def get_loss(cfg):
+    '''
+        Get the loss function based on the configuration.
+    '''
+
     
     return
 
 def get_scheduler(cfg, optimizer):
-    
-    return
+    '''
+        Get the learning rate scheduler based on the configuration.
+        Args:
+            cfg (dict): Configuration dictionary containing scheduler settings.
+            optimizer (torch.optim.Optimizer): The optimizer to schedule.
+        Returns:
+            scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler instance.
+    '''
+    if cfg['training']['scheduler'] == 'Step':
+        scheduler = StepLR(optimizer,
+                           step_size=cfg['training']['lr_scheduler_params']['step_size'],
+                           gamma=cfg['training']['lr_scheduler_params']['gamma'])
+                           
+    elif cfg['training']['scheduler'] == 'ReduceLROnPlateau':
+        scheduler = ReduceLROnPlateau(optimizer,
+                                      mode='min',
+                                      factor=cfg['training']['lr_scheduler_params']['factor'],
+                                      patience=cfg['training']['lr_scheduler_params']['patience'],
+                                      verbose=True)
+    elif cfg['training']['scheduler'] == 'CosineAnnealing':
+        scheduler = CosineAnnealingLR(optimizer,
+                                      T_max=cfg['training']['lr_scheduler_params']['T_max'],
+                                      eta_min=cfg['training']['lr_scheduler_params']['eta_min'])
+    elif cfg['training']['scheduler'] == None:
+        scheduler = None
+        print("No learning rate scheduler specified. Using the optimizer's default learning rate.")
+    else:
+        raise ValueError(f"Scheduler {cfg['training']['scheduler']} not recognized. Use 'step', 'reduce_on_plateau', or 'cosine_annealing'.")
 
-def train_model(cfg, train_loader, val_loader):
-    
-    return
-
-def evaluate_model(cfg, model, val_loader):
-
-    return
-
-def save_model(model, path):
-    """
-    Save the model to the specified path.
-    
-    Args:
-        model (torch.nn.Module): The model to save.
-        path (str): The path where the model will be saved.
-    """
-    torch.save(model.state_dict(), path)
-    print(f"Model saved to {path}")
-
-
-def load_model(model, path):
-    """
-    Load the model from the specified path.
-    
-    Args:
-        model (torch.nn.Module): The model to load.
-        path (str): The path from where the model will be loaded.
-    
-    Returns:
-        torch.nn.Module: The loaded model.
-    """
-    model.load_state_dict(torch.load(path))
-    print(f"Model loaded from {path}")
-    return model
-
+    return scheduler
 
 
 
@@ -421,11 +516,11 @@ def get_cmaps(cfg):
     
 
     hr_cmap = cmaps[cfg['highres']['variable']]
-    lr_cmaps = []
+    lr_cmaps = {}
     for key in cfg['highres']['variables']:
         if key not in cmaps:
             raise ValueError(f"Variable '{key}' not found in cmap dictionary.")
         else:
-            lr_cmaps.append(cmaps[key])
+            lr_cmaps[key] = cmaps[key]
 
     return hr_cmap, lr_cmaps
