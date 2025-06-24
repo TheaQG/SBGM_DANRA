@@ -8,7 +8,6 @@ paths:
   data_dir: ${env:DATA_DIR} # Directory for input data
   checkpoint_dir: ${env:CKPT_DIR} # Directory for model checkpoints
   sample_dir: ${env:SAMPLE_DIR} # Directory for saving samples
-  save_figs: true # Whether to save figures
   specific_fig_name: test__plot_fct # Specific figure name to save
   path_save: ${env:SAMPLE_DIR} # Path to save figures
   full_domain_dims: [589, 789]
@@ -85,13 +84,19 @@ stationary_conditions:
 visualization:
   transform_back_bf_plot: true # Whether to transform back before plotting
   create_figs: true # Whether to create figures during visualization
+  save_figs: true # Whether to save figures 
+  plot_losses: true # Whether to plot losses
+  plot_initial_sample: true # Whether to plot first samples
   show_figs: false # Whether to show figures during visualization
   show_both_orig_scaled: false # Whether to show both original and scaled data
   show_geo: true # Whether to show geographic information
   show_ocean: true # Whether to show ocean data
 
 training:
+  seed: 42 # Random seed for reproducibility
   device: cuda # Device to use for training (e.g., 'cuda' or 'cpu')
+  use_mixed_precision: false # Whether to use mixed precision training
+  verbose: true # Whether to print verbose output during training
   batch_size: 16 # Batch size for training
   learning_rate: 0.0005 # Learning rate for training
   min_lr: 0.000001 # Minimum learning rate

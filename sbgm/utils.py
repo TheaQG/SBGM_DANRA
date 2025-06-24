@@ -338,7 +338,7 @@ def convert_nc_to_zarr(nc_directory, zarr_file, VERBOSE=False):
             if VERBOSE:
                 print(os.path.join(nc_directory, nc_file))
             # Load the .nc file
-            nc_data = nc.Dataset(os.path.join(nc_directory, nc_file))
+            nc_data = nc.Dataset(os.path.join(nc_directory, nc_file), mode='r') # type: ignore
             # Loop through all variables in the .nc file
             for var in nc_data.variables:
                 # Select the data from the variable
@@ -423,13 +423,6 @@ def extract_samples(samples, device=None):
     # Return all extracted samples
     return hr_img, classifier, lr_img, lsm_hr, lsm, sdf, topo, hr_points, lr_points
 
-
-def build_data_path(base_path, model, var, full_domain_dims, split):
-    """
-    Construct a path for high-resolution data.
-    Example: base_path + 'data_DANRA/size_589x789/temp_589x789/zarr_files/train.zarr'
-    """
-    return os.path.join(base_path, f"data_{model}", f"size_{full_domain_dims[0]}x{full_domain_dims[1]}", f"{var}_{full_domain_dims[0]}x{full_domain_dims[1]}", "zarr_files", f"{split}.zarr")
 
 
 def str2bool(v):
@@ -597,9 +590,9 @@ def plot_sample(sample,
     # Create subplots in one row (one column per key)
     fig, axs = plt.subplots(1, n_keys, figsize=figsize)
     fig.suptitle(f"Sample from train dataset, {var} (HR: {hr_model}, LR: {lr_model})", fontsize=16)
-    # Ensure axs is iteravle (if only one subplot, wrap in list)
+    # Ensure axs is iterable (if only one subplot, wrap in list)
     if n_keys == 1:
-        axs = [axs]
+        axs = np.array([axs])
 
     # Loop over each key and plot
     for idx, key in enumerate(plot_keys):
@@ -625,12 +618,13 @@ def plot_sample(sample,
             cmap = hr_cmap
         elif key.endswith('_lr') or key.endswith('_lr_original'):
             # Remove suffix to get the base condition name
+            base = None
             if key.endswith('_lr'):
                 base = key[:-3]
             elif key.endswith('_lr_original'):
                 base = key[:-12]
             # print(f"Base: {base}")
-            if lr_cmap_dict is not None and base in lr_cmap_dict:
+            if lr_cmap_dict is not None and base is not None and base in lr_cmap_dict:
                 cmap = lr_cmap_dict[base]
             else:
                 cmap = default_lr_cmap
@@ -656,15 +650,19 @@ def plot_sample(sample,
         ax.set_yticks([])
 
         # Set column title
+        base = None
+
         if key.endswith('_hr'):
             title = f"HR {hr_model} ({var})\nscaled"
         elif key.endswith('_hr_original'):
             title = f"HR {hr_model} ({var})\noriginal [{hr_units}]"
         elif key.endswith('_lr'):
+            base = key[:-3]
             title = f"LR {lr_model} ({base})\nscaled"
         elif key.endswith('_lr_original'):
+            base = key[:-12]
             title = f"LR {lr_model} ({base})\noriginal [{lr_units[lr_keys.index(base)]}]"
-        elif key in extra_keys:
+        elif extra_keys is not None and key in extra_keys:
             if key == "topo":
                 title = f"Topography"
             elif key == "sdf":
@@ -691,21 +689,22 @@ def plot_sample(sample,
             meanpointprops = dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick')
             # Exclude Nans.
             if torch.is_tensor(img_data):
-                mask = ~torch.isnan(img_data)
+                mask = ~torch.isnan(img_data) # type: ignore
                 img_bp = img_data[mask].flatten().cpu().numpy()
             else:
-                img_bp = img_data[~np.isnan(img_data)].flatten()
-                if len(img_bp) > 0:
-                    bax.boxplot(img_bp,
-                                vert=True,
-                                widths=2,
-                                showmeans=True,
-                                meanprops=meanpointprops,
-                                flierprops=flierprops,
-                                medianprops=medianprops,)
-                bax.set_xticks([])
-                bax.set_yticks([])
-                bax.set_frame_on(False)
+                mask = ~np.isnan(img_data)
+                img_bp = img_data[mask].flatten()
+            if len(img_bp) > 0:
+                bax.boxplot(img_bp,
+                            vert=True,
+                            widths=2,
+                            showmeans=True,
+                            meanprops=meanpointprops,
+                            flierprops=flierprops,
+                            medianprops=medianprops,)
+            bax.set_xticks([])
+            bax.set_yticks([])
+            bax.set_frame_on(False)
         else:
             # For extra keys, just add a colorbar
             cax = divider.append_axes("right", size="5%", pad=0.1)
@@ -715,7 +714,7 @@ def plot_sample(sample,
 
     fig.tight_layout()
 
-    return fig, ax
+    return fig, axs
 
 def plot_samples(samples, hr_model, hr_units, 
                         lr_model, lr_units,
@@ -762,6 +761,7 @@ def plot_samples(samples, hr_model, hr_units,
     # If single batch dict is passed, unpack it to a list
     if isinstance(samples, dict):
         # Figure out batch size from first tensor we find:
+        batch_size = None
         for v in samples.values():
             if torch.is_tensor(v):
                 batch_size = v.shape[0]
@@ -769,8 +769,8 @@ def plot_samples(samples, hr_model, hr_units,
             if isinstance(v, list) and all(torch.is_tensor(x) for x in v):
                 batch_size = len(v)
                 break
-            else:
-                raise ValueError("No tensor found in the sample dictionary.")
+        if batch_size is None:
+            raise ValueError("No tensor found in the sample dictionary to determine batch size.")
         
         sample_list = []
         for i in range(batch_size):
@@ -890,6 +890,10 @@ def plot_samples(samples, hr_model, hr_units,
             else:
                 cax = divider.append_axes("right", size="5%", pad=0.1)
             fig.colorbar(im, cax=cax)
+
+            base = None
+
+
             # Set column title (only for top row)
             if row == 0:
                 if key.endswith('_hr'):
@@ -900,7 +904,7 @@ def plot_samples(samples, hr_model, hr_units,
                     title = f"LR {lr_model} ({base})\nscaled"
                 elif key.endswith('_lr_original'):
                     title = f"LR {lr_model} ({base})\noriginal [{lr_units[lr_keys.index(base)]}]"
-                elif key in extra_keys:
+                elif extra_keys is not None and key in extra_keys:
                     if key == "topo":
                         title = f"Topography"
                     elif key == "sdf":
@@ -914,7 +918,6 @@ def plot_samples(samples, hr_model, hr_units,
                 ax.set_title(title, fontsize=10)
     fig.tight_layout()
     return fig, axs
-
 
 def plot_samples_and_generated(
         samples,
@@ -971,11 +974,16 @@ def plot_samples_and_generated(
     # print(f'Generated: {generated}')
     # -------------------------------------------------------- unpack samples
     if isinstance(samples, dict):              # turn single batch-dict → list
+        B = None
         for v in samples.values():
             if torch.is_tensor(v):
-                B = v.shape[0]; break
+                B = v.shape[0]
+                break
             if isinstance(v, list) and v and torch.is_tensor(v[0]):
-                B = len(v); break
+                B = len(v)
+                break
+        if B is None:
+            raise ValueError("Could not determine batch size (B) from samples dictionary.")
         sample_list = []
         for i in range(B):
             d = {}
@@ -1024,7 +1032,7 @@ def plot_samples_and_generated(
         plot_keys.extend(extra_keys)
 
     # ----------------------------------------------------------- colourlims
-    if force_matching_scale and global_min is not None:
+    if force_matching_scale and global_min is not None and global_max is not None:
         # share HR limits with generated if user hasn’t provided any
         global_min.setdefault(gen_key, global_min.get(hr_key))
         global_max.setdefault(gen_key, global_max.get(hr_key))
@@ -1075,7 +1083,7 @@ def plot_samples_and_generated(
             else:
                 cmap = (extra_cmap_dict or {}).get(key, "viridis")
 
-            if force_matching_scale and global_min is not None:
+            if force_matching_scale and global_min is not None and global_max is not None:
                 vmin = global_min.get(key, np.nanmin(img))
                 vmax = global_max.get(key, np.nanmax(img))
             else:

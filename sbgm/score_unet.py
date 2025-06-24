@@ -114,7 +114,7 @@ class Encoder(ResNet):
                  block=BasicBlock,
                  block_layers:list=[2, 2, 2, 2],
                  n_heads:int=4,
-                 num_classes:int=None,
+                 num_classes:Optional[int]=None,
                  cond_on_lsm=False,
                  cond_on_topo=False,
                  cond_on_img=False,
@@ -209,7 +209,7 @@ class Encoder(ResNet):
         pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
         return pos_enc
 
-    def forward(self, 
+    def forward(self,  # type: ignore
                 x:torch.Tensor, 
                 t:torch.Tensor, 
                 y:Optional[torch.Tensor]=None, 
@@ -239,7 +239,7 @@ class Encoder(ResNet):
         if lsm_cond is not None:
             lsm_cond = lsm_cond.to(self.device)
             x = torch.cat([x, lsm_cond], dim=1)
-        if lsm_cond is not None:
+        if topo_cond is not None:
             topo_cond = topo_cond.to(self.device)
             x = torch.cat([x, topo_cond], dim=1)
 
@@ -380,7 +380,7 @@ class DecoderBlock(nn.Module):
             output_channels:int,
             time_embedding:int,
             upsample_scale:int=2,
-            activation:nn.Module=nn.ReLU,
+            activation: type[nn.Module] = nn.ReLU,
             compute_attn:bool=True,
             n_heads:int=4,
             device = None
@@ -467,8 +467,8 @@ class DecoderBlock(nn.Module):
         output = self.conv(output)#.to(self.device)
         output = self.instance_norm2(output)#.to(self.device)
         
-        # Apply residual connection with previous feature map. If prev_fmap is a tensor, the feature maps must be of the same shape.
-        if torch.is_tensor(prev_fmap):
+        # Apply residual connection with previous feature map. If prev_fmap is a tensor and not None, the feature maps must be of the same shape.
+        if prev_fmap is not None and torch.is_tensor(prev_fmap):
             assert (prev_fmap.shape == output.shape), 'feature maps must be of same shape. Shape of prev_fmap: {}, shape of output: {}'.format(prev_fmap.shape, output.shape)
             # Add the previous feature map to the output
             output = output + prev_fmap.to(self.device)
@@ -544,7 +544,7 @@ class Decoder(nn.Module):
             compute_attn=False, n_heads=self.n_heads).to(self.device)
 
         # Set final layer second instance norm to identity as the final layer does not have a previous feature map
-        self.final_layer.instance_norm2 = nn.Identity()
+        self.final_layer.instance_norm2 = nn.Identity() # type: ignore
 
 
     def forward(self, *fmaps, t:Optional[torch.Tensor]=None):
@@ -679,7 +679,7 @@ def marginal_prob_std(t, sigma, device = None):
         the marginal $p_{0t}(x(t)|x(0))$
         Input:
             - t: time embedding tensor
-            - sigma: the $\sigma$ parameter in our SDE
+            - sigma: the sigma parameter in our SDE
     '''
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -696,7 +696,7 @@ def diffusion_coeff(t, sigma, device = None):
         of our SDE.
         Input:
             - t: A vector of time steps
-            - sigma: the $\sigma$ parameter in our SDE
+            - sigma: the sigma parameter in our SDE
 
         Returns:
             - The vector of diffusion coefficients

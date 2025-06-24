@@ -13,7 +13,13 @@ def Euler_Maruyama_sampler(score_model,
                            batch_size=64, 
                            num_steps=num_steps, 
                            device='cuda', 
-                           eps=1e-3):
+                           eps=1e-3,
+                           img_size=64,
+                           y=None,
+                           cond_img=None,
+                           lsm_cond=None,
+                           topo_cond=None
+                           ):
   """Generate samples from score-based models with the Euler-Maruyama solver.
 
   Args:
@@ -36,6 +42,7 @@ def Euler_Maruyama_sampler(score_model,
   time_steps = torch.linspace(1., eps, num_steps, device=device)
   step_size = time_steps[0] - time_steps[1]
   x = init_x
+  mean_x = x  # Initialize mean_x to ensure it is always defined
   with torch.no_grad():
     for time_step in tqdm.tqdm(time_steps):
       batch_time_step = torch.ones(batch_size, device=device) * time_step
@@ -87,6 +94,7 @@ def pc_sampler(score_model,
   time_steps = np.linspace(1., eps, num_steps)
   step_size = time_steps[0] - time_steps[1]
   x = init_x
+  x_mean = x  # Initialize x_mean to ensure it is always defined
   with torch.no_grad():
     for time_step in tqdm.tqdm(time_steps):
       batch_time_step = torch.ones(batch_size, device=device) * time_step
@@ -115,12 +123,19 @@ error_tolerance = 1e-5 #@param {'type': 'number'}
 def ode_sampler(score_model,
                 marginal_prob_std,
                 diffusion_coeff,
+                num_steps=100,
                 batch_size=64, 
                 atol=error_tolerance, 
                 rtol=error_tolerance, 
                 device='cuda', 
                 z=None,
-                eps=1e-3):
+                eps=1e-3,
+                img_size=64,
+                y=None,
+                cond_img=None,
+                lsm_cond=None,
+                topo_cond=None
+                ):
   """Generate samples from score-based models with black-box ODE solvers.
 
   Args:

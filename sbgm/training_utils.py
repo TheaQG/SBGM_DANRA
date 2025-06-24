@@ -27,6 +27,7 @@ def get_dataloader(cfg, verbose=True):
         Returns:
             train_loader (DataLoader): DataLoader for the training dataset.
             val_loader (DataLoader): DataLoader for the validation dataset.
+            gen_loader (DataLoader): DataLoader for the generation dataset.
     '''
     # Print information about data types
     hr_unit, lr_units = get_units(cfg)
@@ -68,14 +69,17 @@ def get_dataloader(cfg, verbose=True):
     # Use helper functions to create the path for the zarr files
     hr_data_dir_train = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'train')
     hr_data_dir_valid = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'val')
-
+    hr_data_dir_gen = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'gen')
+    
     # Loop over lr_vars and create paths for low-resolution data
     lr_cond_dirs_train = {}
     lr_cond_dirs_valid = {}
+    lr_cond_dirs_gen = {}
 
     for i, cond in enumerate(cfg['lowres']['condition_variables']):
         lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'train')
         lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'val')
+        lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'gen')
 
     # # Set scaling and matching 
     # scaling = cfg['transforms']['scaling']
@@ -148,9 +152,11 @@ def get_dataloader(cfg, verbose=True):
     # Make zarr groups
     data_train_zarr = zarr.open_group(hr_data_dir_train, mode='r')
     data_valid_zarr = zarr.open_group(hr_data_dir_valid, mode='r')
+    data_gen_zarr = zarr.open_group(hr_data_dir_gen, mode='r')
 
     n_samples_train = len(list(data_train_zarr.keys()))
     n_samples_valid = len(list(data_valid_zarr.keys()))
+    n_samples_gen = len(list(data_gen_zarr.keys()))
 
     # Setup cache
     if cfg['data_handling']['cache_size'] == 0:
@@ -188,7 +194,7 @@ def get_dataloader(cfg, verbose=True):
                             topo_full_domain=data_topo,
                             shuffle=True,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
-                            cutout_domains=cutout_domains if cfg['transforms']['sample_w_cutouts'] else None,
+                            cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
                             n_samples_w_cutouts=n_samples_train,
                             sdf_weighted_loss=cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf'],
                             scale=cfg['transforms']['scaling'],
@@ -196,7 +202,7 @@ def get_dataloader(cfg, verbose=True):
                             conditional_seasons=cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'],
                             n_classes=n_seasons,
                             lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
-                            lr_cutout_domains=tuple(lr_cutout_domains) if lr_cutout_domains is not None else None,
+                            lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
                             resize_factor=cfg['lowres']['resize_factor'],
     )
 
@@ -219,7 +225,7 @@ def get_dataloader(cfg, verbose=True):
                             topo_full_domain=data_topo,
                             shuffle=True,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
-                            cutout_domains=cutout_domains if cfg['transforms']['sample_w_cutouts'] else None,
+                            cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
                             n_samples_w_cutouts=n_samples_valid,
                             sdf_weighted_loss=cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf'],
                             scale=cfg['transforms']['scaling'],
@@ -227,10 +233,40 @@ def get_dataloader(cfg, verbose=True):
                             conditional_seasons=cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'],
                             n_classes=n_seasons,
                             lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
-                            lr_cutout_domains=tuple(lr_cutout_domains) if lr_cutout_domains is not None else None,
+                            lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
                             resize_factor=cfg['lowres']['resize_factor'],
     )
 
+    gen_dataset = DANRA_Dataset_cutouts_ERA5_Zarr(
+                            hr_variable_dir_zarr=hr_data_dir_gen,
+                            hr_data_size=hr_data_size_use,
+                            n_samples=n_samples_gen,
+                            cache_size=cfg['data_handling']['cache_size'],
+                            hr_variable=cfg['highres']['variable'],
+                            hr_model=cfg['highres']['model'],
+                            hr_scaling_method=cfg['highres']['scaling_method'],
+                            hr_scaling_params=cfg['highres']['scaling_params'],
+                            lr_conditions=cfg['lowres']['condition_variables'],
+                            lr_model=cfg['lowres']['model'],
+                            lr_scaling_methods=cfg['lowres']['scaling_methods'],
+                            lr_scaling_params=cfg['lowres']['scaling_params'],
+                            lr_cond_dirs_zarr=lr_cond_dirs_gen,
+                            geo_variables=geo_variables,
+                            lsm_full_domain=data_lsm,
+                            topo_full_domain=data_topo,
+                            shuffle=True,
+                            cutouts=cfg['transforms']['sample_w_cutouts'],
+                            cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
+                            n_samples_w_cutouts=n_samples_gen,
+                            sdf_weighted_loss=cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf'],
+                            scale=cfg['transforms']['scaling'],
+                            save_original=cfg['visualization']['show_both_orig_scaled'],
+                            conditional_seasons=cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'],
+                            n_classes=n_seasons,
+                            lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
+                            lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
+                            resize_factor=cfg['lowres']['resize_factor'],
+                            )
     # Setup dataloaders
     train_loader = DataLoader(train_dataset,
                               batch_size=cfg['data_handling']['batch_size'],
@@ -242,16 +278,22 @@ def get_dataloader(cfg, verbose=True):
                             shuffle=False,
                             # num_workers=cfg['data_handling']['num_workers'],
     )
+    gen_loader = DataLoader(gen_dataset,
+                            batch_size=cfg['data_handling']['batch_size'],
+                            shuffle=False,
+                            # num_workers=cfg['data_handling']['num_workers'],
+    )
 
     # Print dataset information
     if verbose:
         print(f"\nTraining dataset: {len(train_dataset)} samples")
         print(f"Validation dataset: {len(val_dataset)} samples")
+        print(f"Generation dataset: {len(gen_dataset)} samples\n")
         print(f"Batch size: {cfg['data_handling']['batch_size']}")
         print(f"Number of workers: {cfg['data_handling']['num_workers']}\n")
     
     # Return the dataloaders
-    return train_loader, val_loader
+    return train_loader, val_loader, gen_loader
 
 def get_model(cfg):
     '''

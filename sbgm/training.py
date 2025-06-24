@@ -1,18 +1,19 @@
 import os, torch
 import copy
 import pickle
+import tqdm
 
 import torch.nn as nn
 # import matplotlib.pyplot as plt
 
 from torch.cuda.amp import autocast, GradScaler
-from tqdm.auto import tqdm
 
 from sbgm.special_transforms import build_back_transforms
 from sbgm.utils import *
 from sbgm.data_modules import *
-from sbgm.score_unet import loss_fn
-from sbgm.score_sampling import *
+from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
+from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler
+from sbgm.training_utils import get_model_string, get_cmaps, get_units
 
 '''
     ToDo:
@@ -33,6 +34,7 @@ class TrainingPipeline_general:
                  model,
                  loss_fn,
                  marginal_prob_std_fn,
+                 diffusion_coeff_fn,
                  optimizer,
                  device,
                  lr_scheduler,
@@ -55,6 +57,7 @@ class TrainingPipeline_general:
         self.model = model
         self.loss_fn = loss_fn
         self.marginal_prob_std_fn = marginal_prob_std_fn
+        self.diffusion_coeff_fn = diffusion_coeff_fn
         self.optimizer = optimizer
 
         self.lr_scheduler = lr_scheduler
@@ -74,7 +77,7 @@ class TrainingPipeline_general:
 
         # Set device
         if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = device
 
@@ -96,6 +99,38 @@ class TrainingPipeline_general:
             for param in self.ema_model.parameters():
                 param.detach_()
 
+        # Set up checkpoint directory, name and path
+        self.checkpoint_dir = cfg['paths']['checkpoint_dir']
+        self.checkpoint_name = cfg['paths']['checkpoint_name']
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, self.checkpoint_name)
+
+        # Create the checkpoint directory if it does not exist
+        if not os.path.exists(self.checkpoint_dir):
+            os.makedirs(self.checkpoint_dir)
+            print(f"→ Checkpoint directory created at {self.checkpoint_dir}")
+        else:
+            print(f"→ Checkpoint directory already exists at {self.checkpoint_dir}")
+
+        # Set the model string based on the configuration
+        self.model_string = get_model_string(cfg)
+
+        # Set path to figures, samples, losses
+        self.path_samples = cfg['paths']['path_save'] + 'samples' + f'/Samples' + '__' + self.model_string
+        self.path_losses = cfg['paths']['path_save'] + '/losses'
+        self.path_figures = self.path_samples + '/Figures/'
+
+        # Create the directories if they do not exist
+        if not os.path.exists(self.path_samples):
+            os.makedirs(self.path_samples)
+            print(f"→ Samples directory created at {self.path_samples}")
+        if not os.path.exists(self.path_losses):
+            os.makedirs(self.path_losses)
+            print(f"→ Losses directory created at {self.path_losses}")
+        if not os.path.exists(self.path_figures):
+            os.makedirs(self.path_figures)
+            print(f"→ Figures directory created at {self.path_figures}")
+
+
     def xavier_init_weights(self, m):
         '''
             Xavier weight initialization.
@@ -108,7 +143,7 @@ class TrainingPipeline_general:
             # Initialize weights with Xavier uniform
             nn.init.xavier_uniform_(m.weight)
             # If model has bias, initialize with 0.01 constant
-            if torch.is_tensor(m.bias):
+            if m.bias is not None and torch.is_tensor(m.bias):
                 m.bias.data.fill_(0.01)
 
     def load_checkpoint(self,
@@ -242,10 +277,10 @@ class TrainingPipeline_general:
     def train(self,
               train_dataloader,
               val_dataloader,
+              gen_dataloader,
               cfg,
               epochs=1,
               verbose=True,
-              PLOT_FIRST=False,
               use_mixed_precision=False
               ):
         '''
@@ -265,6 +300,8 @@ class TrainingPipeline_general:
         val_losses = []
 
         # set best loss to infinity
+        train_loss = float('inf')
+        val_loss = float('inf')
         best_loss = float('inf')
 
         print('\n\n\nStarting training...\n\n\n')
@@ -282,9 +319,6 @@ class TrainingPipeline_general:
                                             epochs=epochs,
                                             current_epoch=epoch,
                                             verbose=verbose,
-                                            PLOT_FIRST=PLOT_FIRST,
-                                            SAVE_PATH=SAVE_PATH,
-                                            SAVE_NAME=SAVE_NAME,
                                             use_mixed_precision=use_mixed_precision)
 
             # Append training loss to list
@@ -298,25 +332,35 @@ class TrainingPipeline_general:
             if val_loss < best_loss:
                 best_loss = val_loss
                 # Save the model
-                self.save_model(dirname=checkpoint_dir, filename=checkpoint_name)
+                self.save_model(dirname=self.checkpoint_dir, filename=self.checkpoint_name)
                 print(f"→ Best model saved with validation loss: {best_loss:.4f} at epoch {epoch}.")
-                print(f"→ Checkpoint saved to {os.path.join(checkpoint_dir, checkpoint_name)}\n\n")
+                print(f"→ Checkpoint saved to {os.path.join(self.checkpoint_dir, self.checkpoint_name)}\n\n")
 
 
             # Pickle dump the losses
             losses = {
                 'train_losses': train_losses,
-                'val_losses': val_losses if val_dataloader is not None else None
+                'val_losses': val_losses
             }
-            with open(os.path.join(SAVE_PATH, 'losses.pkl'), 'wb') as f:
+            with open(os.path.join(self.path_losses, 'losses' + f'_{self.model_string}.pkl'), 'wb') as f:
                 pickle.dump(losses, f)
+            
+            if cfg['visualization']['create_figs'] and cfg['visualization']['plot_losses']:
+                # Plot the losses
+                self.plot_losses(train_losses,
+                                 val_losses=val_losses,
+                                 save_path=self.path_figures,
+                                 save_name=f'losses_plot_{self.model_string}.png',
+                                 show_plot=cfg['visualization']['show_figs'])
 
             # Generate and save samples, if create_figs is True
             if cfg['visualization']['create_figs'] and cfg['data_handling']['n_gen_samples'] > 0:
-                self.generate_and_save_samples(cfg, epoch)
+                self.generate_and_plot_samples(gen_dataloader,
+                                               cfg=cfg,
+                                               epoch=epoch)
 
 
-        return train_loss, val_loss if val_dataloader is not None else None
+        return train_loss, val_loss
 
     def validate_batches(self,
                     dataloader,
@@ -383,59 +427,136 @@ class TrainingPipeline_general:
 
         return avg_loss
     
-    def generate_and_save_samples(self,
+    def generate_and_plot_samples(self,
+                            gen_dataloader,
                             cfg,
                             epoch,
-                            samples
                           ):
         
-        # Set path to figures, samples, losses
-        path_samples = cfg['paths']['path_save'] + 'samples' + f'/Samples' + '__' + save_str
-        path_losses = cfg['paths']['path_save'] + '/losses'
-        path_figures = path_samples + '/Figures/'
-        
-        if not os.path.exists(path_samples):
-            os.makedirs(path_samples)
-        if not os.path.exists(path_losses):
-            os.makedirs(path_losses)
-        if not os.path.exists(path_figures):
-            os.makedirs(path_figures)
-
-        name_samples = 'Generated_samples' + '__' + 'epoch' + '_'
-        name_final_samples = f'Final_generated_sample'
-        name_losses = f'Training_losses'
-
         # Load the model from checkpoint_dir with name checkpoint_name
-        best_model_path = os.path.join(checkpoint_dir, checkpoint_name)
-        best_model_state = torch.load(best_model_path, map_location=self.device)['network_params']
+        best_model_state = torch.load(self.checkpoint_path, map_location=self.device)['network_params']
         self.model.load_state_dict(best_model_state)
         # Set model to evaluation mode (set back to training mode after sampling)
         self.model.eval()
 
-        # Setup progress bar
-        pbar = tqdm.tqdm(range(cfg['data_handling']['n_gen_samples']),
-                         desc=f"Generating samples for epoch {epoch}",
-                         unit="sample")
+        # Set up sampler 
+        if cfg['sampler']['sampler_type'] == 'pc_sampler':
+            sampler = pc_sampler 
+        elif cfg['sampler']['sampler_type'] == 'Euler_Maruyama_sampler':
+            sampler = Euler_Maruyama_sampler
+        elif cfg['sampler']['sampler_type'] == 'ode_sampler':
+            sampler = ode_sampler
+        else:
+            raise ValueError(f"Sampler type {cfg['sampler']['sampler_type']} not recognized. Please choose from 'pc_sampler', 'Euler_Maruyama_sampler', or 'ode_sampler'.")
         
-        # Iterate through the number of samples to generate
-        for i, samples in enumerate(pbar):
-            # Generate samples
-            generated_samples = generate_samples(self.model,
-                                                 cfg['data_handling']['n_gen_samples'],
-                                                 cfg['data_handling']['batch_size'],
-                                                 cfg['data_handling']['sample_size'],
-                                                 self.marginal_prob_std_fn,
-                                                 device=self.device,
-                                                 cfg=cfg)
+        # Set up back transforms for plotting'
+        back_trans = build_back_transforms(
+                    hr_var=cfg['highres']['var'],
+                    hr_scaling_method=cfg['highres']['scaling_method'],
+                    hr_scaling_params=cfg['highres']['scaling_params'],
+                    lr_vars=cfg['lowres']['condition_variables'],
+                    lr_scaling_methods=cfg['lowres']['scaling_methods'],
+                    lr_scaling_params=cfg['lowres']['scaling_params'],
+                )
 
-            # Save the generated samples
-            save_samples(generated_samples, path_samples, name_samples + str(i + 1) + '.pkl')
+        # Setup units and cmaps
+        hr_unit, lr_units = get_units(cfg)
+        hr_cmap_name, lr_cmap_dict = get_cmaps(cfg)
+
+        p_bar = tqdm.tqdm(gen_dataloader, desc=f"Generating samples for epoch {epoch}", unit="batch") # type: ignore
+        # Iterate through batches in dataloader
+        for idx, samples in enumerate(p_bar):
+            # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
+            # Extract samples
+            x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
+
+            generated_samples = sampler(
+                score_model = self.model,
+                marginal_prob_std = self.marginal_prob_std_fn,
+                diffusion_coeff = self.diffusion_coeff_fn,
+                batch_size= cfg['data_handling']['n_gen_samples'],
+                num_steps = cfg['sampler']['n_timesteps'],
+                device = self.device,
+                img_size = cfg['highres']['data_size'][0],
+                y = seasons_gen,
+                cond_img= cond_images_gen,
+                lsm_cond = lsm_gen,
+                topo_cond = topo_gen,
+            )
+            generated_samples = generated_samples.squeeze().detach().cpu()
 
 
+            # Plot generated and original samples
+            if cfg['visualization']['create_figs']:
+                fig, axs = plot_samples_and_generated(
+                    samples=samples,
+                    generated=generated_samples,
+                    hr_model=cfg['highres']['model'],
+                    hr_units=hr_unit,
+                    lr_model=cfg['lowres']['model'],
+                    lr_units=lr_units,
+                    var=cfg['highres']['var'],
+                    scaling=cfg['transforms']['scaling'],
+                    show_ocean=cfg['visualization']['show_ocean'],
+                    transform_back_bf_plot=cfg['visualization']['transform_back_bf_plot'],
+                    back_transforms=back_trans,
+                    hr_cmap=cfg['highres']['cmap_name'],
+                    lr_cmap_dict=cfg['lowres']['cmap_dict'],
+                )
+
+                if cfg['visualization']['save_figs']:
+                    # Save the figure
+                    fig.savefig(os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png'), dpi=300, bbox_inches='tight')
+                    print(f"→ Figure saved to {os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png')}")
+
+                if cfg['visualization']['show_figs']:
+                    # Show the figure
+                    plt.show()
+                else:
+                    # Close the figure
+                    plt.close(fig)
+                    
+
+        # Set model back to training mode
+        self.model.train()
+
+    def plot_losses(self,
+                    train_losses,
+                    val_losses=None,
+                    save_path=None,
+                    save_name='losses_plot.png',
+                    show_plot=False):
+        '''
+            Plot the training and validation losses.
+            Args:
+                train_losses: List of training losses.
+                val_losses: List of validation losses.
+                save_path: Path to save the plot.
+                save_name: Name of the plot file.
+                show_plot: Boolean to show the plot.
+        '''
+        # Plot the losses
+        fig, ax = plt.subplots()
+        ax.plot(train_losses, label='Training Loss', color='blue')
+        if val_losses is not None:
+            ax.plot(val_losses, label='Validation Loss', color='orange')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.set_title('Training and Validation Losses')
+        ax.legend()
+
+        # Show the plot
+        if show_plot:
+            plt.show()
+            
+        # Save the plot
+        if save_path is not None:
+            fig.savefig(os.path.join(save_path, save_name), dpi=300, bbox_inches='tight')
+            print(f"→ Losses plot saved to {os.path.join(save_path, save_name)}")
+        
+        plt.close(fig)
 
 
 
 
         
-
-

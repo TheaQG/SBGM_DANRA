@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from sbgm.training_utils import get_units, get_cmaps, get_model_string, get_model, get_optimizer, get_dataloader, get_scheduler
 from sbgm.utils import *
 from sbgm.training import TrainingPipeline_general
-from sbgm.score_unet import marginal_prob_std_fn, loss_fn
+from sbgm.score_unet import marginal_prob_std_fn, loss_fn, diffusion_coeff_fn
 
 def train_main(cfg):
     """
@@ -29,7 +29,6 @@ def train_main(cfg):
     # Set path to figures, samples, losses
     save_str = get_model_string(cfg)
     path_samples = cfg['paths']['path_save'] + 'samples' + f'/Samples' + '__' + save_str
-    path_losses = cfg['paths']['path_save'] + '/losses'
     path_figures = path_samples + '/Figures/'
 
     # Set device
@@ -45,7 +44,7 @@ def train_main(cfg):
         print("▸ Using CPU for training.")
 
     # Load data
-    train_dataloader, val_dataloader = get_dataloader(cfg.data)
+    train_dataloader, val_dataloader, gen_dataloader = get_dataloader(cfg)
 
 
     # Examine sample from train dataloader (sample is full batch)
@@ -58,24 +57,29 @@ def train_main(cfg):
             print(f'{key}: {value}')
     print('\n\n')
 
-    fig, axs = plot_sample(sample,
-                    hr_model = cfg['highres']['model'],
-                    hr_units = hr_unit,
-                    lr_model = cfg['lowres']['model'],
-                    lr_units = lr_units,
-                    var = cfg['highres']['variable'],
-                    show_ocean = cfg['visualization']['show_ocean'],
-                    hr_cmap = hr_cmap_name,
-                    lr_cmap_dict = lr_cmap_dict,
-                    extra_keys = ['topo', 'lsm', 'sdf'],
-                    extra_cmap_dict = extra_cmap_dict
-                    )
-    # Save the figure
-    SAVE_NAME = 'Initial_sample_plot.png'
-    fig.savefig(os.path.join(path_samples, SAVE_NAME), dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"▸ Saved initial sample plot to {path_samples}/{SAVE_NAME}")
-    # Set PLOT_FIRST to False to avoid plotting every batch
+    if cfg['visualization']['plot_initial_sample']:
+        fig, axs = plot_sample(sample,
+                        hr_model = cfg['highres']['model'],
+                        hr_units = hr_unit,
+                        lr_model = cfg['lowres']['model'],
+                        lr_units = lr_units,
+                        var = cfg['highres']['variable'],
+                        show_ocean = cfg['visualization']['show_ocean'],
+                        hr_cmap = hr_cmap_name,
+                        lr_cmap_dict = lr_cmap_dict,
+                        extra_keys = ['topo', 'lsm', 'sdf'],
+                        extra_cmap_dict = extra_cmap_dict
+                        )
+        if cfg['visualization']['show_figs']:
+            plt.show()
+        else:
+            plt.close(fig)
+        # Save the figure
+        SAVE_NAME = 'Initial_sample_plot.png'
+        fig.savefig(path_figures + SAVE_NAME, bbox_inches='tight', dpi=300)
+        
+        print(f"▸ Saved initial sample plot to {path_figures}/{SAVE_NAME}")
+    
     
     #Setup checkpoint path
     checkpoint_dir = os.path.join(cfg['paths']['path_save'], cfg['paths']['checkpoint_dir'])
@@ -85,10 +89,9 @@ def train_main(cfg):
     checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
     
     # Define the seed for reproducibility, and set seed for torch, numpy and random
-    seed = 42
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    np.random.seed(seed)
+    torch.manual_seed(cfg['training']['seed'])
+    torch.cuda.manual_seed(cfg['training']['seed'])
+    np.random.seed(cfg['training']['seed'])
 
     # Set torch to deterministic mode, meaning that the same input will always produce the same output
     torch.backends.cudnn.deterministic = False
@@ -114,6 +117,7 @@ def train_main(cfg):
     pipeline = TrainingPipeline_general(model=model,
                                         loss_fn=loss_fn,
                                         marginal_prob_std_fn=marginal_prob_std_fn,
+                                        diffusion_coeff_fn=diffusion_coeff_fn,
                                         optimizer=optimizer,
                                         device=cfg['training']['device'],
                                         lr_scheduler=scheduler,
@@ -146,32 +150,21 @@ def train_main(cfg):
         print(f"▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
         print(f"▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
 
+    # Perform training
+    print("▸ Starting training...")
+    pipeline.train(train_dataloader,
+                   val_dataloader,
+                   gen_dataloader,
+                   cfg,
+                   epochs=cfg['training']['epochs'],
+                   verbose=cfg['training']['verbose'],
+                   use_mixed_precision= cfg['training']['use_mixed_precision'],
+    )
+    print("▸ Training completed, model saved.")
 
 
 
 
-
-
-
-"""
-    Write everything more modular:
-        - get_dataloader (to get training, validation and possibly test dataloaders)
-        - get_model (to get the model in the configuration wanted)
-        - get_optimizer (to get the optimizer)
-        - get_loss (to get the loss function)
-        - get_scheduler (to get the learning rate scheduler)
-        - train_model (to train the model)
-        - evaluate_model (to evaluate the model)
-        - save_model (to save the model)
-        - load_model (to load the model)
-        - plot_results (to plot the results)
-        
-
-"""
-
-
-
-################################################################################################################################
 
 
 

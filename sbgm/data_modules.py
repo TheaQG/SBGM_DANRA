@@ -12,6 +12,7 @@ import multiprocessing
 import numpy as np
 import torch.nn.functional as F
 
+from typing import Optional, List, Tuple
 from torch.utils.data import Dataset
 from torchvision import transforms
 from scipy.ndimage import distance_transform_edt as distance
@@ -283,7 +284,7 @@ def list_all_keys(zgroup):
     for key in zgroup.keys():
         all_keys.append(key)
         member = zgroup[key]
-        if isinstance(member, zarr.hierarchy.Group):
+        if isinstance(member, zarr.Group):
             sub_keys = list_all_keys(member)
             all_keys.extend([f"{key}/{sub}" for sub in sub_keys])
     return all_keys
@@ -315,14 +316,14 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 lr_model:str = 'ERA5',              # Model name (e.g. 'DANRA', 'ERA5')
                 lr_scaling_methods:list = ['zscore'], # Scaling methods for low resolution conditions
                 lr_scaling_params:list = [{'glob_mean':8.69251, 'glob_std':6.192434}], # Scaling parameters for low resolution conditions
-                lr_cond_dirs_zarr:dict = None,      # Path to directories containing conditional data (in format dict({'condition1':dir1, 'condition2':dir2}))
+                lr_cond_dirs_zarr:Optional[dict] = None,      # Path to directories containing conditional data (in format dict({'condition1':dir1, 'condition2':dir2}))
                 # NEW: LR conditioning area size (if cropping is desired)
-                lr_data_size: tuple = None,         # Size of low resolution data (2D image, tuple), e.g. (589,789) for full LR domain
+                lr_data_size:Optional[tuple] = None,         # Size of low resolution data (2D image, tuple), e.g. (589,789) for full LR domain
                 # Optionally a separate cutout domain for LR conditions
-                lr_cutout_domains: list = None,     # Domains to use for cutouts for LR conditions
+                lr_cutout_domains:Optional[list] = None,     # Domains to use for cutouts for LR conditions
                 resize_factor: int = 1,             # Resize factor for input conditions (1 for full HR size, 2 for half HR size, etc. Mainly used for testing on smaller data)
                 # Geo variables (stationary) and their full domain arrays
-                geo_variables:list = ['lsm', 'topo'], # Geo variables to load
+                geo_variables:Optional[list] = ['lsm', 'topo'], # Geo variables to load
                 lsm_full_domain = None,             # Land-sea mask of full domain
                 topo_full_domain = None,            # Topography of full domain
                 # Other dataset parameters
@@ -330,13 +331,13 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 cache_size:int = 365,               # Number of samples to cache
                 shuffle:bool = False,               # Whether to shuffle data (or load sequentially)
                 cutouts:bool = False,               # Whether to use cutouts 
-                cutout_domains:list = None,         # Domains to use for cutouts
-                n_samples_w_cutouts:int = None,     # Number of samples to load with cutouts (can be greater than n_samples)
+                cutout_domains:Optional[list] = None,         # Domains to use for cutouts
+                n_samples_w_cutouts:Optional[int] = None,     # Number of samples to load with cutouts (can be greater than n_samples)
                 sdf_weighted_loss:bool = False,     # Whether to use weighted loss for SDF
                 scale:bool = True,                  # Whether to scale data to new interval
                 save_original:bool = False,         # Whether to save original data
                 conditional_seasons:bool = False,   # Whether to use seasonal conditional sampling
-                n_classes:int = None                # Number of classes for conditional sampling
+                n_classes:Optional[int] = None                # Number of classes for conditional sampling
                 ):                          
         '''
         Initializes the dataset.
@@ -412,7 +413,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 self.lr_cond_files_dict[cond] = list(group.keys())
             print('\n\n')
         else:
-            raise ValueError(f'LR condition {cond} not found in dict')
+            raise ValueError('LR condition directories (lr_cond_dirs_zarr) must be provided as a dictionary.')
 
         # HR target variable parameters
         self.hr_variable = hr_variable
@@ -540,6 +541,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # Only if sampling with geo variables is used
         if self.geo_variables is not None:
             if self.scale:
+                if self.topo_full_domain is None:
+                    raise ValueError("topo_full_domain must be provided if 'topo' is in geo_variables")
                 self.geo_transform_topo = transforms.Compose([
                     transforms.Lambda(lambda x: np.ascontiguousarray(x)), # To make sure np.flipud is not messing up the tensor
                     transforms.ToTensor(),
@@ -565,7 +568,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         '''
         return len(self.common_dates)
 
-    def _addToCache(self, idx:int, data:torch.Tensor):
+    def _addToCache(self, idx:int, data):
         '''
             Add item to cache. 
             If cache is full, remove random item from cache.
@@ -658,8 +661,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 print(e)
                 data = None
             
-            # Crop LR data using lr_point if cutouts are enabled
-            if self.cutouts and data is not None:
+            # Crop LR data using lr_point if cutouts are enabled and lr_point is not None
+            if self.cutouts and data is not None and lr_point is not None:
                 # lr_point is in format [x1, x2, y1, y2] - note: for slicing, use [y1:y2, x1:x2]
                 data = data[lr_point[0]:lr_point[1], lr_point[2]:lr_point[3]]
             # print(f"Data shape for {cond}: {data.shape if data is not None else None}")
@@ -680,27 +683,28 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             # print(self.zarr_group_img[hr_file_name].tree())
             if self.hr_variable == 'temp':
                 try:
-                    hr = self.zarr_group_img[hr_file_name]['t'][()][0,0,:,:] - 273.15
+                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['t'][()][0,0,:,:], dtype=torch.float32) - 273.15
                 except:
-                    hr = self.zarr_group_img[hr_file_name]['data'][()][:,:] - 273.15
+                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32) - 273.15
             elif self.hr_variable == 'prcp':
                 try:
-                    hr = self.zarr_group_img[hr_file_name]['tp'][()][0,0,:,:]
+                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['tp'][()][0,0,:,:], dtype=torch.float32)
                 except:
-                    hr = self.zarr_group_img[hr_file_name]['data'][()][:,:]
-                hr[hr <= 0] = 1e-10
+                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32)
+                # Set all non-positive values to a small positive value (multiplied by a random number for robustness)
+                hr[hr <= 0] = 1e-10 * np.random.rand()
             else:
                 # Add custom logic for other HR variables when needed
-                hr = self.zarr_group_img[hr_file_name]['data'][()]
+                hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()], dtype=torch.float32)
         except Exception as e:
             print(f'Error loading {self.hr_variable} data for {hr_file_name}')
             print(e)
             hr = None
 
-        if self.cutouts and (hr is not None):
+        if self.cutouts and (hr is not None) and (hr_point is not None):
             hr = hr[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
         if self.save_original and (hr is not None):
-            sample_dict[f"{self.hr_variable}_hr_original"] = hr.copy()
+            sample_dict[f"{self.hr_variable}_hr_original"] = hr.clone()
         if hr is not None:
             hr = self.hr_transform(hr)
         sample_dict[self.hr_variable + "_hr"] = hr
@@ -708,7 +712,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # Process a separate HR mask for geo variables (if 'lsm' is needed for HR SDF and masking HR images)
         if self.geo_variables is not None and 'lsm' in self.geo_variables and self.lsm_full_domain is not None:
             lsm_hr = self.lsm_full_domain
-            if self.cutouts and lsm_hr is not None:
+            if self.cutouts and lsm_hr is not None and hr_point is not None:
                 lsm_hr = lsm_hr[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
             # Ensure the mask is contiguous and transform
             lsm_hr = np.ascontiguousarray(lsm_hr)
@@ -742,11 +746,13 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     geo_transform = None
                 if geo_data is not None and self.cutouts:
                     # For geo data, if an LR-specific size and domain are provided, use lr_point
-                    if self.lr_data_size is not None and self.lr_cutout_domains is not None:
+                    if self.lr_data_size is not None and self.lr_cutout_domains is not None and lr_point is not None:
                         geo_data = geo_data[lr_point[0]:lr_point[1], lr_point[2]:lr_point[3]]
                     else:
-                        geo_data = geo_data[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
-                if geo_data is not None:
+                        if hr_point is not None:
+                            geo_data = geo_data[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
+                
+                if geo_data is not None and geo_transform is not None:
                     geo_data = geo_transform(geo_data)
                 sample_dict[geo] = geo_data
 
@@ -768,6 +774,11 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     classifier = dateObj.determine_day()
                 else:
                     raise ValueError('n_classes must be 4, 12 or 365')
+            else:
+                print("Warning: n_classes is not provided, using month as classifier")
+                # If n_classes is not provided, use the date as a classifier
+                dateObj = DateFromFile(hr_file_name)
+                classifier = dateObj.determine_month()  # Default to daily condition if n_classes is not specified
             # Convert classifier to tensor
             classifier = torch.tensor(classifier, dtype=torch.long)
             sample_dict['classifier'] = classifier
