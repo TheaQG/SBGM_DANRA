@@ -270,17 +270,17 @@ def get_dataloader(cfg, verbose=True):
                             )
     # Setup dataloaders
     train_loader = DataLoader(train_dataset,
-                              batch_size=cfg['data_handling']['batch_size'],
+                              batch_size=cfg['training']['batch_size'],
                               shuffle=True,
                             # num_workers=cfg['data_handling']['num_workers'],
     )
     val_loader = DataLoader(val_dataset,
-                            batch_size=cfg['data_handling']['batch_size'],
+                            batch_size=cfg['training']['batch_size'],
                             shuffle=False,
                             # num_workers=cfg['data_handling']['num_workers'],
     )
     gen_loader = DataLoader(gen_dataset,
-                            batch_size=cfg['data_handling']['batch_size'],
+                            batch_size=cfg['training']['batch_size'],
                             shuffle=False,
                             # num_workers=cfg['data_handling']['num_workers'],
     )
@@ -290,7 +290,7 @@ def get_dataloader(cfg, verbose=True):
         print(f"\nTraining dataset: {len(train_dataset)} samples")
         print(f"Validation dataset: {len(val_dataset)} samples")
         print(f"Generation dataset: {len(gen_dataset)} samples\n")
-        print(f"Batch size: {cfg['data_handling']['batch_size']}")
+        print(f"Batch size: {cfg['training']['batch_size']}")
         print(f"Number of workers: {cfg['data_handling']['num_workers']}\n")
     
     # Return the dataloaders

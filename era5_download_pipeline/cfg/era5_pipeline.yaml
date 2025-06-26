@@ -1,0 +1,31 @@
+# cfg/era5_pipeline.yaml
+area: [60, -80, 40, 40]        # N,W,S,E  (edit!)
+dataset: reanalysis-era5-single-levels
+format: netcdf
+variables:
+  potential_evaporation:
+    short: pev
+    daily_stat: daysum
+  convective_available_potential_energy:
+    short: cape
+    daily_stat: daymax
+  vertical_integral_of_northward_water_vapour_flux:
+    short: wvf_north
+    daily_stat: daymean
+  vertical_integral_of_eastward_water_vapour_flux:
+    short: wvf_east
+    daily_stat: daymean
+  mean_sea_level_pressure:
+    short: msl
+    daily_stat: daymean
+years: [1991, 2020]            # inclusive range
+max_workeres: 2
+tmp_dir: /tmp/era5_downloads
+grid_file: /project/.../DANRA_grid.txt
+weights_file: /project/.../ERA5_to_DANRA_bil_weights.nc
+lumi:
+  user:  your_lumi_username
+  host:  lumi.csc.fi
+  raw_dir:   /scratch/project_xxx/raw/{var}/
+  daily_dir: /scratch/project_xxx/daily/{var}/        # after daymean
+  npz_dir:   /scratch/project_xxx/npz/{var}/           # final split

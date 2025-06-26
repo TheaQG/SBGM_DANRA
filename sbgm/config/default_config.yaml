@@ -44,7 +44,7 @@ lowres:
       glob_std_log: 5.3563
       buffer_frac: 0.2
   data_size: [128, 128] # Size of the low-res data
-  cutout_domains: None # No cutout for low-res data
+  cutout_domains: !!null # No cutout for low-res data
   resize_factor: 1 # Factor to resize low-res data (used for testing at lower resolutions)
 
 sampler:
@@ -113,7 +113,7 @@ training:
     # T_max: 100 # Maximum number of iterations for the scheduler
     # eta_min: 0.000001 # Minimum learning rate for the scheduler
   weight_init: true # Whether to initialize weights
-  custom_weight_initializer: None # Custom weight initializer (if any)
+  custom_weight_initializer: !!null # Custom weight initializer (if any)
   with_ema: false # Whether to use Exponential Moving Average
   load_ema: false # Whether to load EMA weights
   ema_decay: 0.9999 # Decay rate for EMA

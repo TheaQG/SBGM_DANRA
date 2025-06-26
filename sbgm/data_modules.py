@@ -255,6 +255,16 @@ def make_tensor_resize(target_size):
         ).squeeze(0)        # Back to [C, H, W]
     )
 
+class SafeToTensor:
+    def __call__(self, x):
+
+        if isinstance(x, np.ndarray):
+            return transforms.ToTensor()(x)
+        elif isinstance(x, torch.Tensor):
+            return x
+        else:
+            raise TypeError(f"Unexpected input type: {type(x)}. Expected np.ndarray or torch.Tensor.")
+
 class ResizeTensor:
     """
         Create a transform that resizes a tensor to the target size.
@@ -486,7 +496,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             for cond, method, params in zip(self.lr_conditions, self.lr_scaling_methods, self.lr_scaling_params):
                 # Base transform: to tensor and resize
                 transform_list = [
-                    transforms.ToTensor(),
+                    SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced)
                 ]
                 # Use per-variable buffer_frac
@@ -507,14 +517,14 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 self.transforms_dict[cond] = transforms.Compose(transform_list) 
         else:
             self.transforms_dict = {cond: transforms.Compose([
-                transforms.ToTensor(),
+                SafeToTensor(),
                 ResizeTensor(self.lr_size_reduced)
             ]) for cond in self.lr_conditions}
 
         # Build transform for the HR target variable similarly
         if self.scale:
             hr_transform_list = [
-                transforms.ToTensor(),
+                SafeToTensor(),
                 ResizeTensor(self.hr_size_reduced)
             ]
             hr_buff = self.hr_scaling_params.get('buffer_frac', 0.5)
@@ -533,7 +543,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             self.hr_transform = transforms.Compose(hr_transform_list)
         else:
             self.hr_transform = transforms.Compose([
-                transforms.ToTensor(),
+                SafeToTensor(),
                 ResizeTensor(self.hr_size_reduced)
             ])
 
@@ -545,19 +555,19 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     raise ValueError("topo_full_domain must be provided if 'topo' is in geo_variables")
                 self.geo_transform_topo = transforms.Compose([
                     transforms.Lambda(lambda x: np.ascontiguousarray(x)), # To make sure np.flipud is not messing up the tensor
-                    transforms.ToTensor(),
+                    SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced),
                     Scale(0, 1, self.topo_full_domain.min(), self.topo_full_domain.max())
                 ])
                 self.geo_transform_lsm = transforms.Compose([
                     transforms.Lambda(lambda x: np.ascontiguousarray(x)), # To make sure np.flipud is not messing up the tensor
-                    transforms.ToTensor(),
+                    SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced),
                 ])
             else:
                 self.geo_transform_topo = transforms.Compose([
                     transforms.Lambda(lambda x: np.ascontiguousarray(x)), # To make sure np.flipud is not messing up the tensor
-                    transforms.ToTensor(),
+                    SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced)
                 ])
                 self.geo_transform_lsm = self.geo_transform_topo
@@ -718,7 +728,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             lsm_hr = np.ascontiguousarray(lsm_hr)
             # Separate geo transform, with resize to HR size
             geo_transform_lsm_hr = transforms.Compose([
-                transforms.ToTensor(),
+                SafeToTensor(),
                 ResizeTensor(self.hr_size_reduced)
             ])
             lsm_hr = geo_transform_lsm_hr(lsm_hr)
