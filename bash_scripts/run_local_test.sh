@@ -2,18 +2,13 @@
 
 # === Activate virtual env if needed ===
 # source /Users/au728490/opt/anaconda3/envs/torch
+source bash_scripts/env_setup.sh
 
-# === Set absolute paths ===
-export ROOT_DIR="Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD"
-export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
-
-# === Point to small dataset ===
-export DATA_DIR="Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small"
-
-# === Define output/save locations ===
-export SAMPLE_DIR="$ROOT_DIR/models_and_samples/generated_samples"
-# export FIGURE_DIR="$ROOT_DIR/models_and_samples/figures"
-export CKPT_DIR="$ROOT_DIR/models_and_samples/trained_models"
+# === Print the directories to verify ===
+echo "ROOT_DIR: $ROOT_DIR"
+echo "DATA_DIR: $DATA_DIR"
+echo "SAMPLE_DIR: $SAMPLE_DIR"
+echo "CKPT_DIR: $CKPT_DIR"
 
 # === Launch the training ===
 python -m sbgm.cli.main_app train

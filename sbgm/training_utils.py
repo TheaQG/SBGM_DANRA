@@ -12,10 +12,9 @@ from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
-from sbgm.score_unet import ScoreNet, Encoder, Decoder, DecoderBlock, marginal_prob_std_fn, diffusion_coeff_fn
+from sbgm.score_unet import ScoreNet, Encoder, Decoder, marginal_prob_std_fn
 from sbgm.score_sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
-from sbgm.training import TrainingPipeline_general
-from sbgm.utils import build_data_path
+from sbgm.utils import build_data_path, get_units, get_cmaps, get_model_string
 from sbgm.special_transforms import build_back_transforms
 # from sbgm.evaluation.evaluation import evaluate_model
 
@@ -65,13 +64,13 @@ def get_dataloader(cfg, verbose=True):
             print(f"\tLow-resolution data size after resize: {lr_data_size_use}")
 
     # Set full domain size 
-    full_domain_dims = tuple(cfg['highres']['full_domain_size']) if cfg['highres']['full_domain_size'] is not None else None
+    full_domain_dims = tuple(cfg['highres']['full_domain_dims']) if cfg['highres']['full_domain_dims'] is not None else None
 
 
     # Use helper functions to create the path for the zarr files
     hr_data_dir_train = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'train')
     hr_data_dir_valid = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'val')
-    hr_data_dir_gen = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'gen')
+    hr_data_dir_gen = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'test')
     
     # Loop over lr_vars and create paths for low-resolution data
     lr_cond_dirs_train = {}
@@ -81,7 +80,7 @@ def get_dataloader(cfg, verbose=True):
     for i, cond in enumerate(cfg['lowres']['condition_variables']):
         lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'train')
         lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'val')
-        lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'gen')
+        lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
 
     # # Set scaling and matching 
     # scaling = cfg['transforms']['scaling']
@@ -350,47 +349,6 @@ def get_model(cfg):
     
     return score_model, checkpoint_path, checkpoint_name
 
-def get_model_string(cfg):
-    '''
-        Generate a string representation of the model configuration for saving and logging.
-        Args:
-            cfg (dict): Configuration dictionary containing model settings.
-        Returns:
-            save_str (str): String representation of the model configuration.
-    '''
-    # Set image dimensions vased on onfig (if None, use default values)
-    hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else None
-    if hr_data_size is None:
-        hr_data_size = (128, 128)
-
-    lr_data_size = tuple(cfg['lowres']['data_size']) if cfg['lowres']['data_size'] is not None else None    
-    if lr_data_size is None:
-        lr_data_size_use = hr_data_size
-    else:
-        lr_data_size_use = lr_data_size
-
-    # Check if resize factor is set and print sizes (if verbose)
-    if cfg['lowres']['resize_factor'] > 1:
-        hr_data_size_use = (hr_data_size[0] // cfg['lowres']['resize_factor'], hr_data_size[1] // cfg['lowres']['resize_factor'])
-        lr_data_size_use = (lr_data_size_use[0] // cfg['lowres']['resize_factor'], lr_data_size_use[1] // cfg['lowres']['resize_factor'])
-    else:
-        hr_data_size_use = hr_data_size
-        lr_data_size_use = lr_data_size_use
-
-    # Setup specific names for saving
-    lr_vars_str = '_'.join(cfg['lowres']['condition_variables'])
-
-    save_str = (
-        f"{cfg['experiment']['config_name']}__"
-        f"HR_{cfg['highres']['variable']}_{cfg['highres']['model']}__"
-        f"SIZE_{hr_data_size_use[0]}x{hr_data_size_use[1]}__"
-        f"LR_{lr_vars_str}_{cfg['lowres']['model']}__"
-        f"LOSS_{cfg['training']['loss_type']}__"
-        f"HEADS_{cfg['sampler']['num_heads']}__"
-        f"TIMESTEPS_{cfg['sampler']['n_timesteps']}"
-    )
-
-    return save_str
 
 def get_optimizer(cfg, model):
     '''
@@ -510,65 +468,6 @@ def plot_results(train_losses, val_losses, train_scores, val_scores):
 
     plt.tight_layout()
     plt.show()
-
-
-def get_units(cfg):
-    """
-        Get the specifications for plotting samples during training.
-        Colors, labels, and other parameters are based on the configuration.
-    """
-
-    
-    units = {"temp": r"$^\circ$C",
-             "prcp": "mm",
-             "cape": "J/kg",
-             "nwvf": "m/s",
-             "ewvf": "m/s",
-             "gp200": "hPa",
-             "gp500": "hPa",
-             "gp850": "hPa",
-             "gp1000": "hPa",
-             }
-
-
-    hr_unit = units[cfg['highres']['variable']]
-    lr_units = []
-    for key in cfg['highres']['variables']:
-        if key not in units:
-            raise ValueError(f"Variable '{key}' not found in units dictionary.")
-        else:
-            lr_units.append(units[key])
-
-    return hr_unit, lr_units
-
-
-def get_cmaps(cfg):
-    """
-        Get the colormaps for plotting samples during training.
-        Colormaps are based on the configuration.
-    """
-    cmaps = {"temp": "plasma",
-             "prcp": "inferno",
-             "cape": "viridis",
-             "nwvf": "cividis",
-             "ewvf": "magma",
-             "gp200": "coolwarm",
-             "gp500": "coolwarm",
-             "gp850": "coolwarm",
-             "gp1000": "coolwarm",
-             }
-    
-
-    hr_cmap = cmaps[cfg['highres']['variable']]
-    lr_cmaps = {}
-    for key in cfg['highres']['variables']:
-        if key not in cmaps:
-            raise ValueError(f"Variable '{key}' not found in cmap dictionary.")
-        else:
-            lr_cmaps[key] = cmaps[key]
-
-    return hr_cmap, lr_cmaps
-
 
 
 def setup_logger(log_dir, name="train_log", log_to_stdout=True):

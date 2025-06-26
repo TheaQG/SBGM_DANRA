@@ -38,16 +38,19 @@ def train_main(cfg):
     path_samples = cfg['paths']['path_save'] + 'samples' + f'/Samples' + '__' + save_str
     path_figures = path_samples + '/Figures/'
 
+    # Read device str from cfg
+    device_str = cfg['training']['device']
+
     # Set device
-    if cfg['training']['device'] == 'cuda':
+    if device_str == 'cuda':
         if torch.cuda.is_available():
-            cfg['training']['device'] = torch.device('cuda')
+            device = torch.device('cuda')
             logger.info(f"▸ Using GPU: {torch.cuda.get_device_name(0)}")
         else:
-            cfg['training']['device'] = torch.device('cpu')
+            device = torch.device('cpu')
             logger.info("▸ CUDA is not available, using CPU instead.")
     else:
-        cfg['training']['device'] = torch.device('cpu')
+        device = torch.device('cpu')
         logger.info("▸ Using CPU for training.")
 
     # Load data
@@ -107,7 +110,7 @@ def train_main(cfg):
     
     # Get the model
     model, checkpoint_path, checkpoint_name = get_model(cfg)
-    model = model.to(cfg['training']['device'])
+    model = model.to(device)
 
     # Get the optimizer
     optimizer = get_optimizer(cfg, model)
@@ -126,7 +129,7 @@ def train_main(cfg):
                                         marginal_prob_std_fn=marginal_prob_std_fn,
                                         diffusion_coeff_fn=diffusion_coeff_fn,
                                         optimizer=optimizer,
-                                        device=cfg['training']['device'],
+                                        device=device,
                                         lr_scheduler=scheduler,
                                         cfg=cfg
                                         )

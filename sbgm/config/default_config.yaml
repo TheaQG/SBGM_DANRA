@@ -10,7 +10,6 @@ paths:
   sample_dir: ${env:SAMPLE_DIR} # Directory for saving samples
   specific_fig_name: test__plot_fct # Specific figure name to save
   path_save: ${env:SAMPLE_DIR} # Path to save figures
-  full_domain_dims: [589, 789]
   lsm_path: ${env:DATA_DIR}/data_lsm/truth_fullDomain/lsm_full.npz # Path to land-sea mask data
   topo_path: ${env:DATA_DIR}/data_topo/truth_fullDomain/topo_full.npz # Path to topography data
 
@@ -19,6 +18,7 @@ highres:
   variable: prcp # Variable to process
   data_size: [128, 128] # Size of the data to process
   scaling_method: log_zscore # Method for scaling the data
+  full_domain_dims: [589, 789]
   scaling_params: 
     glob_min: 0.0
     glob_max: 180
@@ -127,12 +127,5 @@ training:
   early_stopping_params:
     patience: 50 # Patience for early stopping
     min_delta: 0.0001 # Minimum delta for early stopping
-  lr_scheduler: ReduceLROnPlateau # Learning rate scheduler to use
-  lr_scheduler_params:
-    factor: 0.5 # Factor by which to reduce the learning rate
-    patience: 5 # Patience for the scheduler
-    threshold: 0.01 # Threshold for the scheduler
-    min_lr: 0.000001 # Minimum learning rate for the scheduler
-
 
 

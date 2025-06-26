@@ -69,6 +69,48 @@ def model_summary(model):
     print(f"Total Params:{total_params}")     
 
 
+def get_model_string(cfg):
+    '''
+        Generate a string representation of the model configuration for saving and logging.
+        Args:
+            cfg (dict): Configuration dictionary containing model settings.
+        Returns:
+            save_str (str): String representation of the model configuration.
+    '''
+    # Set image dimensions vased on onfig (if None, use default values)
+    hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else None
+    if hr_data_size is None:
+        hr_data_size = (128, 128)
+
+    lr_data_size = tuple(cfg['lowres']['data_size']) if cfg['lowres']['data_size'] is not None else None    
+    if lr_data_size is None:
+        lr_data_size_use = hr_data_size
+    else:
+        lr_data_size_use = lr_data_size
+
+    # Check if resize factor is set and print sizes (if verbose)
+    if cfg['lowres']['resize_factor'] > 1:
+        hr_data_size_use = (hr_data_size[0] // cfg['lowres']['resize_factor'], hr_data_size[1] // cfg['lowres']['resize_factor'])
+        lr_data_size_use = (lr_data_size_use[0] // cfg['lowres']['resize_factor'], lr_data_size_use[1] // cfg['lowres']['resize_factor'])
+    else:
+        hr_data_size_use = hr_data_size
+        lr_data_size_use = lr_data_size_use
+
+    # Setup specific names for saving
+    lr_vars_str = '_'.join(cfg['lowres']['condition_variables'])
+
+    save_str = (
+        f"{cfg['experiment']['config_name']}__"
+        f"HR_{cfg['highres']['variable']}_{cfg['highres']['model']}__"
+        f"SIZE_{hr_data_size_use[0]}x{hr_data_size_use[1]}__"
+        f"LR_{lr_vars_str}_{cfg['lowres']['model']}__"
+        f"LOSS_{cfg['training']['loss_type']}__"
+        f"HEADS_{cfg['sampler']['num_heads']}__"
+        f"TIMESTEPS_{cfg['sampler']['n_timesteps']}"
+    )
+
+    return save_str
+
 class SimpleLoss(nn.Module):
     def __init__(self):
         super(SimpleLoss, self).__init__()
@@ -517,6 +559,63 @@ def build_data_path(base_path, model, var, full_domain_dims, split, zarr_file=Tr
     return data_path
 
 
+
+def get_units(cfg):
+    """
+        Get the specifications for plotting samples during training.
+        Colors, labels, and other parameters are based on the configuration.
+    """
+
+    
+    units = {"temp": r"$^\circ$C",
+             "prcp": "mm",
+             "cape": "J/kg",
+             "nwvf": "m/s",
+             "ewvf": "m/s",
+             "gp200": "hPa",
+             "gp500": "hPa",
+             "gp850": "hPa",
+             "gp1000": "hPa",
+             }
+
+
+    hr_unit = units[cfg['highres']['variable']]
+    lr_units = []
+    for key in cfg['lowres']['condition_variables']:
+        if key not in units:
+            raise ValueError(f"Variable '{key}' not found in units dictionary.")
+        else:
+            lr_units.append(units[key])
+
+    return hr_unit, lr_units
+
+
+def get_cmaps(cfg):
+    """
+        Get the colormaps for plotting samples during training.
+        Colormaps are based on the configuration.
+    """
+    cmaps = {"temp": "plasma",
+             "prcp": "inferno",
+             "cape": "viridis",
+             "nwvf": "cividis",
+             "ewvf": "magma",
+             "gp200": "coolwarm",
+             "gp500": "coolwarm",
+             "gp850": "coolwarm",
+             "gp1000": "coolwarm",
+             }
+    
+
+    hr_cmap = cmaps[cfg['highres']['variable']]
+    lr_cmaps = {}
+    for key in cfg['lowres']['condition_variables']:
+        if key not in cmaps:
+            raise ValueError(f"Variable '{key}' not found in cmap dictionary.")
+        else:
+            lr_cmaps[key] = cmaps[key]
+
+    return hr_cmap, lr_cmaps
 
 
 def plot_sample(sample,
