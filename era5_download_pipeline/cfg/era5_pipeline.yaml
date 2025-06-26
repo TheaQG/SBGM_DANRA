@@ -19,7 +19,7 @@ variables:
     short: msl
     daily_stat: daymean
 years: [1991, 2020]            # inclusive range
-max_workeres: 2
+max_workers: 2
 tmp_dir: /tmp/era5_downloads
 grid_file: /project/.../DANRA_grid.txt
 weights_file: /project/.../ERA5_to_DANRA_bil_weights.nc
