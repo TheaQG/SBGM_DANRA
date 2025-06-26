@@ -27,14 +27,12 @@ import torch
 import zarr
 import os
 import json
-# import yaml
 
 import netCDF4 as nc
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
 
 
 def model_summary(model):
@@ -1129,6 +1127,10 @@ def plot_samples_and_generated(
 
     fig.tight_layout()
     return fig, axs
+
+
+
+
 
 # def load_config(yaml_file):
 #     """

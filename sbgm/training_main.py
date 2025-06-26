@@ -1,12 +1,14 @@
 # sbgm/training_main.py
 import os
 import torch
+import builtins
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from sbgm.training_utils import get_units, get_cmaps, get_model_string, get_model, get_optimizer, get_dataloader, get_scheduler
-from sbgm.utils import *
+from sbgm.utils import plot_sample
+from sbgm.training_utils import setup_logger
 from sbgm.training import TrainingPipeline_general
 from sbgm.score_unet import marginal_prob_std_fn, loss_fn, diffusion_coeff_fn
 
@@ -18,7 +20,12 @@ def train_main(cfg):
         cfg (dict): Configuration dictionary containing all necessary parameters.
     """
     # Setup logging
-    # setup_logging(cfg.logging)
+    log_dir = os.path.join(cfg["paths"]["checkpoint_dir"], 'logs')
+    logger = setup_logger(log_dir)
+    print = logger.info  # Redirect print to logger
+
+    logger.info("=== Starting SBGM_SD Training Pipeline ===")
+    logger.info(f"Experiment name: {cfg['experiment']['name']}")
 
     # Set units and colormaps
     hr_unit, lr_units = get_units(cfg)
@@ -35,27 +42,27 @@ def train_main(cfg):
     if cfg['training']['device'] == 'cuda':
         if torch.cuda.is_available():
             cfg['training']['device'] = torch.device('cuda')
-            print(f"▸ Using GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"▸ Using GPU: {torch.cuda.get_device_name(0)}")
         else:
             cfg['training']['device'] = torch.device('cpu')
-            print("▸ CUDA is not available, using CPU instead.")
+            logger.info("▸ CUDA is not available, using CPU instead.")
     else:
         cfg['training']['device'] = torch.device('cpu')
-        print("▸ Using CPU for training.")
+        logger.info("▸ Using CPU for training.")
 
     # Load data
     train_dataloader, val_dataloader, gen_dataloader = get_dataloader(cfg)
 
 
     # Examine sample from train dataloader (sample is full batch)
-    print('\n')
+    logger.info('\n')
     sample = train_dataloader.dataset[0]
     for key, value in sample.items():
         try:
-            print(f'{key}: {value.shape}')
+            logger.info(f'{key}: {value.shape}')
         except AttributeError:
-            print(f'{key}: {value}')
-    print('\n\n')
+            logger.info(f'{key}: {value}')
+    logger.info('\n\n')
 
     if cfg['visualization']['plot_initial_sample']:
         fig, axs = plot_sample(sample,
@@ -78,7 +85,7 @@ def train_main(cfg):
         SAVE_NAME = 'Initial_sample_plot.png'
         fig.savefig(path_figures + SAVE_NAME, bbox_inches='tight', dpi=300)
         
-        print(f"▸ Saved initial sample plot to {path_figures}/{SAVE_NAME}")
+        logger.info(f"▸ Saved initial sample plot to {path_figures}/{SAVE_NAME}")
     
     
     #Setup checkpoint path
@@ -109,9 +116,9 @@ def train_main(cfg):
     scheduler = None
     if cfg['training']['scheduler'] is not None:
         scheduler = get_scheduler(cfg, optimizer)
-        print(f"▸ Using learning rate scheduler: {cfg['training']['scheduler']}")
+        logger.info(f"▸ Using learning rate scheduler: {cfg['training']['scheduler']}")
     else:
-        print("▸ No learning rate scheduler specified, using default learning rate.")
+        logger.info("▸ No learning rate scheduler specified, using default learning rate.")
 
     # Define the training pipeline
     pipeline = TrainingPipeline_general(model=model,
@@ -127,31 +134,31 @@ def train_main(cfg):
     
     # Load checkpoint if it exists
     if cfg['training']['load_checkpoint'] and os.path.exists(checkpoint_path):
-        print(f"▸ Loading pretrained weights from checkpoint {checkpoint_path}")
+        logger.info(f"▸ Loading pretrained weights from checkpoint {checkpoint_path}")
 
         pipeline.load_checkpoint(checkpoint_path, load_ema=cfg['training']['load_ema'],)
     else:
-        print(f"▸ No checkpoint found at {checkpoint_path}. Starting training from scratch.")
+        logger.info(f"▸ No checkpoint found at {checkpoint_path}. Starting training from scratch.")
 
     
     # If training on cuda, print device name and empty cache
     if cfg['training']['device'] == 'cuda' and torch.cuda.is_available():
-        print(f"▸ Using GPU: {torch.cuda.get_device_name(0)}")
-        print(f"▸ Model is using {torch.cuda.memory_allocated() / 1e9:.2f} GB of GPU memory.")
-        print(f"▸ Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        logger.info(f"▸ Using GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"▸ Model is using {torch.cuda.memory_allocated() / 1e9:.2f} GB of GPU memory.")
+        logger.info(f"▸ Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
-        print(f"▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-        print(f"▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
-        print(f"▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
+        logger.info(f"▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        logger.info(f"▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
+        logger.info(f"▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
         torch.cuda.empty_cache()
     else:
-        print("▸ Using CPU for training.")
-        print(f"▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-        print(f"▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
-        print(f"▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
+        logger.info("▸ Using CPU for training.")
+        logger.info(f"▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        logger.info(f"▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
+        logger.info(f"▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
 
     # Perform training
-    print("▸ Starting training...")
+    logger.info("▸ Starting training...")
     pipeline.train(train_dataloader,
                    val_dataloader,
                    gen_dataloader,
@@ -160,7 +167,7 @@ def train_main(cfg):
                    verbose=cfg['training']['verbose'],
                    use_mixed_precision= cfg['training']['use_mixed_precision'],
     )
-    print("▸ Training completed, model saved.")
+    logger.info("▸ Training completed, model saved.")
 
 
 

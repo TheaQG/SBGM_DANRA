@@ -118,7 +118,7 @@ training:
   load_ema: false # Whether to load EMA weights
   ema_decay: 0.9999 # Decay rate for EMA
   weight_decay: 0.000001 # Weight decay for regularization
-  epochs: 100 # Number of epochs for training
+  epochs: 2 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
   sdf_weighted_loss: true # Whether to use SDF weighted loss
   optimizer: adam # Optimizer to use for training
