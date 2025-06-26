@@ -1,5 +1,8 @@
 # .gitignore file for the SBGM_DANRA project
 
+# Ignore logs
+.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
