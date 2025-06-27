@@ -1,7 +1,38 @@
 import torch
 import tqdm
+import logging
 
 import numpy as np
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+def guided_score_fn(score_model,
+                    x,
+                    t,
+                    y=None,
+                    cond_img=None,
+                    lsm_cond=None,
+                    topo_cond=None,
+                    scale=2.0,):
+  '''
+    A wrapper function for the score model to include classifier-free guidance.
+    If model is trained without classifier-free guidance, the model will not use this function.
+  '''
+  # Define the null conditional image for classifier-free guidance.
+  null_cond_img = torch.zeros_like(cond_img) if cond_img is not None else None
+  # Define the null conditional lsm and topo for classifier-free guidance.
+  null_lsm_cond = torch.zeros_like(lsm_cond) if lsm_cond is not None else None
+  null_topo_cond = torch.zeros_like(topo_cond) if topo_cond is not None else None
+  null_y = torch.zeros_like(y) - 1 if y is not None else None
+
+  # Compute the score for the conditional and unconditional cases.
+  score_cond = score_model(x, t, y, cond_img, lsm_cond, topo_cond)
+  score_uncond = score_model(x, t, null_y, null_cond_img, null_lsm_cond, null_topo_cond)
+
+  # The final score is a linear combination of the conditional and unconditional scores.
+  return (1 + scale) * score_cond - scale * score_uncond
+
 
 #@title Define the Euler-Maruyama sampler (double click to expand or collapse)
 
@@ -18,7 +49,8 @@ def Euler_Maruyama_sampler(score_model,
                            y=None,
                            cond_img=None,
                            lsm_cond=None,
-                           topo_cond=None
+                           topo_cond=None,
+                           cfg=None
                            ):
   """Generate samples from score-based models with the Euler-Maruyama solver.
 
@@ -47,7 +79,26 @@ def Euler_Maruyama_sampler(score_model,
     for time_step in tqdm.tqdm(time_steps):
       batch_time_step = torch.ones(batch_size, device=device) * time_step
       g = diffusion_coeff(batch_time_step)
-      mean_x = x + (g**2)[:, None, None, None] * score_model(x, batch_time_step) * step_size
+
+      if cfg is None:
+        cfg = {}
+      if cfg.get('classifier_free_guidance', {}).get('enabled', False):
+        # If classifier-free guidance is enabled, use the guided score function.
+        scale = cfg['classifier_free_guidance'].get('guidance_scale', 2.0)
+        score = guided_score_fn(score_model,
+                                x,
+                                batch_time_step,
+                                y,
+                                cond_img,
+                                lsm_cond,
+                                topo_cond,
+                                scale=scale)
+      else:
+        # Else, use the standard score model (cheaper computation).
+        score = score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond)
+
+      # Update the mean_x with the score model output.
+      mean_x = x + (g**2)[:, None, None, None] * score * step_size
       x = mean_x + torch.sqrt(step_size) * g[:, None, None, None] * torch.randn_like(x)      
   # Do not include any noise in the last sampling step.
   return mean_x
@@ -71,7 +122,8 @@ def pc_sampler(score_model,
                y=None,
                cond_img=None,
                lsm_cond=None,
-               topo_cond=None):
+               topo_cond=None,
+               cfg=None):
   """Generate samples from score-based models with Predictor-Corrector method.
 
   Args:
@@ -99,7 +151,23 @@ def pc_sampler(score_model,
     for time_step in tqdm.tqdm(time_steps):
       batch_time_step = torch.ones(batch_size, device=device) * time_step
       # Corrector step (Langevin MCMC)
-      grad = score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond)
+      if cfg is None:
+        cfg = {}
+      if cfg.get('classifier_free_guidance', {}).get('enabled', False):
+        # If classifier-free guidance is enabled, use the guided score function.
+        scale = cfg['classifier_free_guidance'].get('guidance_scale', 2.0)
+        score = guided_score_fn(score_model,
+                                x,
+                                batch_time_step,
+                                y,
+                                cond_img,
+                                lsm_cond,
+                                topo_cond,
+                                scale=scale)
+      else:
+        # Else, use the standard score model (cheaper computation).
+        score = score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond)
+      grad = score                                                                                       
       grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
       noise_norm = np.sqrt(np.prod(x.shape[1:]))
       langevin_step_size = 2 * (snr * noise_norm / grad_norm)**2
@@ -107,7 +175,25 @@ def pc_sampler(score_model,
 
       # Predictor step (Euler-Maruyama)
       g = diffusion_coeff(batch_time_step)
-      x_mean = x + (g**2)[:, None, None, None] * score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond) * step_size
+
+      if cfg.get('classifier_free_guidance', {}).get('enabled', False):
+        # If classifier-free guidance is enabled, use the guided score function.
+        scale = cfg['classifier_free_guidance'].get('guidance_scale', 2.0)
+        score = guided_score_fn(score_model,
+                                x,
+                                batch_time_step,
+                                y,
+                                cond_img,
+                                lsm_cond,
+                                topo_cond,
+                                scale=scale)
+      else:
+        # Else, use the standard score model (cheaper computation).
+        score = score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond)
+
+      x_mean = x + (g**2)[:, None, None, None] * score * step_size
+
+      # x_mean = x + (g**2)[:, None, None, None] * score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond) * step_size
       x = x_mean + torch.sqrt(g**2 * step_size)[:, None, None, None] * torch.randn_like(x)      
     
     # The last step does not include any noise
@@ -134,7 +220,8 @@ def ode_sampler(score_model,
                 y=None,
                 cond_img=None,
                 lsm_cond=None,
-                topo_cond=None
+                topo_cond=None,
+                cfg=None
                 ):
   """Generate samples from score-based models with black-box ODE solvers.
 
@@ -177,7 +264,7 @@ def ode_sampler(score_model,
   
   # Run the black-box ODE solver.
   res = integrate.solve_ivp(ode_func, (1., eps), init_x.reshape(-1).cpu().numpy(), rtol=rtol, atol=atol, method='RK45')  
-  print(f"Number of function evaluations: {res.nfev}")
+  logger.info(f"Number of function evaluations: {res.nfev}")
   x = torch.tensor(res.y[:, -1], device=device).reshape(shape)
 
   return x

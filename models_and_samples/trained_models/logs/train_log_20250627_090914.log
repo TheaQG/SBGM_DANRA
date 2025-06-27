@@ -1,0 +1,20 @@
+Logging to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models/logs/train_log_20250627_090914.log
+=== Starting SBGM_SD Training Pipeline ===
+Experiment name: sbgm_fullRun
+▸ CUDA is not available, using CPU instead.
+
+
+temp_lr: torch.Size([1, 128, 128])
+prcp_lr: torch.Size([1, 128, 128])
+prcp_hr: torch.Size([1, 128, 128])
+lsm_hr: torch.Size([1, 128, 128])
+lsm: torch.Size([1, 128, 128])
+topo: torch.Size([1, 128, 128])
+classifier: torch.Size([])
+sdf: torch.Size([1, 128, 128])
+hr_points: [173, 301, 350, 478]
+lr_points: [200, 328, 342, 470]
+
+
+
+▸ Saved initial sample plot to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples/samples/sbgm_fullRun__HR_prcp_DANRA__SIZE_128x128__LR_temp_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_1000/Figures//Initial_sample_plot.png

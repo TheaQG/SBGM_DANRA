@@ -1,24 +1,30 @@
 # cfg/era5_pipeline.yaml
+
+# This is a testing configuration for the ERA5 download pipeline, smaller in scope
+
 area: [60, -80, 40, 40]        # N,W,S,E  (edit!)
 dataset: reanalysis-era5-single-levels
 format: netcdf
 variables:
-  potential_evaporation:
-    short: pev
-    daily_stat: daysum
-  convective_available_potential_energy:
-    short: cape
-    daily_stat: daymax
-  vertical_integral_of_northward_water_vapour_flux:
-    short: wvf_north
+  2m_temperature:
+    short: t2m
     daily_stat: daymean
-  vertical_integral_of_eastward_water_vapour_flux:
-    short: wvf_east
-    daily_stat: daymean
-  mean_sea_level_pressure:
-    short: msl
-    daily_stat: daymean
-years: [1991, 2020]            # inclusive range
+  # potential_evaporation:
+  #   short: pev
+  #   daily_stat: daysum
+  # convective_available_potential_energy:
+  #   short: cape
+  #   daily_stat: daymax
+  # vertical_integral_of_northward_water_vapour_flux:
+  #   short: wvf_north
+  #   daily_stat: daymean
+  # vertical_integral_of_eastward_water_vapour_flux:
+  #   short: wvf_east
+  #   daily_stat: daymean
+  # mean_sea_level_pressure:
+  #   short: msl
+  #   daily_stat: daymean
+years: [1991, 1992]            # inclusive range
 max_workers: 2
 tmp_dir: /tmp/era5_downloads
 grid_file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/mygrid_danra_small

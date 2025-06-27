@@ -10,11 +10,16 @@
         
 '''
 import torch
+import logging
 import torch.nn as nn
 import numpy as np
 from torchvision.models.resnet import ResNet, BasicBlock
 from typing import Optional, Iterable
 import functools
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
 
 class SinusoidalEmbedding(nn.Module):
     '''
@@ -246,13 +251,13 @@ class Encoder(ResNet):
         if cond_img is not None:
 
             cond_img = cond_img.to(self.device)
-            # print('\n\nCond image shape: ', cond_img.shape)
-            # print('Input shape: ', x.shape)
-            # print('Concatenating conditional image to input')
+            # logger.debug('\n\nCond image shape: ', cond_img.shape)
+            # logger.debug('Input shape: ', x.shape)
+            # logger.debug('Concatenating conditional image to input')
             # Concatenate the conditional image to the input
             x = torch.cat((x, cond_img), dim=1)
             #x = x.to(torch.double)
-            #print('\n Conditional image added to input with dtype: ', x.dtype, '\n')
+            #logger.info('\n Conditional image added to input with dtype: ', x.dtype, '\n')
 
 
         # Send the inputs to the device
@@ -268,15 +273,15 @@ class Encoder(ResNet):
         #t = self.sinusiodal_embedding(t)
         # Add the label embedding to the time embedding
         if y is not None:
-            # print('Time embedding size:')
-            # print(t.shape)  
-            # print('Label size:')
-            # print(y.shape)
-            # print('Label embedding size:')
-            # print(self.label_emb(y).shape)
+            # logger.debug('Time embedding size:')
+            # logger.debug(t.shape)  
+            # logger.debug('Label size:')
+            # logger.debug(y.shape)
+            # logger.debug('Label embedding size:')
+            # logger.debug(self.label_emb(y).shape)
 
             t += self.label_emb(y)
-        #print('\n Time embedding type: ', t.dtype, '\n')
+        #logger.debug('\n Time embedding type: ', t.dtype, '\n')
         # Prepare fmap1, the first feature map, by applying the first convolutional layer to the input x
         
         fmap1 = self.conv1(x)

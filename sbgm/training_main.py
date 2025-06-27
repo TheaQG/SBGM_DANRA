@@ -22,7 +22,6 @@ def train_main(cfg):
     # Setup logging
     log_dir = os.path.join(cfg["paths"]["checkpoint_dir"], 'logs')
     logger = setup_logger(log_dir)
-    print = logger.info  # Redirect print to logger
 
     logger.info("=== Starting SBGM_SD Training Pipeline ===")
     logger.info(f"Experiment name: {cfg['experiment']['name']}")
@@ -35,8 +34,9 @@ def train_main(cfg):
 
     # Set path to figures, samples, losses
     save_str = get_model_string(cfg)
-    path_samples = cfg['paths']['path_save'] + 'samples' + f'/Samples' + '__' + save_str
-    path_figures = path_samples + '/Figures/'
+    path_samples = cfg['paths']['path_save'] + '/samples/' + save_str
+    path_figures = path_samples + '/Figures'
+
 
     # Read device str from cfg
     device_str = cfg['training']['device']
@@ -117,9 +117,9 @@ def train_main(cfg):
 
     # Get the learning rate scheduler (if applicable)
     scheduler = None
-    if cfg['training']['scheduler'] is not None:
+    if cfg['training']['lr_scheduler'] is not None:
         scheduler = get_scheduler(cfg, optimizer)
-        logger.info(f"▸ Using learning rate scheduler: {cfg['training']['scheduler']}")
+        logger.info(f"▸ Using learning rate scheduler: {cfg['training']['lr_scheduler']}")
     else:
         logger.info("▸ No learning rate scheduler specified, using default learning rate.")
 

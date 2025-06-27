@@ -18,6 +18,8 @@ from sbgm.utils import build_data_path, get_units, get_cmaps, get_model_string
 from sbgm.special_transforms import build_back_transforms
 # from sbgm.evaluation.evaluation import evaluate_model
 
+# # Set up logging
+logger = logging.getLogger(__name__)
 
 def get_dataloader(cfg, verbose=True):
     '''
@@ -32,10 +34,10 @@ def get_dataloader(cfg, verbose=True):
     '''
     # Print information about data types
     hr_unit, lr_units = get_units(cfg)
-    print(f"\nUsing HR data type: {cfg['highres']['model']} {cfg['highres']['variable']} [{hr_unit}]")
+    logger.info(f"\nUsing HR data type: {cfg['highres']['model']} {cfg['highres']['variable']} [{hr_unit}]")
 
     for i, cond in enumerate(cfg['lowres']['condition_variables']):
-        print(f"Using LR data type {i+1}: {cfg['lowres']['model']} {cond} [{lr_units[i]}]")
+        logger.info(f"Using LR data type {i+1}: {cfg['lowres']['model']} {cond} [{lr_units[i]}]")
 
     # Set image dimensions based on config (if None, use default values)
     hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else None
@@ -56,12 +58,12 @@ def get_dataloader(cfg, verbose=True):
         hr_data_size_use = hr_data_size
         lr_data_size_use = lr_data_size_use
     if verbose:
-        print(f"\n\nHigh-resolution data size: {hr_data_size_use}")
+        logger.info(f"\n\nHigh-resolution data size: {hr_data_size_use}")
         if cfg['lowres']['resize_factor'] > 1:
-            print(f"\tHigh-resolution data size after resize: {hr_data_size_use}")
-        print(f"Low-resolution data size: {lr_data_size_use}")
+            logger.info(f"\tHigh-resolution data size after resize: {hr_data_size_use}")
+        logger.info(f"Low-resolution data size: {lr_data_size_use}")
         if cfg['lowres']['resize_factor'] > 1:
-            print(f"\tLow-resolution data size after resize: {lr_data_size_use}")
+            logger.info(f"\tLow-resolution data size after resize: {lr_data_size_use}")
 
     # Set full domain size 
     full_domain_dims = tuple(cfg['highres']['full_domain_dims']) if cfg['highres']['full_domain_dims'] is not None else None
@@ -105,13 +107,13 @@ def get_dataloader(cfg, verbose=True):
     )
 
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
-        print('\nSDF weighted loss enabled. Setting lsm and topo to true.\n')
+        logger.info('\nSDF weighted loss enabled. Setting lsm and topo to true.\n')
         sample_w_geo = True
     else:
         sample_w_geo = cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']
 
     if sample_w_geo:
-        print('\nUsing geographical features for sampling.\n')
+        logger.info('\nUsing geographical features for sampling.\n')
         
         geo_variables = cfg['stationary_conditions']['geographic_conditions']['geo_variables']
         data_dir_lsm = cfg['paths']['lsm_path']
@@ -168,10 +170,10 @@ def get_dataloader(cfg, verbose=True):
         cache_size_valid = cfg['data_handling']['cache_size']
 
     if verbose:
-        print(f"\n\n\nNumber of training samples: {n_samples_train}")
-        print(f"Number of validation samples: {n_samples_valid}")
-        print(f"Cache size for training: {cache_size_train}")
-        print(f"Cache size for validation: {cache_size_valid}\n\n\n")
+        logger.info(f"\n\n\nNumber of training samples: {n_samples_train}")
+        logger.info(f"Number of validation samples: {n_samples_valid}")
+        logger.info(f"Cache size for training: {cache_size_train}")
+        logger.info(f"Cache size for validation: {cache_size_valid}\n\n\n")
 
 
     # Setup datasets
@@ -287,11 +289,11 @@ def get_dataloader(cfg, verbose=True):
 
     # Print dataset information
     if verbose:
-        print(f"\nTraining dataset: {len(train_dataset)} samples")
-        print(f"Validation dataset: {len(val_dataset)} samples")
-        print(f"Generation dataset: {len(gen_dataset)} samples\n")
-        print(f"Batch size: {cfg['training']['batch_size']}")
-        print(f"Number of workers: {cfg['data_handling']['num_workers']}\n")
+        logger.info(f"\nTraining dataset: {len(train_dataset)} samples")
+        logger.info(f"Validation dataset: {len(val_dataset)} samples")
+        logger.info(f"Generation dataset: {len(gen_dataset)} samples\n")
+        logger.info(f"Batch size: {cfg['training']['batch_size']}")
+        logger.info(f"Number of workers: {cfg['data_handling']['num_workers']}\n")
     
     # Return the dataloaders
     return train_loader, val_loader, gen_loader
@@ -412,7 +414,7 @@ def get_scheduler(cfg, optimizer):
                                       eta_min=cfg['training']['lr_scheduler_params']['eta_min'])
     elif cfg['training']['scheduler'] == None:
         scheduler = None
-        print("No learning rate scheduler specified. Using the optimizer's default learning rate.")
+        logger.warning("No learning rate scheduler specified. Using the optimizer's default learning rate.")
     else:
         raise ValueError(f"Scheduler {cfg['training']['scheduler']} not recognized. Use 'step', 'reduce_on_plateau', or 'cosine_annealing'.")
 
@@ -429,7 +431,7 @@ def get_device(verbose=True):
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if verbose:
-        print(f"Using device: {device}")
+        logger.info(f"Using device: {device}")
     return device
     
 

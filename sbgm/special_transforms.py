@@ -4,6 +4,10 @@
 
 # Import libraries and modules 
 import torch
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Define custom transforms
 class Scale(object):
@@ -234,8 +238,8 @@ class PrcpLogTransform(object):
         # Log-transform the sample
         log_sample = torch.log(sample + self.eps) # Add a small epsilon to avoid log(0)
 
-        # print(f"Min log in sample: {torch.min(log_sample)}")
-        # print(f"Max log in sample: {torch.max(log_sample)}")
+        # logger.debug(f"Min log in sample: {torch.min(log_sample)}")
+        # logger.debug(f"Max log in sample: {torch.max(log_sample)}")
         # Scale the log-transformed data to [0,1]ß
         if self.scale_type == 'log_01':
             if (self.glob_min_log is None) or (self.glob_max_log is None):
@@ -257,11 +261,16 @@ class PrcpLogTransform(object):
             mu = self.glob_mean_log
             sigma = self.glob_std_log
 
+            if mu is None or sigma is None:
+                raise ValueError("Global mean and standard deviation must not be None for 'log_zscore' scaling.")
+
             log_sample = (log_sample - mu) / (sigma + 1e-8)  
-            # print(f"Min log in sample (zscore): {torch.min(log_sample)}")
-            # print(f"Max log in sample (zscore): {torch.max(log_sample)}")
+            # logger.debug(f"Min log in sample (zscore): {torch.min(log_sample)}")
+            # logger.debug(f"Max log in sample (zscore): {torch.max(log_sample)}")
         elif self.scale_type == 'log_minus1_1':
             # Scale the log-transformed data to [-1, 1]
+            if self.glob_min_log is None or self.glob_max_log is None:
+                raise ValueError("Min and max log values must not be None for 'log_minus1_1' scaling.")
             log_sample = 2 * ((log_sample - self.glob_min_log) / (self.glob_max_log - self.glob_min_log)) - 1
 
         elif self.scale_type == 'log':
@@ -300,11 +309,11 @@ class PrcpLogBackTransform(object):
 
         if self.glob_min_log is not None and self.glob_max_log is not None:
             # Optionally, expand the log range by a fraction of the range
-            print(f'Extended log range from [{self.glob_min_log}, {self.glob_max_log}]')
+            logger.info(f'Extended log range from [{self.glob_min_log}, {self.glob_max_log}]')
             log_range = self.glob_max_log - self.glob_min_log
             self.glob_min_log = self.glob_min_log - (self.buffer_frac/2) * log_range
             self.glob_max_log = self.glob_max_log + (self.buffer_frac/2) * log_range
-            print(f'to [{self.glob_min_log}, {self.glob_max_log}]\n')
+            logger.info(f'to [{self.glob_min_log}, {self.glob_max_log}]\n')
 
         if self.scale_type == 'log_zscore':
             if (self.glob_mean_log is None) or (self.glob_std_log is None):
@@ -335,6 +344,9 @@ class PrcpLogBackTransform(object):
         if self.scale_type == 'log_01':
             # Back-transform the data to log-space
             log_sample = sample
+            # Ensure min and max log values are not None
+            if self.glob_max_log is None or self.glob_min_log is None:
+                raise ValueError("glob_max_log and glob_min_log must not be None for 'log_01' back-transform.")
             # Scale the log-transformed data back to the original range
             back_transformed_sample = log_sample * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
             # Inverse log-transform the data
@@ -343,11 +355,15 @@ class PrcpLogBackTransform(object):
             # Back-transform the data to log-space
             mu = self.glob_mean_log
             sigma = self.glob_std_log
+            if mu is None or sigma is None:
+                raise ValueError("Global mean and standard deviation must not be None for 'log_zscore' back-transform.")
             log_sample = (sample * (sigma + 1e-8)) + mu
             # Inverse log-transform the data
             back_transformed_sample = torch.exp(log_sample)
         elif self.scale_type == 'log_minus1_1':
             # Back-transform the data to log-space
+            if self.glob_max_log is None or self.glob_min_log is None:
+                raise ValueError("glob_max_log and glob_min_log must not be None for 'log_minus1_1' back-transform.")
             log_sample = 0.5 * (sample + 1) * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
             # Inverse log-transform the data
             back_transformed_sample = torch.exp(log_sample)

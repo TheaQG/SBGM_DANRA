@@ -1,4 +1,0 @@
-Logging to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models/logs/train_log_20250626_104912.log
-=== Starting SBGM_SD Training Pipeline ===
-Experiment name: sbgm_fullRun
-▸ CUDA is not available, using CPU instead.

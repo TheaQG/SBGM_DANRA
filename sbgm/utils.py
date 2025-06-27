@@ -27,6 +27,7 @@ import torch
 import zarr
 import os
 import json
+import logging
 
 import netCDF4 as nc
 import torch.nn as nn
@@ -34,24 +35,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+# Set up logging
+logger = logging.getLogger(__name__)
 
 def model_summary(model):
     '''
         Simple function to print the model summary
     '''
 
-    print("model_summary")
-    print()
-    print("Layer_name" + "\t"*7 + "Number of Parameters")
-    print("="*100)
+    logger.info("model_summary")
+    logger.info("Layer_name" + "\t"*7 + "Number of Parameters")
+    logger.info("="*100)
     
     model_parameters = [layer for layer in model.parameters() if layer.requires_grad]
     layer_name = [child for child in model.children()]
     j = 0
     total_params = 0
-    print("\t"*10)
+    logger.info("\t"*10)
     for i in layer_name:
-        print()
         param = 0
         try:
             bias = (i.bias is not None)
@@ -63,10 +64,10 @@ def model_summary(model):
         else:
             param =model_parameters[j].numel()
             j = j+1
-        print(str(i) + "\t"*3 + str(param))
+        logger.info(str(i) + "\t"*3 + str(param))
         total_params+=param
-    print("="*100)
-    print(f"Total Params:{total_params}")     
+    logger.info("="*100)
+    logger.info(f"Total Params:{total_params}")     
 
 
 def get_model_string(cfg):
@@ -183,7 +184,7 @@ def convert_npz_to_zarr(npz_directory, zarr_file, VERBOSE=False):
         zarr_file: str
             Name of zarr file to be created
     '''
-    print(f'\n\nConverting {len(os.listdir(npz_directory))} .npz files to zarr file...')
+    logger.info(f'\n\nConverting {len(os.listdir(npz_directory))} .npz files to zarr file...')
 
     # Create zarr group (equivalent to a directory) 
     zarr_group = zarr.open_group(zarr_file, mode='w')
@@ -197,7 +198,7 @@ def convert_npz_to_zarr(npz_directory, zarr_file, VERBOSE=False):
         # Check if the file is a .npz file (not dir or .DS_Store)
         if npz_file.endswith('.npz'):
             if VERBOSE:
-                print(os.path.join(npz_directory, npz_file))
+                logger.info(os.path.join(npz_directory, npz_file))
             # Load the .npz file
             npz_data = np.load(os.path.join(npz_directory, npz_file))            
 
@@ -205,13 +206,13 @@ def convert_npz_to_zarr(npz_directory, zarr_file, VERBOSE=False):
             for key in npz_data:
 
                 if i == 0:
-                    print(f'Key: {key}')
+                    logger.info(f'Key: {key}')
                 # Save the data as a zarr array
                 zarr_group.array(npz_file.replace('.npz', '') + '/' + key, npz_data[key], chunks=True, dtype=np.float32)
             
             # Print progress if iterator is a multiple of 100
             if (i+1) % 100 == 0:
-                print(f'Converted {i+1} files...')
+                logger.info(f'Converted {i+1} files...')
             i += 1
 
 
@@ -232,7 +233,7 @@ def create_concatenated_data_files(data_dir_all:list, data_dir_concatenated:str,
         n_images: int
             Number of images to concatenate
     '''
-    print(f'\n\nCreating concatenated data files from {len(data_dir_all)} directories...')
+    logger.info(f'\n\nCreating concatenated data files from {len(data_dir_all)} directories...')
 
     # Create zarr group (equivalent to a directory)
     zarr_group = zarr.open_group(data_dir_concatenated, mode='w')
@@ -252,7 +253,7 @@ def create_concatenated_data_files(data_dir_all:list, data_dir_concatenated:str,
                     # Save the data as a zarr array
                     zarr_group.array(data_file.replace('.npz', '') + '/' + var, data, chunks=True, dtype=np.float32)
     
-    print(f'Concatenated data saved to {data_dir_concatenated}...')
+    logger.info(f'Concatenated data saved to {data_dir_concatenated}...')
 
 
 
@@ -286,7 +287,7 @@ class data_preperation():
             n_images: int
                 Number of images to concatenate
         '''
-        print(f'\n\nCreating concatenated data files from {len(data_dir_all)} directories...')
+        logger.info(f'\n\nCreating concatenated data files from {len(data_dir_all)} directories...')
 
         # Create zarr group (equivalent to a directory)
         zarr_group = zarr.open_group(data_dir_concatenated, mode='w')
@@ -306,7 +307,7 @@ class data_preperation():
                         # Save the data as a zarr array
                         zarr_group.array(data_file.replace('.npz', '') + '/' + var, data, chunks=True, dtype=np.float32)
         
-        print(f'Concatenated data saved to {data_dir_concatenated}...')
+        logger.info(f'Concatenated data saved to {data_dir_concatenated}...')
 
 
 def convert_npz_to_zarr_based_on_time_split(npz_directory:str, year_splits:list):
@@ -324,14 +325,14 @@ def convert_npz_to_zarr_based_on_time_split(npz_directory:str, year_splits:list)
     '''
     # Print the years for each split
     # Print number of files in the split years
-    print(f'\nTrain years: {year_splits[0]}')
-    print(f'Number of files in train years: {len([f for f in os.listdir(npz_directory) if any(str(year) in f for year in year_splits[0])])}')
+    logger.info(f'\nTrain years: {year_splits[0]}')
+    logger.info(f'Number of files in train years: {len([f for f in os.listdir(npz_directory) if any(str(year) in f for year in year_splits[0])])}')
 
-    print(f'\nVal years: {year_splits[1]}')
-    print(f'Number of files in val years: {len([f for f in os.listdir(npz_directory) if any(str(year) in f for year in year_splits[1])])}')
+    logger.info(f'\nVal years: {year_splits[1]}')
+    logger.info(f'Number of files in val years: {len([f for f in os.listdir(npz_directory) if any(str(year) in f for year in year_splits[1])])}')
 
-    print(f'\nTest years: {year_splits[2]}')
-    print(f'Number of files in test years: {len([f for f in os.listdir(npz_directory) if any(str(year) in f for year in year_splits[2])])}')
+    logger.info(f'\nTest years: {year_splits[2]}')
+    logger.info(f'Number of files in test years: {len([f for f in os.listdir(npz_directory) if any(str(year) in f for year in year_splits[2])])}')
 
     # 
 
@@ -352,7 +353,7 @@ def convert_npz_to_zarr_based_on_percent_split(npz_directory:str, percent_splits
             List of floats representing the percentage splits
     
     '''
-    print(f'\n\nConverting {len(os.listdir(npz_directory))} .npz files to zarr file...')
+    logger.info(f'\n\nConverting {len(os.listdir(npz_directory))} .npz files to zarr file...')
 
 
 
@@ -367,7 +368,7 @@ def convert_nc_to_zarr(nc_directory, zarr_file, VERBOSE=False):
         zarr_file: str
             Name of zarr file to be created
     '''
-    print(f'Converting {len(os.listdir(nc_directory))} .nc files to zarr file...')
+    logger.info(f'Converting {len(os.listdir(nc_directory))} .nc files to zarr file...')
     # Create zarr group (equivalent to a directory)
     zarr_group = zarr.open_group(zarr_file, mode='w')
     
@@ -376,7 +377,7 @@ def convert_nc_to_zarr(nc_directory, zarr_file, VERBOSE=False):
         # Check if the file is a .nc file (not dir or .DS_Store)
         if nc_file.endswith('.nc'):
             if VERBOSE:
-                print(os.path.join(nc_directory, nc_file))
+                logger.info(os.path.join(nc_directory, nc_file))
             # Load the .nc file
             nc_data = nc.Dataset(os.path.join(nc_directory, nc_file), mode='r') # type: ignore
             # Loop through all variables in the .nc file
@@ -413,7 +414,7 @@ def extract_samples(samples, device=None):
         raise ValueError('No HR image found in samples dictionary.')
     hr_img = samples[hr_keys[0]].to(device).float()
     # if len(hr_keys) > 1:
-    #     print(f'Warning: Multiple HR images found. Using the first one: {hr_keys[0]}')
+    #     logger.warning(f'Multiple HR images found. Using the first one: {hr_keys[0]}')
     
     # Classifier (if available)
     classifier = samples.get('classifier', None)
@@ -720,7 +721,7 @@ def plot_sample(sample,
                 base = key[:-3]
             elif key.endswith('_lr_original'):
                 base = key[:-12]
-            # print(f"Base: {base}")
+            # logger.debug(f"Base: {base}")
             if lr_cmap_dict is not None and base is not None and base in lr_cmap_dict:
                 cmap = lr_cmap_dict[base]
             else:
@@ -886,7 +887,7 @@ def plot_samples(samples, hr_model, hr_units,
     else:
         sample_list = samples
 
-    # print(f"Plotting first {n_samples_threshold} samples out of {len(sample_list)} provided.")
+    # logger.info(f"Plotting first {n_samples_threshold} samples out of {len(sample_list)} provided.")
     sample_list = sample_list[:n_samples_threshold]
     
     # Construct the keys:
@@ -1067,8 +1068,8 @@ def plot_samples_and_generated(
         if transform_back_bf_plot and back_transforms and k in back_transforms:
             return back_transforms[k](arr)
         return arr
-    # print(f'Samples: {samples}')
-    # print(f'Generated: {generated}')
+    # logger.info(f'Samples: {samples}')
+    # logger.info(f'Generated: {generated}')
     # -------------------------------------------------------- unpack samples
     if isinstance(samples, dict):              # turn single batch-dict → list
         B = None
@@ -1098,7 +1099,7 @@ def plot_samples_and_generated(
     sample_list = sample_list[:n_samples_threshold]
 
     # ------------------------------------------------------- generated batch
-    print(f"Generated shape: {generated.shape}")
+    logger.info(f"Generated shape: {generated.shape}")
     gen_np = to_numpy(generated)
     if gen_np.ndim == 4:               # (B, 1, H, W), multiple samples with 1 channel
         gen_np = gen_np[:, 0, :, :]
@@ -1110,7 +1111,7 @@ def plot_samples_and_generated(
         raise ValueError(f"Unexpected shape for generated samples: {gen_np.shape}")
 
     gen_np = gen_np[:len(sample_list)]
-    print(f"Generated shape after slicing: {gen_np.shape}")
+    logger.info(f"Generated shape after slicing: {gen_np.shape}")
 
     # inject into dicts
     gen_key = "generated"
@@ -1159,8 +1160,8 @@ def plot_samples_and_generated(
                 continue
             
             # Print key and shape for debugging
-            print(f"Key: {key}")
-            print(f"Shape: {sample[key].shape}")
+            logger.info(f"Key: {key}")
+            logger.info(f"Shape: {sample[key].shape}")
 
             img = to_numpy(sample[key]).squeeze()
             img = maybe_inverse(key, img)

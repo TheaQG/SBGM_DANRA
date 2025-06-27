@@ -1,7 +1,9 @@
-import os, torch
+import os
+import torch
 import copy
 import pickle
 import tqdm
+import logging 
 
 import torch.nn as nn
 # import matplotlib.pyplot as plt
@@ -22,6 +24,8 @@ from sbgm.training_utils import get_model_string, get_cmaps, get_units
         - Add support for custom weight initialization
 '''
 
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 class TrainingPipeline_general:
@@ -74,6 +78,8 @@ class TrainingPipeline_general:
         self.custom_weight_initializer = cfg['training']['custom_weight_initializer']
         self.sdf_weighted_loss = cfg['training']['sdf_weighted_loss']
         self.with_ema = cfg['training']['with_ema']
+        # Store the full configuration for later use
+        self.cfg = cfg
 
         # Set device
         if device is None:
@@ -88,7 +94,7 @@ class TrainingPipeline_general:
                 self.model.apply(self.custom_weight_initializer)
             else:
                 self.model.apply(self.xavier_init_weights)
-            print(f"→ Model weights initialized with {self.custom_weight_initializer.__name__ if self.custom_weight_initializer else 'Xavier uniform'} initialization.")
+            logger.info(f"→ Model weights initialized with {self.custom_weight_initializer.__name__ if self.custom_weight_initializer else 'Xavier uniform'} initialization.")
 
         # Set Exponential Moving Average (EMA) if needed
         if self.with_ema:
@@ -107,28 +113,28 @@ class TrainingPipeline_general:
         # Create the checkpoint directory if it does not exist
         if not os.path.exists(self.checkpoint_dir):
             os.makedirs(self.checkpoint_dir)
-            print(f"→ Checkpoint directory created at {self.checkpoint_dir}")
+            logger.info(f"→ Checkpoint directory created at {self.checkpoint_dir}")
         else:
-            print(f"→ Checkpoint directory already exists at {self.checkpoint_dir}")
+            logger.info(f"→ Checkpoint directory already exists at {self.checkpoint_dir}")
 
         # Set the model string based on the configuration
         self.model_string = get_model_string(cfg)
 
         # Set path to figures, samples, losses
-        self.path_samples = cfg['paths']['path_save'] + 'samples' + f'/Samples' + '__' + self.model_string
+        self.path_samples = cfg['paths']['path_save'] + '/samples/' + self.model_string
         self.path_losses = cfg['paths']['path_save'] + '/losses'
-        self.path_figures = self.path_samples + '/Figures/'
+        self.path_figures = self.path_samples + '/Figures'
 
         # Create the directories if they do not exist
         if not os.path.exists(self.path_samples):
             os.makedirs(self.path_samples)
-            print(f"→ Samples directory created at {self.path_samples}")
+            logger.info(f"→ Samples directory created at {self.path_samples}")
         if not os.path.exists(self.path_losses):
             os.makedirs(self.path_losses)
-            print(f"→ Losses directory created at {self.path_losses}")
+            logger.info(f"→ Losses directory created at {self.path_losses}")
         if not os.path.exists(self.path_figures):
             os.makedirs(self.path_figures)
-            print(f"→ Figures directory created at {self.path_figures}")
+            logger.info(f"→ Figures directory created at {self.path_figures}")
 
 
     def xavier_init_weights(self, m):
@@ -224,6 +230,25 @@ class TrainingPipeline_general:
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
             x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
+
+            # Apply Classifier Free Guidance conditioning dropout if enabled
+            cfg_guidance = getattr(self, "cfg", {}).get('classifier_free_guidance', None)
+            if cfg_guidance and cfg_guidance.get('enabled', False) and cond_images is not None:
+                drop_prob = cfg_guidance.get('drop_prob', 0.1)
+                # Create a drop mask, that randomly drops drop_prob% of the cond_images in the batch
+                drop_mask = (torch.rand(cond_images.size(0), device=cond_images.device) < drop_prob).view(-1, 1, 1, 1)
+
+                # Define the null condition as a tensor of zeros with the same shape as cond_images 
+                # # !!!!! CAREFULLY CONSIDER THIS - SHOULD IT BE NOISE OR ZEROS OR SOMETHING ELSE? !!!!!
+                null_cond = torch.zeros_like(cond_images)
+                # Apply the drop mask to cond_images
+                cond_images = torch.where(drop_mask, null_cond, cond_images)
+
+                # Apply the drop mask to lsm, topo, seasons
+                lsm = torch.where(drop_mask, torch.zeros_like(lsm), lsm)
+                topo = torch.where(drop_mask, torch.zeros_like(topo), topo)
+                # Seasons should be a tensor of -1 for dropped conditions
+                seasons = torch.where(drop_mask.squeeze(), torch.zeros_like(seasons) - 1, seasons)
             
             # Zero gradients
             self.optimizer.zero_grad()
@@ -270,7 +295,7 @@ class TrainingPipeline_general:
 
         # Print average loss if verbose
         if verbose:
-            print(f"→ Epoch {getattr(self, 'epoch', '?')} completed: Avg. training Loss: {avg_loss:.4f}")
+            logger.info(f"→ Epoch {getattr(self, 'epoch', '?')} completed: Avg. training Loss: {avg_loss:.4f}")
 
         return avg_loss
     
@@ -304,7 +329,7 @@ class TrainingPipeline_general:
         val_loss = float('inf')
         best_loss = float('inf')
 
-        print('\n\n\nStarting training...\n\n\n')
+        logger.info('\n\n\nStarting training...\n\n\n')
 
         # Iterate through epochs
         for epoch in range(1, epochs + 1):
@@ -312,7 +337,7 @@ class TrainingPipeline_general:
             self.epoch = epoch 
             # Print epoch number if verbose
             if verbose:
-                print(f"▸ Starting epoch {epoch}/{epochs}...")
+                logger.info(f"▸ Starting epoch {epoch}/{epochs}...")
 
             # Train on batches
             train_loss = self.train_batches(train_dataloader,
@@ -333,8 +358,8 @@ class TrainingPipeline_general:
                 best_loss = val_loss
                 # Save the model
                 self.save_model(dirname=self.checkpoint_dir, filename=self.checkpoint_name)
-                print(f"→ Best model saved with validation loss: {best_loss:.4f} at epoch {epoch}.")
-                print(f"→ Checkpoint saved to {os.path.join(self.checkpoint_dir, self.checkpoint_name)}\n\n")
+                logger.info(f"→ Best model saved with validation loss: {best_loss:.4f} at epoch {epoch}.")
+                logger.info(f"→ Checkpoint saved to {os.path.join(self.checkpoint_dir, self.checkpoint_name)}\n\n")
 
 
             # Pickle dump the losses
@@ -423,7 +448,7 @@ class TrainingPipeline_general:
 
         # Print average loss if verbose
         if verbose:
-            print(f'→ Validation Loss: {avg_loss:.4f}')
+            logger.info(f'→ Validation Loss: {avg_loss:.4f}')
 
         return avg_loss
     
@@ -507,7 +532,7 @@ class TrainingPipeline_general:
                 if cfg['visualization']['save_figs']:
                     # Save the figure
                     fig.savefig(os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png'), dpi=300, bbox_inches='tight')
-                    print(f"→ Figure saved to {os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png')}")
+                    logger.info(f"→ Figure saved to {os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png')}")
 
                 if cfg['visualization']['show_figs']:
                     # Show the figure
@@ -552,7 +577,7 @@ class TrainingPipeline_general:
         # Save the plot
         if save_path is not None:
             fig.savefig(os.path.join(save_path, save_name), dpi=300, bbox_inches='tight')
-            print(f"→ Losses plot saved to {os.path.join(save_path, save_name)}")
+            logger.info(f"→ Losses plot saved to {os.path.join(save_path, save_name)}")
         
         plt.close(fig)
 

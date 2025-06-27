@@ -6,7 +6,9 @@
 # Import libraries and modules 
 import zarr
 import re
-import random, torch
+import random
+import torch
+import logging
 import multiprocessing
 
 import numpy as np
@@ -18,6 +20,9 @@ from torchvision import transforms
 from scipy.ndimage import distance_transform_edt as distance
 
 from sbgm.special_transforms import *
+
+# Set logging
+logger = logging.getLogger(__name__)
 
 def preprocess_lsm_topography(lsm_path, topo_path, target_size, scale=False, flip=False):
     '''
@@ -280,12 +285,17 @@ class ResizeTensor:
         self.align_corners = align_corners
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [C, H, W]  → add batch dim → [1, C, H, W]
-        y = x.unsqueeze(0)
+        if x.ndim == 2: # [H, W]
+            x = x.unsqueeze(0).unsqueeze(0)  # Add channel and batch dimensions → [1, 1, H, W]
+        elif x.ndim == 3: # [C, H, W]
+            x = x.unsqueeze(0) # [1, C, H, W]
+        elif x.ndim != 4:
+            raise ValueError(f"ResizeTensor: Unsupported shape {x.shape}")
+        
         # interpolate → [1, C, new_H, new_W]
-        y = F.interpolate(y, size=self.size, mode=self.mode, align_corners=self.align_corners)
+        x = F.interpolate(x, size=self.size, mode=self.mode, align_corners=self.align_corners)
         # remove batch dim → [C, new_H, new_W]
-        return y.squeeze(0)
+        return x.squeeze(0) # → [C, H, W] or [1, H, W] depending on input
 
 
 
@@ -300,7 +310,7 @@ def list_all_keys(zgroup):
     return all_keys
 
 # all_keys = list_all_keys(self.lr_cond_zarr_dict[cond])
-# print(all_keys)
+# logger.debug(all_keys)
 
 
 class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
@@ -416,12 +426,12 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.lr_cond_files_dict = {}
         if self.lr_cond_dirs_zarr is not None:
             for cond in self.lr_cond_dirs_zarr:
-                print(f'Loading zarr group for condition {cond}')
-                # print(f'Path to zarr group: {self.lr_cond_dirs_zarr[cond]}')
+                logger.info(f'Loading zarr group for condition {cond}')
+                # logger.info(f'Path to zarr group: {self.lr_cond_dirs_zarr[cond]}')
                 group = zarr.open_group(self.lr_cond_dirs_zarr[cond], mode='r')
                 self.lr_cond_zarr_dict[cond] = group
                 self.lr_cond_files_dict[cond] = list(group.keys())
-            print('\n\n')
+            logger.info('\n\n')
         else:
             raise ValueError('LR condition directories (lr_cond_dirs_zarr) must be provided as a dictionary.')
 
@@ -463,7 +473,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 date = FileDate(file)
                 self.hr_file_map[date] = file
             except Exception as e:
-                print(f"Warning: Could not extract date from file {file}. Skipping file. Error: {e}")
+                logger.warning(f"Could not extract date from file {file}. Skipping file. Error: {e}")
+                
 
         # For each LR condition, build a file map: date -> file key
         self.lr_file_map = {}
@@ -474,7 +485,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     date = FileDate(file)
                     self.lr_file_map[cond][date] = file
                 except Exception as e:
-                    print(f"Warning: Could not extract date from file {file} for condition {cond}. Skipping file. Error: {e}")
+                    logger.warning(f"Could not extract date from file {file} for condition {cond}. Skipping file. Error: {e}")
 
         # Compute common dates across HR and all LR conditions
         common_dates = set(self.hr_file_map.keys())
@@ -483,7 +494,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.common_dates = sorted(list(common_dates))
         if len(self.common_dates) < self.n_samples:
             self.n_samples = len(self.common_dates)
-            print(f"Warning: Number of common dates is less than n_samples. Setting n_samples to {self.n_samples}")
+            logger.warning(f"Not enough common dates ({len(self.common_dates)}) to sample {self.n_samples} samples. Reducing n_samples to {self.n_samples}.")
+
         if self.shuffle:
             self.common_dates = random.sample(self.common_dates, self.n_samples)
 
@@ -631,8 +643,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             hr_point = None
             lr_point = None
 
-        # print(f'HR point: {hr_point}')
-        # print(f'LR point: {lr_point}')
+        # logger.debug(f'HR point: {hr_point}')
+        # logger.debug(f'LR point: {lr_point}')
         # Look up HR file using the common date
         hr_file_name = self.hr_file_map[date]
 
@@ -641,41 +653,41 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             lr_file_name = self.lr_file_map[cond][date]
             # Load LR condition data from its own zarr group
             try:
-                # print(f'Loading LR {cond} data for {lr_file_name}')
-                # print(self.lr_cond_zarr_dict[cond].tree())
+                # logger.info(f'Loading LR {cond} data for {lr_file_name}')
+                # logger.debug(self.lr_cond_zarr_dict[cond].tree())
                 if cond == "temp":
                     try:
                         data = self.lr_cond_zarr_dict[cond][lr_file_name]['t']
                         data = data[()][0,0,:,:] - 273.15
-                        # print("Key 't' found")
+                        # logger.debug("Key 't' found")
                     except:
                         data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
                         data = data[()][:,:] - 273.15
-                        # print("Key 'data' found")
+                        # logger.debug("Key 'data' found")
                 elif cond == "prcp":
                     try:
                         data = self.lr_cond_zarr_dict[cond][lr_file_name]['tp']
                         data = data[()][0,0,:,:] * 1000
                         data[data <= 0] = 1e-10
-                        # print("Key 'tp' found")
+                        # logger.debug("Key 'tp' found")
                     except:
                         data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
                         data = data[()][:,:] * 1000
                         data[data <= 0] = 1e-10
-                        # print("Key 'arr_0' found")
+                        # logger.debug("Key 'arr_0' found")
                 else:
                     # Add custom logic for other LR conditions when needed
                     data = self.lr_cond_zarr_dict[cond][lr_file_name]['data'][()]
             except Exception as e:
-                print(f'Error loading {cond} data for {lr_file_name}')
-                print(e)
+                logger.error(f'Error loading {cond} data for {lr_file_name}. Error: {e}')
+                
                 data = None
             
             # Crop LR data using lr_point if cutouts are enabled and lr_point is not None
             if self.cutouts and data is not None and lr_point is not None:
                 # lr_point is in format [x1, x2, y1, y2] - note: for slicing, use [y1:y2, x1:x2]
                 data = data[lr_point[0]:lr_point[1], lr_point[2]:lr_point[3]]
-            # print(f"Data shape for {cond}: {data.shape if data is not None else None}")
+            # logger.debug(f"Data shape for {cond}: {data.shape if data is not None else None}")
                 
             # If save_original is True, save original conditional data
             if self.save_original:
@@ -685,12 +697,12 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             if data is not None and self.transforms_dict.get(cond, None) is not None:
                 data = self.transforms_dict[cond](data)
             sample_dict[cond + "_lr"] = data
-        # print('\n')
+        
 
         # Load HR target variable data
         try:
-            # print(f'Loading HR {self.hr_variable} data for {hr_file_name}')
-            # print(self.zarr_group_img[hr_file_name].tree())
+            # logger.info(f'Loading HR {self.hr_variable} data for {hr_file_name}')
+            # logger.debug(self.zarr_group_img[hr_file_name].tree())
             if self.hr_variable == 'temp':
                 try:
                     hr = torch.tensor(self.zarr_group_img[hr_file_name]['t'][()][0,0,:,:], dtype=torch.float32) - 273.15
@@ -707,8 +719,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 # Add custom logic for other HR variables when needed
                 hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()], dtype=torch.float32)
         except Exception as e:
-            print(f'Error loading {self.hr_variable} data for {hr_file_name}')
-            print(e)
+            logger.error(f'Error loading HR {self.hr_variable} data for {hr_file_name}. Error: {e}')
             hr = None
 
         if self.cutouts and (hr is not None) and (hr_point is not None):
@@ -742,13 +753,13 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     if self.lsm_full_domain is None:
                         raise ValueError("lsm_full_domain must be provided if 'lsm' is in geo_variables")
                     geo_data = self.lsm_full_domain
-                    # print('lsm_full_domain shape:', geo_data.shape)
+                    # logger.info('lsm_full_domain shape:', geo_data.shape)
                     geo_transform = self.geo_transform_lsm
                 elif geo == 'topo':
                     if self.topo_full_domain is None:
                         raise ValueError("topo_full_domain must be provided if 'topo' is in geo_variables")
                     geo_data = self.topo_full_domain
-                    # print('topo_full_domain shape:', geo_data.shape)
+                    # logger.info('topo_full_domain shape:', geo_data.shape)
                     geo_transform = self.geo_transform_topo
                 else:
                     # Add custom logic for other geo variables when needed
@@ -785,7 +796,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 else:
                     raise ValueError('n_classes must be 4, 12 or 365')
             else:
-                print("Warning: n_classes is not provided, using month as classifier")
+                logger.warning("n_classes is not provided, using date as classifier. This will default to daily condition.")
                 # If n_classes is not provided, use the date as a classifier
                 dateObj = DateFromFile(hr_file_name)
                 classifier = dateObj.determine_month()  # Default to daily condition if n_classes is not specified

@@ -1,0 +1,59 @@
+Logging to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models/logs/train_log_20250627_094234.log
+=== Starting SBGM_SD Training Pipeline ===
+Experiment name: sbgm_fullRun
+▸ CUDA is not available, using CPU instead.
+
+Using HR data type: DANRA prcp [mm]
+Using LR data type 1: ERA5 temp [$^\circ$C]
+Using LR data type 2: ERA5 prcp [mm]
+
+
+High-resolution data size: (128, 128)
+Low-resolution data size: (128, 128)
+Extended log range from [-18, 6]
+to [-20.4, 8.4]
+
+Extended log range from [-19, 5]
+to [-21.4, 7.4]
+
+
+SDF weighted loss enabled. Setting lsm and topo to true.
+
+
+Using geographical features for sampling.
+
+
+
+
+Number of training samples: 70
+Number of validation samples: 15
+Cache size for training: 35
+Cache size for validation: 7
+
+
+
+Loading zarr group for condition temp
+Loading zarr group for condition prcp
+
+
+
+Loading zarr group for condition temp
+Loading zarr group for condition prcp
+
+
+
+Loading zarr group for condition temp
+Loading zarr group for condition prcp
+
+
+
+
+Training dataset: 70 samples
+Validation dataset: 15 samples
+Generation dataset: 15 samples
+
+Batch size: 16
+Number of workers: None
+
+
+

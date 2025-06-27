@@ -43,6 +43,7 @@ def pull_all(cfg):
     jobs = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=cfg['max_workers']) as executor:
         for var_long, vinfo in cfg['variables'].items():
+            # cfg['years'] is a list of two integers, inclusive range
             for year in range(cfg['years'][0], cfg['years'][1] + 1):
                 out_nc = pathlib.Path(cfg['tmp_dir']) / vinfo['short'] / f"{vinfo['short']}_{year}.nc"
                 job = executor.submit(download_year, var_long, year, out_nc, cfg)

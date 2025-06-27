@@ -1,0 +1,19 @@
+Logging to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models/logs/train_log_20250627_084635.log
+=== Starting SBGM_SD Training Pipeline ===
+Experiment name: sbgm_fullRun
+▸ CUDA is not available, using CPU instead.
+
+
+temp_lr: torch.Size([1, 128, 128])
+prcp_lr: torch.Size([1, 128, 128])
+prcp_hr: torch.Size([1, 128, 128])
+lsm_hr: torch.Size([1, 128, 128])
+lsm: torch.Size([1, 128, 128])
+topo: torch.Size([1, 128, 128])
+classifier: torch.Size([])
+sdf: torch.Size([1, 128, 128])
+hr_points: [216, 344, 356, 484]
+lr_points: [209, 337, 356, 484]
+
+
+

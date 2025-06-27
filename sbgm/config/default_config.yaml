@@ -128,4 +128,8 @@ training:
     patience: 50 # Patience for early stopping
     min_delta: 0.0001 # Minimum delta for early stopping
 
-
+classifier_free_guidance:
+  enabled: true # Whether to use classifier-free guidance
+  drop_prob: 0.1 # Dropout probability for guidance
+  guidance_scale: 1.0 # Scale for guidance
+  
