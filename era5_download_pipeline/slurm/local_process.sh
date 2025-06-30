@@ -8,7 +8,8 @@ ssh-add ~/.ssh/id_ed25519 # Add the SSH key to the agent (will prompt for passph
 
 # Run the Python script with the provided configuration
 python3 -m era5_download_pipeline.cli.run_local \
-        --mode stream --workers 2 
+        --mode stream --workers 3 \
+        --log era5_logs/era5_run_restartable.log
 
 # kill the agent
 ssh-agent -k

@@ -6,6 +6,8 @@
 import pathlib # For file paths
 import concurrent.futures # For parallel execution
 from . import download, transfer # Import download and transfer functions
+from .remote_utils import remote_years_present # Import utility to check remote years
+import logging
 
 import logging
 logger = logging.getLogger(__name__)
@@ -56,8 +58,18 @@ def download_transfer_delete(cfg, n_workers=2):
     jobs = []
     for var_long, vinfo in cfg['variables'].items():
         vshort = vinfo['short']
+        done = remote_years_present(vshort, cfg)
+        logger.info(f"Remote has {len(done)} years for {vshort}: {sorted(done) if done else 'None'}")
+
         for year in range(cfg['years'][0], cfg['years'][1] + 1):
+            if year in done and year != max(done): # Skip if year is already present remotely, except for the latest year
+                logger.info(f"Skipping {vshort} for {year} as it is already present remotely.")
+                continue
             jobs.append((var_long, vshort, year, cfg))
+
+    if not jobs:
+        logger.info("No jobs to process. All requested data is already present remotely.")
+        return
 
     # ThreadPool is fine: cdsapi and rsync is I/O bound, not CPU bound
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
