@@ -3,6 +3,12 @@ area: [60, -80, 40, 40]        # N,W,S,E  (edit!)
 dataset: reanalysis-era5-single-levels
 format: netcdf
 variables:
+  2m_temperature:
+    short: t2m
+    daily_stat: daymean
+  total_precipitation:
+    short: tp
+    daily_stat: daysum
   potential_evaporation:
     short: pev
     daily_stat: daysum
@@ -19,7 +25,7 @@ variables:
     short: msl
     daily_stat: daymean
 years: [1991, 2020]            # inclusive range
-max_workers: 2
+max_workers: 3
 tmp_dir: /tmp/era5_downloads
 grid_file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/mygrid_danra_small
 weights_file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/ERA5_to_DANRA_bil_weights_new.nc

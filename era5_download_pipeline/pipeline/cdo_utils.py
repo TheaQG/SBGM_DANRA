@@ -15,7 +15,8 @@ import netCDF4 as nc
 import numpy as np
 
 
-
+import logging
+logger = logging.getLogger(__name__)
 
 def convert_to_daily_stat(input_file,
                           stat,
@@ -23,7 +24,7 @@ def convert_to_daily_stat(input_file,
     '''
         Convert the input NetCDF file to a daily statistic (e.g., sum, mean, max).
     '''
-    print(f"Converting {input_file} to daily {stat} -> {output_file}")
+    logger.info(f"Converting {input_file} to daily {stat} -> {output_file}")
 
     cdo_command = ["cdo", stat, input_file, output_file]
 
@@ -37,9 +38,9 @@ def regrid_to_danra(input_nc,
     '''
         Regrid the input NetCDF file to the DANRA grid using bilinear interpolation.
     '''
-    print(f"Regridding {input_nc} to {output_nc} using {interpolation_method} interpolation...")
+    logger.info(f"Regridding {input_nc} to {output_nc} using {interpolation_method} interpolation...")
     if weights_file is not None:
-        print(f"Using weights file: {weights_file}")
+        logger.info(f"Using weights file: {weights_file}")
 
     # If weights file is not provided, just remap directly
     if weights_file is None:
@@ -80,13 +81,13 @@ def generate_regridding_weights(reference_file,
         One-time step to create bilinear weights
     '''
     if not os.path.exists(weights_file):
-        print(f"Creating weights file: {weights_file}")
+        logger.info(f"Creating weights file: {weights_file}")
 
         cdo_command = ["cdo", "genbil", grid_file, reference_file, weights_file]
 
         subprocess.run(cdo_command, check=True)
     else:
-        print("Weights file already exists.")
+        logger.info("Weights file already exists.")
 
 
 def convert_daily_to_npz(input_nc,
@@ -97,7 +98,7 @@ def convert_daily_to_npz(input_nc,
         Converts daily NetCDF data to individual .npz files for each day.
         Saves the data in a specified output directory.
     '''
-    print(f"Converting {input_nc} to daily .npz files in {output_dir}")
+    logger.info(f"Converting {input_nc} to daily .npz files in {output_dir}")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -114,7 +115,7 @@ def convert_daily_to_npz(input_nc,
         date_str = day_to_date(day_idx + 1, int(year)).replace('_', '')
         day_fn = f"{var_str}_589x789_{date_str}.npz"
         day_path = os.path.join(output_dir, day_fn)
-        print(f"Saving day: {date_str}...")
+        logger.info(f"Saving day: {date_str}...")
 
         np.savez_compressed(day_path, data=day_data)
 

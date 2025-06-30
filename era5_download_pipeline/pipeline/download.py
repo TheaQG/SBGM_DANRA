@@ -9,6 +9,9 @@ import pathlib
 import cdsapi
 from .utils import ensure_dir, hours, months, days
 
+import logging
+logger = logging.getLogger(__name__)
+
 def download_year(var_long:str,
                   year:int,
                   out_nc: pathlib.Path,
@@ -48,5 +51,6 @@ def pull_all(cfg):
                 out_nc = pathlib.Path(cfg['tmp_dir']) / vinfo['short'] / f"{vinfo['short']}_{year}.nc"
                 job = executor.submit(download_year, var_long, year, out_nc, cfg)
                 jobs.append(job)
+                logger.info(f"Scheduled download job for {var_long} {year} to {out_nc}")
         for j in jobs:
             j.result() # Propagate exceptions if any (this will block until all jobs are done)

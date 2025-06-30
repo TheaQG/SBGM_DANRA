@@ -397,26 +397,27 @@ def get_scheduler(cfg, optimizer):
         Returns:
             scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler instance.
     '''
-    if cfg['training']['scheduler'] == 'Step':
+    lr_scheduler_type = cfg['training'].get('lr_scheduler', None)
+    if lr_scheduler_type == 'Step':
         scheduler = StepLR(optimizer,
                            step_size=cfg['training']['lr_scheduler_params']['step_size'],
                            gamma=cfg['training']['lr_scheduler_params']['gamma'])
                            
-    elif cfg['training']['scheduler'] == 'ReduceLROnPlateau':
+    elif lr_scheduler_type == 'ReduceLROnPlateau':
         scheduler = ReduceLROnPlateau(optimizer,
                                       mode='min',
                                       factor=cfg['training']['lr_scheduler_params']['factor'],
                                       patience=cfg['training']['lr_scheduler_params']['patience'],
                                       verbose=True)
-    elif cfg['training']['scheduler'] == 'CosineAnnealing':
+    elif lr_scheduler_type == 'CosineAnnealing':
         scheduler = CosineAnnealingLR(optimizer,
                                       T_max=cfg['training']['lr_scheduler_params']['T_max'],
                                       eta_min=cfg['training']['lr_scheduler_params']['eta_min'])
-    elif cfg['training']['scheduler'] == None:
+    elif lr_scheduler_type == None:
         scheduler = None
         logger.warning("No learning rate scheduler specified. Using the optimizer's default learning rate.")
     else:
-        raise ValueError(f"Scheduler {cfg['training']['scheduler']} not recognized. Use 'step', 'reduce_on_plateau', or 'cosine_annealing'.")
+        raise ValueError(f"Scheduler {lr_scheduler_type} not recognized. Use 'step', 'reduce_on_plateau', or 'cosine_annealing'.")
 
     return scheduler
 

@@ -116,11 +116,13 @@ def train_main(cfg):
     optimizer = get_optimizer(cfg, model)
 
     # Get the learning rate scheduler (if applicable)
-    scheduler = None
-    if cfg['training']['lr_scheduler'] is not None:
+    lr_scheduler_type = cfg['training'].get('lr_scheduler', None)
+    
+    if lr_scheduler_type is not None:
+        logger.info(f"▸ Using learning rate scheduler: {lr_scheduler_type}")
         scheduler = get_scheduler(cfg, optimizer)
-        logger.info(f"▸ Using learning rate scheduler: {cfg['training']['lr_scheduler']}")
     else:
+        scheduler = None
         logger.info("▸ No learning rate scheduler specified, using default learning rate.")
 
     # Define the training pipeline
