@@ -192,7 +192,7 @@ def split_and_copy_to_dirs(model_list=['DANRA', 'ERA5'],
             
 
             train_dir = os.path.join(small_data_dir, 'train')
-            val_dir = os.path.join(small_data_dir, 'val')
+            val_dir = os.path.join(small_data_dir, 'valid')
             test_dir = os.path.join(small_data_dir, 'test')
 
             # Create and clear the train, val and test directories
@@ -230,7 +230,7 @@ def split_and_copy_to_dirs(model_list=['DANRA', 'ERA5'],
                     # Copy the file to the new directory NOT move it
                     shutil.copyfile(src, dst)
             small_data_dirs[model][var]['train'] = train_dir
-            small_data_dirs[model][var]['val'] = val_dir
+            small_data_dirs[model][var]['valid'] = val_dir
             small_data_dirs[model][var]['test'] = test_dir
 
     # Print the small data batch directories
@@ -256,13 +256,13 @@ def dirs_to_zarr(data_path,
             os.makedirs(small_data_dir_zarr, exist_ok=True)
             # Get the train, val and test directories
             train_dir = small_data_dirs[model][var]['train']
-            val_dir = small_data_dirs[model][var]['val']
+            val_dir = small_data_dirs[model][var]['valid']
             test_dir = small_data_dirs[model][var]['test']
             # Convert the directories to zarr format
             print(f"Converting {train_dir} to zarr format...")
             convert_npz_to_zarr(train_dir, os.path.join(small_data_dir_zarr, 'train.zarr'), VERBOSE=True)
             print(f"Converting {val_dir} to zarr format...")
-            convert_npz_to_zarr(val_dir, os.path.join(small_data_dir_zarr, 'val.zarr'), VERBOSE=True)
+            convert_npz_to_zarr(val_dir, os.path.join(small_data_dir_zarr, 'valid.zarr'), VERBOSE=True)
             print(f"Converting {test_dir} to zarr format...")
             convert_npz_to_zarr(test_dir, os.path.join(small_data_dir_zarr, 'test.zarr'), VERBOSE=True)
 

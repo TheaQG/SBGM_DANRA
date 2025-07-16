@@ -90,7 +90,7 @@ def train_main(cfg):
             plt.close(fig)
         # Save the figure
         SAVE_NAME = 'Initial_sample_plot.png'
-        fig.savefig(path_figures + SAVE_NAME, bbox_inches='tight', dpi=300)
+        fig.savefig(path_figures + '/' + SAVE_NAME, bbox_inches='tight', dpi=300)
         
         logger.info(f"▸ Saved initial sample plot to {path_figures}/{SAVE_NAME}")
     

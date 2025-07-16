@@ -18,5 +18,9 @@ echo "[INFO] DATA_DIR      = $DATA_DIR"
 echo "[INFO] SAMPLE_DIR    = $SAMPLE_DIR"
 echo "[INFO] CKPT_DIR      = $CKPT_DIR"
 
-# === Launch the training ===
-python -m sbgm.cli.main_app train
+# === Launch the optimization ===
+python -m sbgm.sweep.run_optuna \
+    --study-name "sbgm_optuna_test" \
+    --storage "sqlite:///sbgm_optuna_test.db" \
+    --n-trials 3 \
+    --epochs 1 \
