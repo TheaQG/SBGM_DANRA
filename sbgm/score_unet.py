@@ -273,12 +273,12 @@ class Encoder(ResNet):
         #t = self.sinusiodal_embedding(t)
         # Add the label embedding to the time embedding
         if y is not None:
-            # logger.debug('Time embedding size:')
-            # logger.debug(t.shape)  
-            # logger.debug('Label size:')
-            # logger.debug(y.shape)
-            # logger.debug('Label embedding size:')
-            # logger.debug(self.label_emb(y).shape)
+            logger.debug('Time embedding size:')
+            logger.debug(t.shape)  
+            logger.debug('Label size:')
+            logger.debug(y.shape)
+            logger.debug('Label embedding size:')
+            logger.debug(self.label_emb(y).shape)
 
             t += self.label_emb(y)
         #logger.debug('\n Time embedding type: ', t.dtype, '\n')

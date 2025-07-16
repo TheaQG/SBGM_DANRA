@@ -1,0 +1,75 @@
+Logging to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models/logs/train_log_20250630_155423.log
+=== Starting SBGM_SD Training Pipeline ===
+Experiment name: sbgm_fullRun
+▸ CUDA is not available, using CPU instead.
+
+Using HR data type: DANRA prcp [mm]
+Using LR data type 1: ERA5 temp [$^\circ$C]
+Using LR data type 2: ERA5 prcp [mm]
+
+
+High-resolution data size: (128, 128)
+Low-resolution data size: (128, 128)
+Extended log range from [-18, 6]
+to [-20.4, 8.4]
+
+Extended log range from [-19, 5]
+to [-21.4, 7.4]
+
+
+SDF weighted loss enabled. Setting lsm and topo to true.
+
+
+Using geographical features for sampling.
+
+
+
+
+Number of training samples: 70
+Number of validation samples: 15
+Cache size for training: 35
+Cache size for validation: 7
+
+
+
+Loading zarr group for condition temp
+Loading zarr group for condition prcp
+
+
+
+Loading zarr group for condition temp
+Loading zarr group for condition prcp
+
+
+
+Loading zarr group for condition temp
+Loading zarr group for condition prcp
+
+
+
+
+Training dataset: 70 samples
+Validation dataset: 15 samples
+Generation dataset: 15 samples
+
+Batch size: 16
+Number of workers: None
+
+
+
+temp_lr: torch.Size([1, 128, 128])
+prcp_lr: torch.Size([1, 128, 128])
+prcp_hr: torch.Size([1, 128, 128])
+lsm_hr: torch.Size([1, 128, 128])
+lsm: torch.Size([1, 128, 128])
+topo: torch.Size([1, 128, 128])
+classifier: torch.Size([])
+sdf: torch.Size([1, 128, 128])
+hr_points: [190, 318, 372, 500]
+lr_points: [177, 305, 392, 520]
+
+
+
+▸ Saved initial sample plot to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples/samples/sbgm_fullRun__HR_prcp_DANRA__SIZE_128x128__LR_temp_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_1000/Figures/Initial_sample_plot.png
+▸ Using learning rate scheduler: ReduceLROnPlateau
+→ Model weights initialized with Xavier uniform initialization.

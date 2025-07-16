@@ -7,6 +7,7 @@ experiment:
 paths:
   data_dir: ${env:DATA_DIR} # Directory for input data
   checkpoint_dir: ${env:CKPT_DIR} # Directory for model checkpoints
+  checkpoint_name: sbgm_fullRun # Name of the checkpoint file
   sample_dir: ${env:SAMPLE_DIR} # Directory for saving samples
   specific_fig_name: test__plot_fct # Specific figure name to save
   path_save: ${env:SAMPLE_DIR} # Path to save figures

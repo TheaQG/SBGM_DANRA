@@ -67,7 +67,7 @@ class TrainingPipeline_general:
         self.lr_scheduler = lr_scheduler
 
         self.scaling = cfg['transforms']['scaling']
-        self.hr_var = cfg['highres']['var']
+        self.hr_var = cfg['highres']['variable']
         self.hr_scaling_method = cfg['highres']['scaling_method']
         self.hr_scaling_params = cfg['highres']['scaling_params']
         self.lr_vars = cfg['lowres']['condition_variables']
@@ -476,7 +476,7 @@ class TrainingPipeline_general:
         
         # Set up back transforms for plotting'
         back_trans = build_back_transforms(
-                    hr_var=cfg['highres']['var'],
+                    hr_var=cfg['highres']['variable'],
                     hr_scaling_method=cfg['highres']['scaling_method'],
                     hr_scaling_params=cfg['highres']['scaling_params'],
                     lr_vars=cfg['lowres']['condition_variables'],
@@ -520,7 +520,7 @@ class TrainingPipeline_general:
                     hr_units=hr_unit,
                     lr_model=cfg['lowres']['model'],
                     lr_units=lr_units,
-                    var=cfg['highres']['var'],
+                    var=cfg['highres']['variable'],
                     scaling=cfg['transforms']['scaling'],
                     show_ocean=cfg['visualization']['show_ocean'],
                     transform_back_bf_plot=cfg['visualization']['transform_back_bf_plot'],
