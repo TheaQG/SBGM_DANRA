@@ -217,6 +217,7 @@ class TrainingPipeline_general:
         
         # Set model to training mode
         self.model.train()
+
         # Set initial loss to 0
         loss_sum = 0.0
 
@@ -231,59 +232,87 @@ class TrainingPipeline_general:
             # Extract samples
             x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
+            # # Log the shapes of the extracted samples
+            # logger.info(f"▸ Shape of x: {x.shape}")
+            # logger.info(f"▸ Shape of seasons: {seasons.shape}")
+            # logger.info(f"▸ Shape of cond_images: {cond_images.shape if cond_images is not None else 'None'}")
+            # logger.info(f"▸ Shape of lsm: {lsm.shape if lsm is not None else 'None'}")
+            # logger.info(f"▸ Shape of topo: {topo.shape if topo is not None else 'None'}")
+
             # Apply Classifier Free Guidance conditioning dropout if enabled
             cfg_guidance = getattr(self, "cfg", {}).get('classifier_free_guidance', None)
             if cfg_guidance and cfg_guidance.get('enabled', False) and cond_images is not None:
+                # logger.info("▸ Applying Classifier Free Guidance conditioning dropout...")
                 drop_prob = cfg_guidance.get('drop_prob', 0.1)
-                # Create a drop mask, that randomly drops drop_prob% of the cond_images in the batch
-                drop_mask = (torch.rand(cond_images.size(0), device=cond_images.device) < drop_prob).view(-1, 1, 1, 1)
+                # Make sure the batch size and device keeps consistent
+                batch_size = cond_images.size(0)
+                device = cond_images.device
 
-                # Define the null condition as a tensor of zeros with the same shape as cond_images 
-                # # !!!!! CAREFULLY CONSIDER THIS - SHOULD IT BE NOISE OR ZEROS OR SOMETHING ELSE? !!!!!
+                # Create a drop mask, that randomly drops drop_prob% of the cond_images in the batch (B,) for scalar condition
+                drop_mask = (torch.rand(batch_size, device=device) < drop_prob)
+
+                # Expand drop mask for image tensors (B, 1, 1, 1)
+                drop_mask_img = drop_mask.view(-1, 1, 1, 1)
+
+                # Nullify image-like conditions
                 null_cond = torch.zeros_like(cond_images)
-                # Apply the drop mask to cond_images
-                cond_images = torch.where(drop_mask, null_cond, cond_images)
+                cond_images = torch.where(drop_mask_img, null_cond, cond_images)
+                if lsm is not None:
+                    null_lsm = torch.zeros_like(lsm)
+                    lsm = torch.where(drop_mask_img, null_lsm, lsm)
+                if topo is not None:
+                    null_topo = torch.zeros_like(topo)
+                    topo = torch.where(drop_mask_img, null_topo, topo)
 
-                # Apply the drop mask to lsm, topo, seasons
-                lsm = torch.where(drop_mask, torch.zeros_like(lsm), lsm)
-                topo = torch.where(drop_mask, torch.zeros_like(topo), topo)
-                # Seasons should be a tensor of -1 for dropped conditions
-                seasons = torch.where(drop_mask.squeeze(), torch.zeros_like(seasons) - 1, seasons)
-            
+                # Nullify scalar condition
+                if seasons is not None:
+                    null_season = torch.zeros_like(seasons)
+                    seasons = torch.where(drop_mask.squeeze(), null_season, seasons)
+
+                # logger.info(f"\n▸ [CFG] Dropped {drop_mask.sum().item()} out of {batch_size} conditions ({drop_prob*100:.1f}%) in the batch.")
+
             # Zero gradients
             self.optimizer.zero_grad()
             
-            # Use mixed precision training if needed
-            if self.scaler:
-                with autocast():
-                    # Pass the score model and samples+conditions to the loss_fn
-                    batch_loss = loss_fn(self.model,
-                                         x,
-                                         self.marginal_prob_std_fn,
-                                         y=seasons,
-                                         cond_img=cond_images,
-                                         lsm_cond=lsm,
-                                         topo_cond=topo,
-                                         sdf_cond=sdf)
-                # Mixed precision: scale loss and update weights
-                self.scaler.scale(batch_loss).backward()
-                # Update weights
-                self.scaler.step(self.optimizer)
-                # Update scaler
-                self.scaler.update()
-            else:
-                batch_loss = loss_fn(self.model,
-                            x,
-                            self.marginal_prob_std_fn,
-                            y = seasons,
-                            cond_img = cond_images,
-                            lsm_cond = lsm,
-                            topo_cond = topo,
-                            sdf_cond = sdf)
+            # # Use mixed precision training if needed
+            # if self.scaler:
+            #     with autocast():
+            #         # Pass the score model and samples+conditions to the loss_fn
+            #         batch_loss = loss_fn(self.model,
+            #                              x,
+            #                              self.marginal_prob_std_fn,
+            #                              y=seasons,
+            #                              cond_img=cond_images,
+            #                              lsm_cond=lsm,
+            #                              topo_cond=topo,
+            #                              sdf_cond=sdf)
+            #     # Mixed precision: scale loss and update weights
+            #     self.scaler.scale(batch_loss).backward()
+            #     # Update weights
+            #     self.scaler.step(self.optimizer)
+            #     # Update scaler
+            #     self.scaler.update()
+            # else:
+            # logger.info("▸ Computing batch loss without mixed precision...")
+                # Log the shapes of the inputs for debugging
+            for name, tensor in zip(['x', 'seasons', 'cond_images', 'lsm', 'topo'], [x, seasons, cond_images, lsm, topo]):
+                if tensor is not None:
+                    assert tensor.device == x.device, f"{name} is on device {tensor.device}, expected {x.device}"
+            batch_loss = loss_fn(self.model,
+                        x,
+                        self.marginal_prob_std_fn,
+                        y = seasons,
+                        cond_img = cond_images,
+                        lsm_cond = lsm,
+                        topo_cond = topo,
+                        sdf_cond = sdf)
+            # logger.info(f"▸ Batch loss computed: {batch_loss.item():.4f}")
+            # Add anomaly detection for loss
+            with torch.autograd.detect_anomaly(True):
                 # Backward pass
                 batch_loss.backward()
-                # Update weights
-                self.optimizer.step()
+            # Update weights
+            self.optimizer.step()
 
             # Add batch loss to total loss
             loss_sum += batch_loss.item()
@@ -328,8 +357,6 @@ class TrainingPipeline_general:
         train_loss = float('inf')
         val_loss = float('inf')
         best_loss = float('inf')
-
-        logger.info('\n\n\nStarting training...\n\n\n')
 
         # Iterate through epochs
         for epoch in range(1, epochs + 1):
@@ -495,6 +522,13 @@ class TrainingPipeline_general:
             # Extract samples
             x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
 
+            # Check shapes of x_gen, cond_images_gen, lsm_gen, topo_gen
+            # logger.info(f"\nShape of x_gen: {x_gen.shape}")
+            # logger.info(f"Shape of seasons_gen: {seasons_gen.shape}")
+            # logger.info(f"Shape of cond_images_gen: {cond_images_gen.shape if cond_images_gen is not None else 'None'}")
+            # logger.info(f"Shape of lsm_gen: {lsm_gen.shape if lsm_gen is not None else 'None'}")
+            # logger.info(f"Shape of topo_gen: {topo_gen.shape if topo_gen is not None else 'None'}")
+
             generated_samples = sampler(
                 score_model = self.model,
                 marginal_prob_std = self.marginal_prob_std_fn,
@@ -525,8 +559,8 @@ class TrainingPipeline_general:
                     show_ocean=cfg['visualization']['show_ocean'],
                     transform_back_bf_plot=cfg['visualization']['transform_back_bf_plot'],
                     back_transforms=back_trans,
-                    hr_cmap=cfg['highres']['cmap_name'],
-                    lr_cmap_dict=cfg['lowres']['cmap_dict'],
+                    hr_cmap=hr_cmap_name,
+                    lr_cmap_dict= lr_cmap_dict,
                 )
 
                 if cfg['visualization']['save_figs']:
@@ -540,6 +574,9 @@ class TrainingPipeline_general:
                 else:
                     # Close the figure
                     plt.close(fig)
+
+                # Stop after the first batch, as we only want to generate samples once per epoch
+                break
                     
 
         # Set model back to training mode

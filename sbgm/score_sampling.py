@@ -147,6 +147,7 @@ def pc_sampler(score_model,
   step_size = time_steps[0] - time_steps[1]
   x = init_x
   x_mean = x  # Initialize x_mean to ensure it is always defined
+
   with torch.no_grad():
     for time_step in tqdm.tqdm(time_steps):
       batch_time_step = torch.ones(batch_size, device=device) * time_step
@@ -167,6 +168,7 @@ def pc_sampler(score_model,
       else:
         # Else, use the standard score model (cheaper computation).
         score = score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond)
+      
       grad = score                                                                                       
       grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
       noise_norm = np.sqrt(np.prod(x.shape[1:]))

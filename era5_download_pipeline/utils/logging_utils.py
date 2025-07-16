@@ -1,9 +1,10 @@
 import logging
 import sys
 import pathlib
+from typing import Union
 from logging.handlers import RotatingFileHandler
 
-def setup_logging(log_file: pathlib.Path | str,
+def setup_logging(log_file: Union[pathlib.Path, str],
                     log_level: str = "INFO",
                     max_mb: int = 10, # 10 * 1024 * 1024 bytes = 10 MB
                     backup_count: int = 3):

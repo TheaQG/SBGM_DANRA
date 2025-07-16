@@ -1076,3 +1076,104 @@
 2025-06-30 13:46:33 | WARNING | multiurl.http:487 | Recovering from connection error [HTTPSConnectionPool(host='cds.climate.copernicus.eu', port=443): Max retries exceeded with url: /api/retrieve/v1/jobs/3fb777e6-4653-437a-964e-de527a834b6f?log=True&request=True (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x10d8558d0>, 'Connection to cds.climate.copernicus.eu timed out. (connect timeout=60)'))], attempt 21 of 500
 2025-06-30 13:46:33 | WARNING | multiurl.http:520 | Retrying in 120 seconds
 2025-06-30 13:47:31 | INFO | multiurl.http:522 | Retrying now...
+2025-07-08 10:27:39 | INFO | root:43 | Logging started; file -> /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/era5_logs/era5_download.log, level -> INFO
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1991 to /tmp/era5_downloads/wvf_north/wvf_north_1991.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1992 to /tmp/era5_downloads/wvf_north/wvf_north_1992.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1993 to /tmp/era5_downloads/wvf_north/wvf_north_1993.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1994 to /tmp/era5_downloads/wvf_north/wvf_north_1994.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1995 to /tmp/era5_downloads/wvf_north/wvf_north_1995.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1996 to /tmp/era5_downloads/wvf_north/wvf_north_1996.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1997 to /tmp/era5_downloads/wvf_north/wvf_north_1997.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1998 to /tmp/era5_downloads/wvf_north/wvf_north_1998.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 1999 to /tmp/era5_downloads/wvf_north/wvf_north_1999.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2000 to /tmp/era5_downloads/wvf_north/wvf_north_2000.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2001 to /tmp/era5_downloads/wvf_north/wvf_north_2001.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2002 to /tmp/era5_downloads/wvf_north/wvf_north_2002.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2003 to /tmp/era5_downloads/wvf_north/wvf_north_2003.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2004 to /tmp/era5_downloads/wvf_north/wvf_north_2004.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2005 to /tmp/era5_downloads/wvf_north/wvf_north_2005.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2006 to /tmp/era5_downloads/wvf_north/wvf_north_2006.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2007 to /tmp/era5_downloads/wvf_north/wvf_north_2007.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2008 to /tmp/era5_downloads/wvf_north/wvf_north_2008.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2009 to /tmp/era5_downloads/wvf_north/wvf_north_2009.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2010 to /tmp/era5_downloads/wvf_north/wvf_north_2010.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2011 to /tmp/era5_downloads/wvf_north/wvf_north_2011.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2012 to /tmp/era5_downloads/wvf_north/wvf_north_2012.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2013 to /tmp/era5_downloads/wvf_north/wvf_north_2013.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2014 to /tmp/era5_downloads/wvf_north/wvf_north_2014.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2015 to /tmp/era5_downloads/wvf_north/wvf_north_2015.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2016 to /tmp/era5_downloads/wvf_north/wvf_north_2016.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2017 to /tmp/era5_downloads/wvf_north/wvf_north_2017.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2018 to /tmp/era5_downloads/wvf_north/wvf_north_2018.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2019 to /tmp/era5_downloads/wvf_north/wvf_north_2019.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_northward_water_vapour_flux 2020 to /tmp/era5_downloads/wvf_north/wvf_north_2020.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1991 to /tmp/era5_downloads/wvf_east/wvf_east_1991.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1992 to /tmp/era5_downloads/wvf_east/wvf_east_1992.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1993 to /tmp/era5_downloads/wvf_east/wvf_east_1993.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1994 to /tmp/era5_downloads/wvf_east/wvf_east_1994.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1995 to /tmp/era5_downloads/wvf_east/wvf_east_1995.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1996 to /tmp/era5_downloads/wvf_east/wvf_east_1996.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1997 to /tmp/era5_downloads/wvf_east/wvf_east_1997.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1998 to /tmp/era5_downloads/wvf_east/wvf_east_1998.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 1999 to /tmp/era5_downloads/wvf_east/wvf_east_1999.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2000 to /tmp/era5_downloads/wvf_east/wvf_east_2000.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2001 to /tmp/era5_downloads/wvf_east/wvf_east_2001.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2002 to /tmp/era5_downloads/wvf_east/wvf_east_2002.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2003 to /tmp/era5_downloads/wvf_east/wvf_east_2003.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2004 to /tmp/era5_downloads/wvf_east/wvf_east_2004.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2005 to /tmp/era5_downloads/wvf_east/wvf_east_2005.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2006 to /tmp/era5_downloads/wvf_east/wvf_east_2006.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2007 to /tmp/era5_downloads/wvf_east/wvf_east_2007.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2008 to /tmp/era5_downloads/wvf_east/wvf_east_2008.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2009 to /tmp/era5_downloads/wvf_east/wvf_east_2009.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2010 to /tmp/era5_downloads/wvf_east/wvf_east_2010.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2011 to /tmp/era5_downloads/wvf_east/wvf_east_2011.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2012 to /tmp/era5_downloads/wvf_east/wvf_east_2012.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2013 to /tmp/era5_downloads/wvf_east/wvf_east_2013.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2014 to /tmp/era5_downloads/wvf_east/wvf_east_2014.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2015 to /tmp/era5_downloads/wvf_east/wvf_east_2015.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2016 to /tmp/era5_downloads/wvf_east/wvf_east_2016.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2017 to /tmp/era5_downloads/wvf_east/wvf_east_2017.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2018 to /tmp/era5_downloads/wvf_east/wvf_east_2018.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2019 to /tmp/era5_downloads/wvf_east/wvf_east_2019.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for vertical_integral_of_eastward_water_vapour_flux 2020 to /tmp/era5_downloads/wvf_east/wvf_east_2020.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1991 to /tmp/era5_downloads/msl/msl_1991.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1992 to /tmp/era5_downloads/msl/msl_1992.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1993 to /tmp/era5_downloads/msl/msl_1993.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1994 to /tmp/era5_downloads/msl/msl_1994.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1995 to /tmp/era5_downloads/msl/msl_1995.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1996 to /tmp/era5_downloads/msl/msl_1996.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1997 to /tmp/era5_downloads/msl/msl_1997.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1998 to /tmp/era5_downloads/msl/msl_1998.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 1999 to /tmp/era5_downloads/msl/msl_1999.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2000 to /tmp/era5_downloads/msl/msl_2000.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2001 to /tmp/era5_downloads/msl/msl_2001.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2002 to /tmp/era5_downloads/msl/msl_2002.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2003 to /tmp/era5_downloads/msl/msl_2003.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2004 to /tmp/era5_downloads/msl/msl_2004.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2005 to /tmp/era5_downloads/msl/msl_2005.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2006 to /tmp/era5_downloads/msl/msl_2006.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2007 to /tmp/era5_downloads/msl/msl_2007.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2008 to /tmp/era5_downloads/msl/msl_2008.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2009 to /tmp/era5_downloads/msl/msl_2009.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2010 to /tmp/era5_downloads/msl/msl_2010.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2011 to /tmp/era5_downloads/msl/msl_2011.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2012 to /tmp/era5_downloads/msl/msl_2012.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2013 to /tmp/era5_downloads/msl/msl_2013.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2014 to /tmp/era5_downloads/msl/msl_2014.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2015 to /tmp/era5_downloads/msl/msl_2015.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2016 to /tmp/era5_downloads/msl/msl_2016.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2017 to /tmp/era5_downloads/msl/msl_2017.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2018 to /tmp/era5_downloads/msl/msl_2018.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2019 to /tmp/era5_downloads/msl/msl_2019.nc
+2025-07-08 10:28:07 | INFO | era5_download_pipeline.pipeline.download:54 | Scheduled download job for mean_sea_level_pressure 2020 to /tmp/era5_downloads/msl/msl_2020.nc
+2025-07-08 10:28:07 | INFO | ecmwf.datastores.legacy_client:192 | [2024-09-26T00:00:00] Watch our [Forum](https://forum.ecmwf.int/) for Announcements, news and other discussed topics.
+2025-07-08 10:28:07 | INFO | ecmwf.datastores.legacy_client:192 | [2024-09-26T00:00:00] Watch our [Forum](https://forum.ecmwf.int/) for Announcements, news and other discussed topics.
+2025-07-08 10:28:07 | INFO | ecmwf.datastores.legacy_client:192 | [2024-09-26T00:00:00] Watch our [Forum](https://forum.ecmwf.int/) for Announcements, news and other discussed topics.
+2025-07-08 10:28:08 | INFO | ecmwf.datastores.legacy_client:192 | Request ID is 858a6271-81bd-4437-b584-474a7fe10aaf
+2025-07-08 10:28:08 | INFO | ecmwf.datastores.legacy_client:192 | status has been updated to accepted
+2025-07-08 10:28:08 | INFO | ecmwf.datastores.legacy_client:192 | Request ID is efd4ec4c-80ca-4fb8-ada4-318b687a5484
+2025-07-08 10:28:09 | INFO | ecmwf.datastores.legacy_client:192 | status has been updated to accepted
+2025-07-08 10:28:09 | INFO | ecmwf.datastores.legacy_client:192 | Request ID is f4677584-d2ef-4048-b028-ec967d6875a8
+2025-07-08 10:28:09 | INFO | ecmwf.datastores.legacy_client:192 | status has been updated to accepted
+2025-07-08 10:28:29 | INFO | ecmwf.datastores.legacy_client:192 | status has been updated to running

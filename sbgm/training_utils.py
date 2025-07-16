@@ -71,7 +71,7 @@ def get_dataloader(cfg, verbose=True):
 
     # Use helper functions to create the path for the zarr files
     hr_data_dir_train = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'train')
-    hr_data_dir_valid = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'val')
+    hr_data_dir_valid = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'valid')
     hr_data_dir_gen = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'test')
     
     # Loop over lr_vars and create paths for low-resolution data
@@ -81,7 +81,7 @@ def get_dataloader(cfg, verbose=True):
 
     for i, cond in enumerate(cfg['lowres']['condition_variables']):
         lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'train')
-        lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'val')
+        lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'valid')
         lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
 
     # # Set scaling and matching 
@@ -107,13 +107,13 @@ def get_dataloader(cfg, verbose=True):
     )
 
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
-        logger.info('\nSDF weighted loss enabled. Setting lsm and topo to true.\n')
+        logger.info('SDF weighted loss enabled. Setting lsm and topo to true.\n')
         sample_w_geo = True
     else:
         sample_w_geo = cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']
 
     if sample_w_geo:
-        logger.info('\nUsing geographical features for sampling.\n')
+        logger.info('Using geographical features for sampling.\n')
         
         geo_variables = cfg['stationary_conditions']['geographic_conditions']['geo_variables']
         data_dir_lsm = cfg['paths']['lsm_path']
@@ -282,18 +282,20 @@ def get_dataloader(cfg, verbose=True):
                             # num_workers=cfg['data_handling']['num_workers'],
     )
     gen_loader = DataLoader(gen_dataset,
-                            batch_size=cfg['training']['batch_size'],
+                            batch_size=cfg['data_handling']['n_gen_samples'], # Generation dataset uses a fixed batch size based on n samples to generate
                             shuffle=False,
                             # num_workers=cfg['data_handling']['num_workers'],
+                            # For generation, drop last batch to ensure all batches are of equal size
+                            drop_last = (len(gen_dataset) % cfg['training']['batch_size']) != 0
     )
 
     # Print dataset information
-    if verbose:
-        logger.info(f"\nTraining dataset: {len(train_dataset)} samples")
-        logger.info(f"Validation dataset: {len(val_dataset)} samples")
-        logger.info(f"Generation dataset: {len(gen_dataset)} samples\n")
-        logger.info(f"Batch size: {cfg['training']['batch_size']}")
-        logger.info(f"Number of workers: {cfg['data_handling']['num_workers']}\n")
+    # if verbose:
+    logger.info(f"\nTraining dataset: {len(train_dataset)} samples")
+    logger.info(f"Validation dataset: {len(val_dataset)} samples")
+    logger.info(f"Generation dataset: {len(gen_dataset)} samples\n")
+    logger.info(f"Batch size: {cfg['training']['batch_size']}")
+    logger.info(f"Number of workers: {cfg['data_handling']['num_workers']}\n")
     
     # Return the dataloaders
     return train_loader, val_loader, gen_loader

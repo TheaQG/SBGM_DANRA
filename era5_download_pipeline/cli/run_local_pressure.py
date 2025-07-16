@@ -11,7 +11,7 @@ import yaml
 from era5_download_pipeline.pipeline import download, transfer, stream
 from era5_download_pipeline.utils.logging_utils import setup_logging
 
-cfg_path = pathlib.Path(__file__).resolve().parents[1] / "cfg/era5_pipeline.yaml"
+cfg_path = pathlib.Path(__file__).resolve().parents[1] / "cfg/era5_pressure_pipeline.yaml"
 cfg = yaml.safe_load(cfg_path.read_text())
 
 parser = argparse.ArgumentParser(description="Run the ERA5 download pipeline locally.")
@@ -32,6 +32,13 @@ setup_logging(args.log, args.log_level)
 
 log = logging.getLogger(__name__)
 log.debug("Configuration loaded from %s", cfg_path)
+
+# Check whether data is single level or pressure level data
+pressure_levels = cfg.get('pressure_levels', None)
+if pressure_levels is not None:
+    log.info("Running in pressure level mode with levels: %s", pressure_levels)
+else:
+    log.info("Running in single-level mode (no pressure levels specified).")
 
 
 if args.mode == "bulk":

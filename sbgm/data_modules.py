@@ -130,17 +130,17 @@ class DateFromFile:
     def determine_season(self):
         # Determine season based on month
         if self.month in [3, 4, 5]:
-            return 0
-        elif self.month in [6, 7, 8]:
             return 1
-        elif self.month in [9, 10, 11]:
+        elif self.month in [6, 7, 8]:
             return 2
-        else:
+        elif self.month in [9, 10, 11]:
             return 3
+        else:
+            return 4
 
     def determine_month(self):
-        # Returns the month as an integer in the interval [0, 11]
-        return self.month - 1
+        # Returns the month as an integer in the interval [1, 12]
+        return self.month
 
     @staticmethod
     def is_leap_year(year):
@@ -161,7 +161,7 @@ class DateFromFile:
             days_in_month = days_in_month_common
 
         # Compute the day of the year
-        day_of_year = sum(days_in_month[:self.month]) + self.day - 1  # "-1" because if it's January 1st, it's the 0th day of the year
+        day_of_year = sum(days_in_month[:self.month]) + self.day # Now 1st January is 1 instead of 0
         return day_of_year
     
 def FileDate(filename):
@@ -431,7 +431,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 group = zarr.open_group(self.lr_cond_dirs_zarr[cond], mode='r')
                 self.lr_cond_zarr_dict[cond] = group
                 self.lr_cond_files_dict[cond] = list(group.keys())
-            logger.info('\n\n')
         else:
             raise ValueError('LR condition directories (lr_cond_dirs_zarr) must be provided as a dictionary.')
 

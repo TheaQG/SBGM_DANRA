@@ -58,14 +58,18 @@ def train_main(cfg):
 
 
     # Examine sample from train dataloader (sample is full batch)
-    logger.info('\n')
     sample = train_dataloader.dataset[0]
     for key, value in sample.items():
         try:
+            # Log the shape of the tensor
             logger.info(f'{key}: {value.shape}')
+            # Log the device of the tensor
+            logger.info(f'{key} device: {value.device}')
         except AttributeError:
             logger.info(f'{key}: {value}')
-    logger.info('\n\n')
+        if key == 'classifier':
+            logger.info(f'▸ Classifier: {value}')
+    
 
     if cfg['visualization']['plot_initial_sample']:
         fig, axs = plot_sample(sample,

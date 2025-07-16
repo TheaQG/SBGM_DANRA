@@ -27,11 +27,14 @@ variables:
   # mean_sea_level_pressure:
   #   short: msl
   #   daily_stat: daymean
-years: [1991, 1993]            # inclusive range
+years: [1993, 1995]            # inclusive range
 max_workers: 2
 tmp_dir: /tmp/era5_downloads
-grid_file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/mygrid_danra_small
-weights_file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/ERA5_to_DANRA_bil_weights_new.nc
+grid_file: /scratch/project_465001695/quistgaa/Data/Data_ERA5_tmp/grid/mygrid_danra_small
+weights_file: /scratch/project_465001695/quistgaa/Data/Data_ERA5_tmp/weights/ERA5_to_DANRA_bil_weights_new.nc
+# grid_file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/mygrid_danra_small
+# weights_file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/Data/ERA5_to_DANRA_bil_weights_new.nc
+delete_on_fly: false
 lumi:
   user:  quistgaa
   host:  lumi.csc.fi
