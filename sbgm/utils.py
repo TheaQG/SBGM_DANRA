@@ -1099,7 +1099,7 @@ def plot_samples_and_generated(
     sample_list = sample_list[:n_samples_threshold]
 
     # ------------------------------------------------------- generated batch
-    logger.info(f"Generated shape: {generated.shape}")
+    # logger.info(f"Generated shape: {generated.shape}")
     gen_np = to_numpy(generated)
     if gen_np.ndim == 4:               # (B, 1, H, W), multiple samples with 1 channel
         gen_np = gen_np[:, 0, :, :]
@@ -1111,7 +1111,7 @@ def plot_samples_and_generated(
         raise ValueError(f"Unexpected shape for generated samples: {gen_np.shape}")
 
     gen_np = gen_np[:len(sample_list)]
-    logger.info(f"Generated shape after slicing: {gen_np.shape}")
+    # logger.info(f"Generated shape after slicing: {gen_np.shape}")
 
     # inject into dicts
     gen_key = "generated"
@@ -1159,9 +1159,9 @@ def plot_samples_and_generated(
                 ax.axis("off")
                 continue
             
-            # Print key and shape for debugging
-            logger.info(f"Key: {key}")
-            logger.info(f"Shape: {sample[key].shape}")
+            # # Print key and shape for debugging
+            # logger.info(f"Key: {key}")
+            # logger.info(f"Shape: {sample[key].shape}")
 
             img = to_numpy(sample[key]).squeeze()
             img = maybe_inverse(key, img)

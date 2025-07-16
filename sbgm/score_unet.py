@@ -192,8 +192,10 @@ class Encoder(ResNet):
 
         # If conditional, set the label embedding layer from the number of classes to the time embedding size
         if num_classes is not None:
-            
-            self.label_emb = nn.Embedding(num_classes, time_embedding).to(self.device)
+            self.num_classes = num_classes
+            self.label_emb = nn.Embedding(num_classes + 1, self.time_embedding)
+            with torch.no_grad():
+                self.label_emb.weight[0].fill_(0.0) # 0 is the null class (CFG), so ensure no conditioning influence
 
         #delete unwanted layers, i.e. maxpool(=self.maxpool), fully connected layer(=self.fc) and average pooling(=self.avgpool
         del self.maxpool, self.fc, self.avgpool
@@ -242,9 +244,13 @@ class Encoder(ResNet):
         t = t.to(self.device)
 
         if lsm_cond is not None:
+            if lsm_cond.shape[0] != x.shape[0]:
+                raise ValueError(f"Batch mismatch: x= {x.shape[0]}, lsm_cond={lsm_cond.shape[0]}.")
             lsm_cond = lsm_cond.to(self.device)
             x = torch.cat([x, lsm_cond], dim=1)
         if topo_cond is not None:
+            if topo_cond.shape[0] != x.shape[0]:
+                raise ValueError(f"Batch mismatch: x= {x.shape[0]}, topo_cond={topo_cond.shape[0]}.")
             topo_cond = topo_cond.to(self.device)
             x = torch.cat([x, topo_cond], dim=1)
 
@@ -257,7 +263,7 @@ class Encoder(ResNet):
             # Concatenate the conditional image to the input
             x = torch.cat((x, cond_img), dim=1)
             #x = x.to(torch.double)
-            #logger.info('\n Conditional image added to input with dtype: ', x.dtype, '\n')
+            #logger.info('Conditional image added to input with dtype: ', x.dtype, '\n')
 
 
         # Send the inputs to the device
@@ -268,18 +274,11 @@ class Encoder(ResNet):
         # Embed the time positions
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
-        t = t.to(self.device)
+        t = t.to(self.device)   
     
         #t = self.sinusiodal_embedding(t)
         # Add the label embedding to the time embedding
         if y is not None:
-            # logger.debug('Time embedding size:')
-            # logger.debug(t.shape)  
-            # logger.debug('Label size:')
-            # logger.debug(y.shape)
-            # logger.debug('Label embedding size:')
-            # logger.debug(self.label_emb(y).shape)
-
             t += self.label_emb(y)
         #logger.debug('\n Time embedding type: ', t.dtype, '\n')
         # Prepare fmap1, the first feature map, by applying the first convolutional layer to the input x
@@ -645,6 +644,7 @@ class ScoreNet(nn.Module):
         # Set the encoder and decoder modules
         self.encoder = encoder.to(self.device)
         self.decoder = decoder.to(self.device)
+
     
     def forward(self,
                 x:torch.Tensor,
@@ -743,9 +743,15 @@ def loss_fn(model,
     std = marginal_prob_std(random_t)
     # Perturb the input x with the random noise vector z
     perturbed_x = x + std[:, None, None, None] * z
+
+    assert x.shape[0] == cond_img.shape[0] == lsm_cond.shape[0] == topo_cond.shape[0] == y.shape[0], \
+        f'Batch size mismatch: x={x.shape[0]}, cond_img={cond_img.shape[0]}, lsm_cond={lsm_cond.shape[0]}, topo_cond={topo_cond.shape[0]}, y={y.shape[0]}'
+    
     # Estimate the score at the perturbed input x and the random time step t
     score = model(perturbed_x, random_t, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
     
+    # logger.info('[Loss fn] Score computed.')
+
     max_land_weight=1.0
     min_sea_weight=0.5
     if sdf_cond is not None:

@@ -7,6 +7,7 @@ experiment:
 paths:
   data_dir: ${env:DATA_DIR} # Directory for input data
   checkpoint_dir: ${env:CKPT_DIR} # Directory for model checkpoints
+  checkpoint_name: sbgm_fullRun # Name of the checkpoint file
   sample_dir: ${env:SAMPLE_DIR} # Directory for saving samples
   specific_fig_name: test__plot_fct # Specific figure name to save
   path_save: ${env:SAMPLE_DIR} # Path to save figures
@@ -118,7 +119,7 @@ training:
   load_ema: false # Whether to load EMA weights
   ema_decay: 0.9999 # Decay rate for EMA
   weight_decay: 0.000001 # Weight decay for regularization
-  epochs: 2 # Number of epochs for training
+  epochs: 100 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
   sdf_weighted_loss: true # Whether to use SDF weighted loss
   optimizer: adam # Optimizer to use for training
@@ -131,5 +132,5 @@ training:
 classifier_free_guidance:
   enabled: true # Whether to use classifier-free guidance
   drop_prob: 0.1 # Dropout probability for guidance
-  guidance_scale: 1.0 # Scale for guidance
+  guidance_scale: 3.0 # Scale for guidance
   
