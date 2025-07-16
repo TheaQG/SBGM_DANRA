@@ -95,7 +95,7 @@ visualization:
 
 training:
   seed: 42 # Random seed for reproducibility
-  device: cuda # Device to use for training (e.g., 'cuda' or 'cpu')
+  device: cpu # Device to use for training (e.g., 'cuda' or 'cpu')
   use_mixed_precision: false # Whether to use mixed precision training
   verbose: true # Whether to print verbose output during training
   batch_size: 16 # Batch size for training
