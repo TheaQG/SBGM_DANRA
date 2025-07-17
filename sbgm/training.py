@@ -239,35 +239,35 @@ class TrainingPipeline_general:
             # logger.info(f"▸ Shape of lsm: {lsm.shape if lsm is not None else 'None'}")
             # logger.info(f"▸ Shape of topo: {topo.shape if topo is not None else 'None'}")
 
-            # Apply Classifier Free Guidance conditioning dropout if enabled
-            cfg_guidance = getattr(self, "cfg", {}).get('classifier_free_guidance', None)
-            if cfg_guidance and cfg_guidance.get('enabled', False) and cond_images is not None:
-                # logger.info("▸ Applying Classifier Free Guidance conditioning dropout...")
-                drop_prob = cfg_guidance.get('drop_prob', 0.1)
-                # Make sure the batch size and device keeps consistent
-                batch_size = cond_images.size(0)
-                device = cond_images.device
+            # # Apply Classifier Free Guidance conditioning dropout if enabled
+            # cfg_guidance = getattr(self, "cfg", {}).get('classifier_free_guidance', None)
+            # if cfg_guidance and cfg_guidance.get('enabled', False) and cond_images is not None:
+            #     # logger.info("▸ Applying Classifier Free Guidance conditioning dropout...")
+            #     drop_prob = cfg_guidance.get('drop_prob', 0.1)
+            #     # Make sure the batch size and device keeps consistent
+            #     batch_size = cond_images.size(0)
+            #     device = cond_images.device
 
-                # Create a drop mask, that randomly drops drop_prob% of the cond_images in the batch (B,) for scalar condition
-                drop_mask = (torch.rand(batch_size, device=device) < drop_prob)
+            #     # Create a drop mask, that randomly drops drop_prob% of the cond_images in the batch (B,) for scalar condition
+            #     drop_mask = (torch.rand(batch_size, device=device) < drop_prob)
 
-                # Expand drop mask for image tensors (B, 1, 1, 1)
-                drop_mask_img = drop_mask.view(-1, 1, 1, 1)
+            #     # Expand drop mask for image tensors (B, 1, 1, 1)
+            #     drop_mask_img = drop_mask.view(-1, 1, 1, 1)
 
-                # Nullify image-like conditions
-                null_cond = torch.zeros_like(cond_images)
-                cond_images = torch.where(drop_mask_img, null_cond, cond_images)
-                if lsm is not None:
-                    null_lsm = torch.zeros_like(lsm)
-                    lsm = torch.where(drop_mask_img, null_lsm, lsm)
-                if topo is not None:
-                    null_topo = torch.zeros_like(topo)
-                    topo = torch.where(drop_mask_img, null_topo, topo)
+            #     # Nullify image-like conditions
+            #     null_cond = torch.zeros_like(cond_images)
+            #     cond_images = torch.where(drop_mask_img, null_cond, cond_images)
+            #     if lsm is not None:
+            #         null_lsm = torch.zeros_like(lsm)
+            #         lsm = torch.where(drop_mask_img, null_lsm, lsm)
+            #     if topo is not None:
+            #         null_topo = torch.zeros_like(topo)
+            #         topo = torch.where(drop_mask_img, null_topo, topo)
 
-                # Nullify scalar condition
-                if seasons is not None:
-                    null_season = torch.zeros_like(seasons)
-                    seasons = torch.where(drop_mask.squeeze(), null_season, seasons)
+            #     # Nullify scalar condition
+            #     if seasons is not None:
+            #         null_season = torch.zeros_like(seasons)
+            #         seasons = torch.where(drop_mask.squeeze(), null_season, seasons)
 
                 # logger.info(f"\n▸ [CFG] Dropped {drop_mask.sum().item()} out of {batch_size} conditions ({drop_prob*100:.1f}%) in the batch.")
 

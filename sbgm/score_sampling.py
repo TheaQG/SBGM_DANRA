@@ -8,30 +8,52 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 def guided_score_fn(score_model,
-                    x,
-                    t,
-                    y=None,
-                    cond_img=None,
-                    lsm_cond=None,
-                    topo_cond=None,
-                    scale=2.0,):
+                    x,                        # (B, C, H, W)    noisy sample
+                    t,                        # (B,)            time/sigma
+                    y=None,                   # (B,)            season/class index
+                    cond_img=None,            # (B, C_lr, H, W) conditionals
+                    lsm_cond=None,            # (B, 2, H,W)     value||mask, 2-channels
+                    topo_cond=None,           # (B, 2, H,W)     value||mask, 2-channels
+                    null_token: int = 0,      # NULL index used at train-time
+                    scale: float = 2.0,):     # guidance weight
   '''
-    A wrapper function for the score model to include classifier-free guidance.
-    If model is trained without classifier-free guidance, the model will not use this function.
+    Classifier-free guidance wrapper that:
+    - Keeps geo *values* channel unchanged
+    - Zeroes only the mask channel for the unconditional branch
+    - Uses the correct NULL class token
   '''
-  # Define the null conditional image for classifier-free guidance.
+  # --------------------------------------------------------------------------------------
+  # 1) Build unconditional (dropped) inputs
+  # --------------------------------------------------------------------------------------
   null_cond_img = torch.zeros_like(cond_img) if cond_img is not None else None
-  # Define the null conditional lsm and topo for classifier-free guidance.
-  null_lsm_cond = torch.zeros_like(lsm_cond) if lsm_cond is not None else None
-  null_topo_cond = torch.zeros_like(topo_cond) if topo_cond is not None else None
-  null_y = torch.zeros_like(y) - 1 if y is not None else None
+
+  def strip_mask(tensor):
+    """Set mask channel (idx=1) to zero, leaving the value channel (idx=0) unchanged."""
+    if tensor is None or tensor.shape[1] != 2:
+      return tensor
+    
+    t_null = tensor.clone()
+    t_null[:, 1, :, :] = 0.0    # mask -> 0, value unchanged
+    return t_null
+
+  null_lsm = strip_mask(lsm_cond)
+  null_topo = strip_mask(topo_cond)
+
+  null_y = torch.full_like(y, null_token) if y is not None else None
+
+  # --------------------------------------------------------------------------------------
+  # 2) Forward passes
+  # --------------------------------------------------------------------------------------
 
   # Compute the score for the conditional and unconditional cases.
   score_cond = score_model(x, t, y, cond_img, lsm_cond, topo_cond)
-  score_uncond = score_model(x, t, null_y, null_cond_img, null_lsm_cond, null_topo_cond)
+  score_uncond = score_model(x, t, null_y, null_cond_img, null_lsm, null_topo)
 
-  # The final score is a linear combination of the conditional and unconditional scores.
-  return (1 + scale) * score_cond - scale * score_uncond
+  # --------------------------------------------------------------------------------------
+  # 3) Linear combination (1+w)s_c - 2*s_u
+  # --------------------------------------------------------------------------------------
+  guided_score = (1.0 + scale) * score_cond - scale * score_uncond
+  return guided_score
 
 
 #@title Define the Euler-Maruyama sampler (double click to expand or collapse)
@@ -92,7 +114,8 @@ def Euler_Maruyama_sampler(score_model,
                                 cond_img,
                                 lsm_cond,
                                 topo_cond,
-                                scale=scale)
+                                scale=scale,
+                                null_token = 0)
       else:
         # Else, use the standard score model (cheaper computation).
         score = score_model(x, batch_time_step, y, cond_img, lsm_cond, topo_cond)

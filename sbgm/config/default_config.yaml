@@ -133,4 +133,16 @@ classifier_free_guidance:
   enabled: true # Whether to use classifier-free guidance
   drop_prob: 0.1 # Dropout probability for guidance
   guidance_scale: 3.0 # Scale for guidance
+
+evaluation:
+  n_gen_samples: 1 # Number of samples to generate
+  n_steps: 1000 # Number of generation steps
+  batch_size: 1 # Batch size for generation
+  device: cpu # Device to use for generation (e.g., 'cuda' or 'cpu')
+  seed: 42 # Random seed for generation
+  gen_type: multiple # Type of generation to perform
+  save_samples: true # Whether to save generated samples
+  save_path: ${env:SAMPLE_DIR}/generated_samples.npz # Path to save generated samples
+  save_figs: true # Whether to save figures of generated samples
+  fig_name: generated_samples # Name for the generated sample figures
   

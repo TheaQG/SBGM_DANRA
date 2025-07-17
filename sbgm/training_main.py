@@ -34,9 +34,11 @@ def train_main(cfg):
 
     # Set path to figures, samples, losses
     save_str = get_model_string(cfg)
-    path_samples = cfg['paths']['path_save'] + '/samples/' + save_str
-    path_figures = path_samples + '/Figures'
+    path_samples = os.path.join(cfg['paths']['path_save'], 'samples', save_str)
+    path_figures = os.path.join(path_samples, 'Figures')
 
+    # Make sure figures directory exists
+    os.makedirs(path_figures, exist_ok=True)
 
     # Read device str from cfg
     device_str = cfg['training']['device']
@@ -90,9 +92,10 @@ def train_main(cfg):
             plt.close(fig)
         # Save the figure
         SAVE_NAME = 'Initial_sample_plot.png'
-        fig.savefig(path_figures + '/' + SAVE_NAME, bbox_inches='tight', dpi=300)
+        save_path = os.path.join(path_figures, SAVE_NAME)
+        fig.savefig(save_path, bbox_inches='tight', dpi=300)
         
-        logger.info(f"▸ Saved initial sample plot to {path_figures}/{SAVE_NAME}")
+        logger.info(f"▸ Saved initial sample plot to {save_path}")
     
     
     #Setup checkpoint path

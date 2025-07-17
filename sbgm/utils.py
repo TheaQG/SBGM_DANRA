@@ -35,6 +35,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+# --------------------------------------------------------------------------------
+# Helper: return numpy array with mask-channel removed, if shape == (2, H, W)
+# --------------------------------------------------------------------------------
+GEO_KEYS = {"lsm", "topo"}      # Plot-keys that carry value||mask
+def _squeeze_geo_value(arr, key):
+    """
+        If *arr* is a torch/np array of shape (2,H,W) *and* identifies as a geo tensor
+        assume it is [value, mask] and return only the first channel. Otherwise return 
+        the array unchanged.
+    """
+    if key in GEO_KEYS and hasattr(arr, "shape") and arr.ndim == 3 and arr.shape[0] == 2:
+        return arr[0]
+    return arr
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -703,6 +717,7 @@ def plot_sample(sample,
         img_data = sample[key]
         if torch.is_tensor(img_data):
             img_data = img_data.squeeze().cpu().numpy()
+        img_data = _squeeze_geo_value(img_data, key)
 
         # For HR images (keys ending with '_hr' or '_hr_original'), if show_ocean is False, apply masking using lsm_hr
         if not show_ocean and (key.endswith("_hr") or key.endswith("_hr_original")):
@@ -931,6 +946,7 @@ def plot_samples(samples, hr_model, hr_units,
             img_data = sample[key]
             if torch.is_tensor(img_data):
                 img_data = img_data.squeeze().cpu().numpy()
+            img_data = _squeeze_geo_value(img_data, key)
             # For HR images mask out ocean using lsm_hr if needed.
             if not show_ocean and (key.endswith('_hr') or key.endswith('_hr_original')):
                 if "lsm_hr" in sample and sample["lsm_hr"] is not None:
@@ -1164,6 +1180,7 @@ def plot_samples_and_generated(
             # logger.info(f"Shape: {sample[key].shape}")
 
             img = to_numpy(sample[key]).squeeze()
+            img = _squeeze_geo_value(img, key)
             img = maybe_inverse(key, img)
 
             # mask ocean for HR & generated columns

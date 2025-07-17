@@ -15,18 +15,71 @@ import os
 
 import numpy as np
 from matplotlib import pyplot as plt
-from torch.utils.data import DataLoader
 
-from sbgm.data_modules import *
-from sbgm.score_unet import *
-from sbgm.score_sampling import *
-from sbgm.training import *
-from sbgm.utils import *
+from sbgm.score_sampling import pc_sampler
+from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
+from sbgm.utils import plot_samples_and_generated, extract_samples
 
-def generation_main(cfg):
+def run_generation_multiple(cfg,
+                            dataloader,
+                            model,
+                            back_transforms,
+                            device
+                            ):
     """
-        Main function to run generation.
+    Generate multiple samples from trained model.
     """
+
+    model.eval()
+    n_gen_samples = cfg.evaluation.n_gen_samples
+    output_dir = cfg.paths.sample_dir
+
+    samples = next(iter(dataloader))
+    # Extract the samples
+    x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, device)
+    
+    batch_size = n_gen_samples
+
+    generated = pc_sampler(
+        score_model=model,
+        marginal_prob_std=marginal_prob_std_fn,
+        diffusion_coeff=diffusion_coeff_fn,
+        batch_size=batch_size,
+        num_steps=cfg.sampler.n_timesteps,
+        device=device,
+        img_size=cfg.highres.data_size[0],
+        y=seasons,
+        cond_img=cond_images,
+        lsm_cond=lsm,
+        topo_cond=topo
+    ).squeeze().detach().cpu()
+
+    if cfg.visualization.transform_back_bf_plot:
+        generated = back_transforms['hr'](generated)
+        x = back_transforms['hr'](x)
+
+        # Also backtransform cond_images
+        cond_images = back_transforms['lr'](cond_images)
+
+    np.savez_compressed(os.path.join(output_dir, 'gen_samples_multi'), generated.numpy())
+    np.savez_compressed(os.path.join(output_dir, 'eval_samples_multi'), x.cpu().numpy())
+    np.savez_compressed(os.path.join(output_dir, 'cond_samples_multi'), cond_images.cpu().numpy())
+
+    if cfg.visualization.create_figs:
+        fig, _ = plot_samples_and_generated(samples, generated, ...)
+    
+
+
+
+
+
+
+
+
+# def generation_main(cfg):
+#     """
+#         Main function to run generation.
+#     """
     # # Set up the generation class with the provided configuration
     # generation = GenerationSBGM(cfg)
 

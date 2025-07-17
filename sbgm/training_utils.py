@@ -195,6 +195,8 @@ def get_dataloader(cfg, verbose=True):
                             geo_variables=geo_variables,
                             lsm_full_domain=data_lsm,
                             topo_full_domain=data_topo,
+                            cfg = cfg,
+                            split = "train",
                             shuffle=True,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
                             cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
@@ -226,6 +228,8 @@ def get_dataloader(cfg, verbose=True):
                             geo_variables=geo_variables,
                             lsm_full_domain=data_lsm,
                             topo_full_domain=data_topo,
+                            cfg = cfg,
+                            split = "valid",
                             shuffle=True,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
                             cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
@@ -257,6 +261,8 @@ def get_dataloader(cfg, verbose=True):
                             geo_variables=geo_variables,
                             lsm_full_domain=data_lsm,
                             topo_full_domain=data_topo,
+                            cfg = cfg,
+                            split = "gen",
                             shuffle=True,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
                             cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
@@ -300,6 +306,16 @@ def get_dataloader(cfg, verbose=True):
     # Return the dataloaders
     return train_loader, val_loader, gen_loader
 
+
+def infer_in_channels(cfg: dict) -> int:
+    # low-res conditions
+    n_lr = len(cfg['lowres']['condition_variables']) if cfg['lowres']['condition_variables'] is not None else 0
+    # geo maps (value + mask)
+    n_geo = 0
+    if cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']:
+        n_geo = 2 * len(cfg["stationary_conditions"]["geographic_conditions"]["geo_variables"])
+    return n_lr + n_geo
+
 def get_model(cfg):
     '''
         Get the model based on the configuration.
@@ -312,7 +328,7 @@ def get_model(cfg):
     '''
     
     # Define model parameters
-    input_channels = len(cfg['lowres']['condition_variables'])  # 
+    input_channels = infer_in_channels(cfg)
     output_channels = 1#len(cfg['highres']['variable'])  # Assuming a single output channel for the high-resolution variable
     
     if cfg['lowres']['condition_variables'] is not None:
@@ -332,8 +348,6 @@ def get_model(cfg):
 
     encoder = Encoder(input_channels=input_channels,
                       time_embedding=cfg['sampler']['time_embedding'],
-                      cond_on_lsm=cfg['stationary_conditions']['geographic_conditions']['sample_w_geo'],
-                      cond_on_topo=cfg['stationary_conditions']['geographic_conditions']['sample_w_geo'],
                       cond_on_img=sample_w_cond_img,
                       block_layers=cfg['sampler']['block_layers'],
                       num_classes=cfg['stationary_conditions']['seasonal_conditions']['n_seasons'] if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'] else None,

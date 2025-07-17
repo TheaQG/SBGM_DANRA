@@ -120,8 +120,6 @@ class Encoder(ResNet):
                  block_layers:list=[2, 2, 2, 2],
                  n_heads:int=4,
                  num_classes:Optional[int]=None,
-                 cond_on_lsm=False,
-                 cond_on_topo=False,
                  cond_on_img=False,
                  cond_img_dim = None,
                  device = None
@@ -154,13 +152,6 @@ class Encoder(ResNet):
             self.device = device
         # Set device for the ResNet
         self.to(self.device)
-
-        # Register the lsm and elevation tensors as buffers (i.e. they are not trained) and add a channel for each of them
-        if cond_on_lsm:
-            self.input_channels += 1
-        if cond_on_topo:
-            self.input_channels += 1
-
         
         # Initialize the sinusoidal time embedding layer with the given time_embedding
         self.sinusiodal_embedding = SinusoidalEmbedding(self.time_embedding).to(self.device)

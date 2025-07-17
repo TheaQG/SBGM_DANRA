@@ -346,6 +346,9 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 geo_variables:Optional[list] = ['lsm', 'topo'], # Geo variables to load
                 lsm_full_domain = None,             # Land-sea mask of full domain
                 topo_full_domain = None,            # Topography of full domain
+                # Configuration information
+                cfg: dict | None = None,
+                split: str = "train",
                 # Other dataset parameters
                 n_samples:int = 365,                # Number of samples to load
                 cache_size:int = 365,               # Number of samples to cache
@@ -443,6 +446,10 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # Save geo variables full-domain arrays
         self.lsm_full_domain = lsm_full_domain
         self.topo_full_domain = topo_full_domain
+
+        # Save classifier-free guidance parameters
+        self.cfg = cfg
+        self.split = split 
 
         # Save other parameters
         self.shuffle = shuffle
@@ -774,6 +781,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 
                 if geo_data is not None and geo_transform is not None:
                     geo_data = geo_transform(geo_data)
+
                 sample_dict[geo] = geo_data
 
         # Check if conditional sampling on season (or monthly/daily) is used
@@ -820,6 +828,43 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             sample_dict['hr_points'] = hr_point
             sample_dict['lr_points'] = lr_point
 
+        # -------------------------------------------------------------------------------
+        # Classifier-Free Guidance dropout (training split only)
+        # -------------------------------------------------------------------------------
+        cfg_guidance = getattr(self, "cfg", {}).get("classifier_free_guidance", {})
+        drop_prob = cfg_guidance.get("drop_prob", 0.1)
+        dropped = False
+        if self.split == "train" and cfg_guidance.get("enabled", False):
+            if torch.rand(()) < cfg_guidance.get(drop_prob, 0.1):
+                dropped = True
+
+                # 1) z-scored low-res fields --> set to zero
+                for key, val in list(sample_dict.items()):
+                    if key.endswith("_lr") and val is not None:
+                        sample_dict[key] = torch.zeros_like(val)
+
+                # 2) Bounded geo maps (lsm, topo) -> keep value, append MASK channel
+                for geo_key in ("lsm", "topo"):
+                    geo = sample_dict.get(geo_key)
+                    if geo is not None:
+                        mask = torch.zeros_like(geo)        # 0 --> dropped
+                        sample_dict[geo_key] = torch.cat([geo, mask], dim=0)  # Append mask channel [2, H, W]
+
+                # 3) scalar season / class index --> special NULL token 
+                if "classifier" in sample_dict and sample_dict["classifier"] is not None:
+                    null_token = 0
+                    sample_dict["classifier"].fill_(null_token)  # Set to NULL token, 0
+                
+        # ----------------------------------------------------------------------------
+        # If NOT dropped, still append a mask channel = 1 to keep the channel count fixed
+        # ----------------------------------------------------------------------------
+        for geo_key in ("lsm", "topo"):
+            geo = sample_dict.get(geo_key)
+            if geo is not None:
+                if geo.shape[0] == 1:       # I.e. mask is not added yet
+                    mask_val = 0.0 if dropped else 1.0
+                    mask = torch.full_like(geo, mask_val)       # (1, H, W)
+                    sample_dict[geo_key] = torch.cat([geo, mask], dim=0) # (2, H, W)
         # Add item to cache
         self._addToCache(idx, sample_dict)
 
