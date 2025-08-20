@@ -26,12 +26,6 @@ def train_main(cfg):
     logger.info("=== Starting SBGM_SD Training Pipeline ===")
     logger.info(f"Experiment name: {cfg['experiment']['name']}")
 
-    # Set units and colormaps
-    hr_unit, lr_units = get_units(cfg)
-    hr_cmap_name, lr_cmap_dict = get_cmaps(cfg)
-    extra_cmap_dict = {"topo": "terrain", "lsm": "binary", "sdf": "coolwarm"}
-  
-
     # Set path to figures, samples, losses
     save_str = get_model_string(cfg)
     path_samples = os.path.join(cfg['paths']['path_save'], 'samples', save_str)
@@ -58,6 +52,17 @@ def train_main(cfg):
     # Load data
     train_dataloader, val_dataloader, gen_dataloader = get_dataloader(cfg)
 
+    # ------------------------------------------------------------------------
+    # Quick data-loader throughput check: ~100 batches warm-up + timed 
+    # ------------------------------------------------------------------------
+    from time import perf_counter
+    start = perf_counter()
+    for i, _ in enumerate(train_dataloader):
+        if i == 100:
+            avg = (perf_counter() - start) / 100
+            logger.info(f"▸ Dataloader average fetch time ~{avg:.3f} s / batch ")
+
+
 
     # Examine sample from train dataloader (sample is full batch)
     sample = train_dataloader.dataset[0]
@@ -74,18 +79,7 @@ def train_main(cfg):
     
 
     if cfg['visualization']['plot_initial_sample']:
-        fig, axs = plot_sample(sample,
-                        hr_model = cfg['highres']['model'],
-                        hr_units = hr_unit,
-                        lr_model = cfg['lowres']['model'],
-                        lr_units = lr_units,
-                        var = cfg['highres']['variable'],
-                        show_ocean = cfg['visualization']['show_ocean'],
-                        hr_cmap = hr_cmap_name,
-                        lr_cmap_dict = lr_cmap_dict,
-                        extra_keys = ['topo', 'lsm', 'sdf'],
-                        extra_cmap_dict = extra_cmap_dict
-                        )
+        fig, _ = plot_sample(sample, cfg)
         if cfg['visualization']['show_figs']:
             plt.show()
         else:

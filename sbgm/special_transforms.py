@@ -168,8 +168,14 @@ class ZScoreBackTransform(object):
                 self.mean = self.mean.unsqueeze(0)
                 self.std = self.std.unsqueeze(0)
 
+        # Set the epsilon, and send to same device and type
+        eps = 1e-8
+        # Make sure mean and std are on same device as sample
+        self.mean = self.mean.to(sample.device)
+        self.std = self.std.to(sample.device)
+
         # Back-transforming the sample
-        back_transformed_sample = (sample * (self.std + 1e-8)) + self.mean  # Add a small epsilon to avoid division by zero
+        back_transformed_sample = (sample * (self.std + eps)) + self.mean  # Add a small epsilon to avoid division by zero
 
         return back_transformed_sample
     

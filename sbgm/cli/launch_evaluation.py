@@ -1,6 +1,6 @@
 import os
 from omegaconf import OmegaConf
-from sbgm.generation_main import generation_main
+from sbgm.evaluation_main import evaluation_main
 
 
 def run():
@@ -19,4 +19,4 @@ def run():
     print("Resolved data_dir:")
     print(cfg.paths.data_dir)
     # Launch the training process
-    generation_main(cfg)
+    evaluation_main(cfg)

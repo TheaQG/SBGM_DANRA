@@ -106,8 +106,9 @@ class TrainingPipeline_general:
                 param.detach_()
 
         # Set up checkpoint directory, name and path
+        # ======== !!!!!!!!!!!!! CHANGE CHECKPOINT_NAME TO BE FULL get_model_string !!!!!!!!!!!!! ==========
         self.checkpoint_dir = cfg['paths']['checkpoint_dir']
-        self.checkpoint_name = cfg['paths']['checkpoint_name']
+        self.checkpoint_name = get_model_string(cfg) + '.pth.tar' 
         self.checkpoint_path = os.path.join(self.checkpoint_dir, self.checkpoint_name)
 
         # Create the checkpoint directory if it does not exist
@@ -308,7 +309,7 @@ class TrainingPipeline_general:
                         sdf_cond = sdf)
             # logger.info(f"▸ Batch loss computed: {batch_loss.item():.4f}")
             # Add anomaly detection for loss
-            with torch.autograd.detect_anomaly(True):
+            with torch.autograd.detect_anomaly():
                 # Backward pass
                 batch_loss.backward()
             # Update weights
@@ -547,20 +548,12 @@ class TrainingPipeline_general:
 
             # Plot generated and original samples
             if cfg['visualization']['create_figs']:
-                fig, axs = plot_samples_and_generated(
+                fig, _ = plot_samples_and_generated(
                     samples=samples,
                     generated=generated_samples,
-                    hr_model=cfg['highres']['model'],
-                    hr_units=hr_unit,
-                    lr_model=cfg['lowres']['model'],
-                    lr_units=lr_units,
-                    var=cfg['highres']['variable'],
-                    scaling=cfg['transforms']['scaling'],
-                    show_ocean=cfg['visualization']['show_ocean'],
+                    cfg=cfg,
                     transform_back_bf_plot=cfg['visualization']['transform_back_bf_plot'],
                     back_transforms=back_trans,
-                    hr_cmap=hr_cmap_name,
-                    lr_cmap_dict= lr_cmap_dict,
                 )
 
                 if cfg['visualization']['save_figs']:

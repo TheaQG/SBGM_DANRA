@@ -479,6 +479,38 @@ def extract_samples(samples, device=None):
     return hr_img, classifier, lr_img, lsm_hr, lsm, sdf, topo, hr_points, lr_points
 
 
+def get_first_sample_dict(samples: dict) -> dict:
+    """
+        Return a new dictionary with only the first samples from a batch-wise sample dict
+        - Tensors: sliced via [:1] to retain batch-dimension
+        - List/tuples with length matching batch: take [0]
+        - Other objects: kept as-is
+
+    """
+    single_sample = {}
+    batch_size = None
+
+    # Infer batch size from first tensor
+    for v in samples.values():
+        if torch.is_tensor(v):
+            batch_size = v.shape[0]
+            break
+
+    if batch_size is None:
+        raise ValueError("No tensor found in samples to determine batch size.")
+    
+
+    # Now build the single sample dict
+    for k, v in samples.items():
+        if torch.is_tensor(v):
+            single_sample[k] = v[:1]
+        elif isinstance(v, (list, tuple)) and len(v) == batch_size:
+            single_sample[k] = [v[0]]
+        else:
+            single_sample[k] = v
+
+    return single_sample
+
 
 def str2bool(v):
     '''
@@ -634,20 +666,7 @@ def get_cmaps(cfg):
 
 
 def plot_sample(sample,
-                hr_model,
-                hr_units,
-                lr_model,
-                lr_units,
-                var,
-                show_ocean=False,
-                force_matching_scale=False,
-                global_min=None,
-                global_max=None,
-                extra_keys=None,
-                hr_cmap='plasma',
-                lr_cmap_dict=None, # e.g. {"prcp": "inferno", "temp": "plasma", ...}
-                default_lr_cmap='inferno',
-                extra_cmap_dict=None, # e.g. {"topo": "terrain", "sdf": "coolwarm","lsm": "binary"}
+                cfg,
                 figsize=(15, 4)):
     """
         Plot a single sample (dictionary from the dataset class) in a consistent layout
@@ -660,24 +679,25 @@ def plot_sample(sample,
 
         Parameters:
             - sample: Dictionary containing the sample
-            - hr_model: String label for the HR model (e.g. "DANRA")
-            - hr_units: Units for the HR image (e.g. "°C")
-            - lr_model: String label for the LR model (e.g. "ERA5")
-            - lr_units: A list of units for each LR condition (order must match the keys) e.g. ["°C", "mm/day"]
-            - var: HR variable name (e.g. "temp" or "prcp")
-            - show_ocean: Boolean to show ocean or not (i.e. masking HR images)
-            - force_matching_scale: If True, and global_min/max are provided, use to set the colorscale - only for matching variables
-            - global_min, global_max: Dictionaries mapping keys (e.g. "prcp_hr", "prcp_lr") to scalar min and max
-            - extra_keys: List of extra keys to plot (e.g. "topo", "sdf")
-            - hr_cmap: Colormap for HR images (default: 'plasma')
-            - lr_cmap_dict: Dictionary mapping LR variable base names to colormaps (e.g. {"prcp": "inferno", "temp": "plasma"})
-            - default_lr_cmap: Default colormap for LR images (if not specified in lr_cmap_dict)
-            - extra_cmap_dict: Dictionary mapping extra keys to colormaps (e.g. {"topo": "terrain", "sdf": "coolwarm","lsm": "binary"})
+            - cfg: Configuration dictionary containing model and variable information
             - figsize: Tuple for figure size
 
         Returns:
             - fig: The matplotlib Figure object
     """
+    # Extract parameters from cfg
+    hr_model = cfg['highres']['model']
+    hr_units, lr_units = get_units(cfg)
+    lr_model = cfg['lowres']['model']
+    var = cfg['highres']['variable']
+    show_ocean = cfg['visualization']['show_ocean']
+    force_matching_scale = cfg['visualization']['force_matching_scale']
+    global_min = cfg['highres']['scaling_params'] if 'scaling_params' in cfg['highres'] else None
+    global_max = cfg['highres']['scaling_params'] if 'scaling_params' in cfg['highres'] else None
+    extra_keys = cfg['stationary_conditions']['geographic_conditions']['geo_variables']
+    hr_cmap, lr_cmap_dict = get_cmaps(cfg)
+    default_lr_cmap = 'inferno'
+    extra_cmap_dict = {"topo": "terrain", "sdf": "coolwarm", "lsm": "binary"}
 
     # Build list of keys for "variable" images:
     hr_key = f"{var}_hr"
@@ -723,7 +743,7 @@ def plot_sample(sample,
         if not show_ocean and (key.endswith("_hr") or key.endswith("_hr_original")):
             if "lsm_hr" in sample and sample["lsm_hr"] is not None:
                 mask = sample["lsm_hr"].squeeze().cpu().numpy()
-                # ASsume mask values below 1 indicates ocean - set pixels to NaN
+                # Assume mask values below 1 indicates ocean - set pixels to NaN
                 img_data = np.where(mask < 1, np.nan, img_data)
 
         # Determine the colormap based on the key:
@@ -736,7 +756,6 @@ def plot_sample(sample,
                 base = key[:-3]
             elif key.endswith('_lr_original'):
                 base = key[:-12]
-            # logger.debug(f"Base: {base}")
             if lr_cmap_dict is not None and base is not None and base in lr_cmap_dict:
                 cmap = lr_cmap_dict[base]
             else:
@@ -829,19 +848,7 @@ def plot_sample(sample,
 
     return fig, axs
 
-def plot_samples(samples, hr_model, hr_units, 
-                        lr_model, lr_units,
-                        var,
-                        show_ocean=False,
-                        force_matching_scale=True,
-                        global_min=None, global_max=None,
-                        extra_keys=None, 
-                        hr_cmap='plasma', 
-                        lr_cmap_dict=None,  # e.g., {"prcp": "inferno", "temp": "plasma"}
-                        default_lr_cmap='viridis',
-                        extra_cmap_dict=None,  # e.g., {"topo": "terrain", "lsm": "binary", "sdf": "coolwarm"}
-                        n_samples_threshold=3,
-                        figsize=(15, 8)):
+def plot_samples(samples, cfg, n_samples_threshold=3, figsize=(15, 8)):
     """
     Plot a batch of samples (provided as a list of sample dictionaries) in a grid where each row is a sample and
     each column corresponds to a particular key (e.g., HR, LR, originals, geo).
@@ -850,26 +857,28 @@ def plot_samples(samples, hr_model, hr_units,
     
     Parameters:
       - sample_list: List of sample dictionaries.
-      - hr_model: String (e.g., "DANRA") for HR model name (used in titles).
-      - hr_units: Units for HR image (e.g., "mm" or "°C").
-      - lr_model: String (e.g., "ERA5") for LR model name.
-      - lr_units: List of units for LR conditions (order corresponding to sorted LR keys).
-      - var: HR variable name (e.g., "prcp" or "temp").
-      - show_ocean: If False, HR images are masked using the HR mask ("lsm_hr").
-      - force_matching_scale: If True and if global_min/global_max dictionaries are provided, those values are used.
-      - global_min, global_max: Dictionaries mapping keys (e.g., "prcp_hr", "prcp_lr") to scalar min and max values.
-      - extra_keys: List of extra keys to plot (e.g., ["topo", "sdf"]).
-      - hr_cmap: Colormap for HR images.
-      - lr_cmap_dict: Dictionary mapping LR condition base names to colormaps.
-      - default_lr_cmap: Default colormap for LR conditions if not found in lr_cmap_dict.
-      - extra_cmap_dict: Dictionary mapping extra key names to colormaps.
-      - n_samples_threshold: Maximum number of samples (rows) to plot.
+      - cfg: Configuration dictionary containing model and variable information.
       - figsize: Overall figure size.
       
     Returns:
       - fig: The matplotlib Figure object.
     """
     from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    # Extract configuration for plotting
+    hr_model = cfg['highres']['model']
+    lr_model = cfg['lowres']['model']
+    var = cfg['highres']['variable']
+    hr_units, lr_units = get_units(cfg)
+    hr_cmap, lr_cmap_dict = get_cmaps(cfg)
+    default_lr_cmap = 'viridis'
+    extra_cmap_dict = {"topo": "terrain", "lsm": "binary", "sdf": "coolwarm"}
+    show_ocean = cfg.get('visualization', {}).get('show_ocean', False)
+    force_matching_scale = cfg.get('visualization', {}).get('force_matching_scale', True)
+    global_min = cfg.get('visualization', {}).get('global_min', None)
+    global_max = cfg.get('visualization', {}).get('global_max', None)
+    extra_keys = cfg.get('visualization', {}).get('extra_keys', None)
+
 
     # If single batch dict is passed, unpack it to a list
     if isinstance(samples, dict):
@@ -1015,8 +1024,10 @@ def plot_samples(samples, hr_model, hr_units,
                 elif key.endswith('_hr_original'):
                     title = f"HR {hr_model} ({var})\noriginal [{hr_units}]"
                 elif key.endswith('_lr'):
+                    base = key[:-3]
                     title = f"LR {lr_model} ({base})\nscaled"
                 elif key.endswith('_lr_original'):
+                    base = key[:-12]
                     title = f"LR {lr_model} ({base})\noriginal [{lr_units[lr_keys.index(base)]}]"
                 elif extra_keys is not None and key in extra_keys:
                     if key == "topo":
@@ -1033,29 +1044,17 @@ def plot_samples(samples, hr_model, hr_units,
     fig.tight_layout()
     return fig, axs
 
+
+
 def plot_samples_and_generated(
         samples,
         generated,
+        cfg,
         *,
-        hr_model,
-        hr_units,
-        lr_model,
-        lr_units,
-        var,
-        scaling=True,
-        show_ocean=False,
-        force_matching_scale=True,
-        global_min=None,
-        global_max=None,
-        extra_keys=None,
-        hr_cmap="plasma",
-        lr_cmap_dict=None,
-        default_lr_cmap="viridis",
-        extra_cmap_dict=None,
-        n_samples_threshold=3,
-        figsize=(15, 8),
         transform_back_bf_plot=False,
         back_transforms=None,
+        n_samples_threshold=3,
+        figsize=(15, 8),
 ):
     """
     Like ``plot_samples`` but adds an extra left-most column with “Generated”
@@ -1073,6 +1072,21 @@ def plot_samples_and_generated(
         Mapping *plot-key* → inverse-transform function.  Only used when
         *transform_back_bf_plot* is ``True``.
     """
+    # Extract configuration for plotting
+    hr_model = cfg['highres']['model']
+    lr_model = cfg['lowres']['model']
+    var = cfg['highres']['variable']
+    hr_units, lr_units = get_units(cfg)
+    hr_cmap, lr_cmap_dict = get_cmaps(cfg)
+    default_lr_cmap = 'viridis'
+    extra_cmap_dict = {"topo": "terrain", "lsm": "binary", "sdf": "coolwarm"}
+    show_ocean = cfg.get('visualization', {}).get('show_ocean', False)
+    force_matching_scale = cfg.get('visualization', {}).get('force_matching_scale', True)
+    global_min = cfg.get('visualization', {}).get('global_min', None)
+    global_max = cfg.get('visualization', {}).get('global_max', None)
+    extra_keys = cfg.get('visualization', {}).get('extra_keys', None)
+    scaling = cfg.get('visualization', {}).get('scaling', True)
+
 
     # ------------------------------------------------------------------ utils
     def to_numpy(x):
@@ -1081,8 +1095,11 @@ def plot_samples_and_generated(
         return np.asarray(x)
 
     def maybe_inverse(k, arr):
+        logger.info(f"Applying inverse transformation for key: {k}")
         if transform_back_bf_plot and back_transforms and k in back_transforms:
+            logger.info(f"Found inverse transformation for key: {k}")
             return back_transforms[k](arr)
+        logger.info(f"No inverse transformation found for key: {k}")
         return arr
     # logger.info(f'Samples: {samples}')
     # logger.info(f'Generated: {generated}')
@@ -1203,6 +1220,10 @@ def plot_samples_and_generated(
                 vmax = global_max.get(key, np.nanmax(img))
             else:
                 vmin, vmax = np.nanmin(img), np.nanmax(img)
+
+            # Check dimensions of image. if (1, dim, dim), squeeze
+            if img.ndim == 3 and img.shape[0] == 1:
+                img = img.squeeze(0)
 
             im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax,
                            interpolation="nearest")

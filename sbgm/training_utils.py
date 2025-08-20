@@ -162,12 +162,27 @@ def get_dataloader(cfg, verbose=True):
     n_samples_gen = len(list(data_gen_zarr.keys()))
 
     # Setup cache
+
     if cfg['data_handling']['cache_size'] == 0:
         cache_size_train = n_samples_train//2
         cache_size_valid = n_samples_valid//2
     else:
         cache_size_train = cfg['data_handling']['cache_size']
         cache_size_valid = cfg['data_handling']['cache_size']
+
+    if verbose:
+        logger.info(f"\n\n\nNumber of training samples: {n_samples_train}")
+        logger.info(f"Number of validation samples: {n_samples_valid}")
+        logger.info(f"Cache size for training: {cache_size_train}")
+        logger.info(f"Cache size for validation: {cache_size_valid}\n\n\n")
+
+
+    # if cfg['data_handling']['cache_size'] == 0:
+    #     cache_size_train = n_samples_train//2
+    #     cache_size_valid = n_samples_valid//2
+    # else:
+    #     cache_size_train = cfg['data_handling']['cache_size']
+    #     cache_size_valid = cfg['data_handling']['cache_size']
 
     if verbose:
         logger.info(f"\n\n\nNumber of training samples: {n_samples_train}")
@@ -277,22 +292,42 @@ def get_dataloader(cfg, verbose=True):
                             resize_factor=cfg['lowres']['resize_factor'],
                             )
     # Setup dataloaders
-    train_loader = DataLoader(train_dataset,
-                              batch_size=cfg['training']['batch_size'],
-                              shuffle=True,
-                            # num_workers=cfg['data_handling']['num_workers'],
+    raw_workers = cfg['data_handling']['num_workers'] 
+    try:
+        num_workers = int(raw_workers) if raw_workers is not None else 0
+    except ValueError:
+        # Fallback: treat non-numeric as 0 workers
+        num_workers = 0
+    logger.info(f"Number of workers set to: {num_workers} (raw input was: {raw_workers})")
+
+    # Check if pin_memory is set in the config, default to False if not
+    pin_memory = torch.cuda.is_available() and cfg['data_handling']['pin_memory'] if 'pin_memory' in cfg['data_handling'] else False
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size              = cfg['training']['batch_size'],
+        shuffle                 = True,
+        num_workers             = int(cfg['data_handling']['num_workers']),#num_workers,
+        pin_memory              = torch.cuda.is_available(), #pin_memory,
+        persistent_workers      = True, #num_workers > 0, # keeps workers alive between epochs
+        prefetch_factor         = 4, # Each worker preloads 4 batches
+        drop_last               = True # Better for BatchNorm / GroupNorm
+
     )
-    val_loader = DataLoader(val_dataset,
-                            batch_size=cfg['training']['batch_size'],
-                            shuffle=False,
-                            # num_workers=cfg['data_handling']['num_workers'],
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size              = cfg['training']['batch_size'],
+        shuffle                 = False,
+        num_workers             = 0, # num_workers, # choose 0 if we want to ensures no race conditions with cache
+        # pin_memory              = False,
     )
-    gen_loader = DataLoader(gen_dataset,
-                            batch_size=cfg['data_handling']['n_gen_samples'], # Generation dataset uses a fixed batch size based on n samples to generate
-                            shuffle=False,
-                            # num_workers=cfg['data_handling']['num_workers'],
-                            # For generation, drop last batch to ensure all batches are of equal size
-                            drop_last = (len(gen_dataset) % cfg['training']['batch_size']) != 0
+    gen_loader = DataLoader(
+        gen_dataset,
+        batch_size              = cfg['data_handling']['n_gen_samples'], # Generation dataset uses a fixed batch size based on n samples to generate
+        shuffle                 = False,
+        num_workers             = 0, #max(2, num_workers // 4),
+        # pin_memory              = pin_memory,
+        # persistent_workers      = num_workers > 0,
+        drop_last               = (len(gen_dataset) % cfg['training']['batch_size']) != 0,
     )
 
     # Print dataset information
@@ -305,6 +340,199 @@ def get_dataloader(cfg, verbose=True):
     
     # Return the dataloaders
     return train_loader, val_loader, gen_loader
+
+
+def get_gen_dataloader(cfg, verbose=True):
+    '''
+        Get the dataloader for training and validation datasets based on the configuration.
+        Args:
+            cfg (dict): Configuration dictionary containing data settings.
+            verbose (bool): If True, print detailed information about the data types and sizes.
+        Returns:
+            gen_loader (DataLoader): DataLoader for the generation dataset.
+    '''
+    # Print information about data types
+    hr_unit, lr_units = get_units(cfg)
+    logger.info(f"\nUsing HR data type: {cfg['highres']['model']} {cfg['highres']['variable']} [{hr_unit}]")
+
+    for i, cond in enumerate(cfg['lowres']['condition_variables']):
+        logger.info(f"Using LR data type {i+1}: {cfg['lowres']['model']} {cond} [{lr_units[i]}]")
+
+    # Set image dimensions based on config (if None, use default values)
+    hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else None
+    if hr_data_size is None:
+        hr_data_size = (128, 128)
+
+    lr_data_size = tuple(cfg['lowres']['data_size']) if cfg['lowres']['data_size'] is not None else None    
+    if lr_data_size is None:
+        lr_data_size_use = hr_data_size
+    else:
+        lr_data_size_use = lr_data_size
+
+    # Check if resize factor is set and print sizes (if verbose)
+    if cfg['lowres']['resize_factor'] > 1:
+        hr_data_size_use = (hr_data_size[0] // cfg['lowres']['resize_factor'], hr_data_size[1] // cfg['lowres']['resize_factor'])
+        lr_data_size_use = (lr_data_size_use[0] // cfg['lowres']['resize_factor'], lr_data_size_use[1] // cfg['lowres']['resize_factor'])
+    else:
+        hr_data_size_use = hr_data_size
+        lr_data_size_use = lr_data_size_use
+    if verbose:
+        logger.info(f"\n\nHigh-resolution data size: {hr_data_size_use}")
+        if cfg['lowres']['resize_factor'] > 1:
+            logger.info(f"\tHigh-resolution data size after resize: {hr_data_size_use}")
+        logger.info(f"Low-resolution data size: {lr_data_size_use}")
+        if cfg['lowres']['resize_factor'] > 1:
+            logger.info(f"\tLow-resolution data size after resize: {lr_data_size_use}")
+
+    # Set full domain size 
+    full_domain_dims = tuple(cfg['highres']['full_domain_dims']) if cfg['highres']['full_domain_dims'] is not None else None
+
+
+    # Use helper functions to create the path for the zarr files
+    hr_data_dir_train = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'train')
+    hr_data_dir_valid = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'valid')
+    hr_data_dir_gen = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'test')
+    
+    # Loop over lr_vars and create paths for low-resolution data
+    lr_cond_dirs_train = {}
+    lr_cond_dirs_valid = {}
+    lr_cond_dirs_gen = {}
+
+    for i, cond in enumerate(cfg['lowres']['condition_variables']):
+        lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'train')
+        lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'valid')
+        lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
+
+    # # Set scaling and matching 
+    # scaling = cfg['transforms']['scaling']
+    # force_matching_scale = cfg['transforms']['force_matching_scale']
+    # show_both_orig_scaled = cfg['visualization']['show_both_orig_scaled']
+    # transform_back_bf_plot = cfg['visualization']['transform_back_bf_plot']
+
+    # # Set up scaling methods
+    # hr_scaling_method = cfg['highres']['scaling_method']
+    # hr_scaling_params = cfg['highres']['scaling_params']
+    # lr_scaling_methods = cfg['lowres']['scaling_methods']
+    # lr_scaling_params = cfg['lowres']['scaling_params']
+
+    # Set up back transformations (for plotting and visual inspection + later evaluation)
+    back_transforms = build_back_transforms(
+        hr_var              = cfg['highres']['variable'],
+        hr_scaling_method   = cfg['highres']['scaling_method'],
+        hr_scaling_params   = cfg['highres']['scaling_params'],
+        lr_vars             = cfg['lowres']['condition_variables'],
+        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+        lr_scaling_params   = cfg['lowres']['scaling_params']
+    )
+
+    if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
+        logger.info('SDF weighted loss enabled. Setting lsm and topo to true.\n')
+        sample_w_geo = True
+    else:
+        sample_w_geo = cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']
+
+    if sample_w_geo:
+        logger.info('Using geographical features for sampling.\n')
+        
+        geo_variables = cfg['stationary_conditions']['geographic_conditions']['geo_variables']
+        data_dir_lsm = cfg['paths']['lsm_path']
+        data_dir_topo = cfg['paths']['topo_path']
+
+        data_lsm = np.flipud(np.load(data_dir_lsm)['data'])
+        data_topo = np.flipud(np.load(data_dir_topo)['data'])
+
+        if cfg['transforms']['scaling']:
+            if cfg['stationary_conditions']['geographic_conditions']['topo_min'] is None or cfg['stationary_conditions']['geographic_conditions']['topo_max'] is None:
+                topo_min, topo_max = np.min(data_topo), np.max(data_topo)
+            else:
+                topo_min = cfg['stationary_conditions']['geographic_conditions']['topo_min']
+                topo_max = cfg['stationary_conditions']['geographic_conditions']['topo_max']
+            if cfg['stationary_conditions']['geographic_conditions']['norm_min'] is None or cfg['stationary_conditions']['geographic_conditions']['norm_max'] is None:
+                norm_min, norm_max = np.min(data_lsm), np.max(data_lsm)
+            else:
+                norm_min = cfg['stationary_conditions']['geographic_conditions']['norm_min']
+                norm_max = cfg['stationary_conditions']['geographic_conditions']['norm_max']
+            OldRange = (topo_max - topo_min)
+            NewRange = (norm_max - norm_min)
+            data_topo = ((data_topo - topo_min) * NewRange / OldRange) + norm_min
+    else: 
+        geo_variables = None
+        data_lsm = None
+        data_topo = None
+
+    # Setup cutouts. If cutout domains None, use default (170, 350, 340, 520) (DK area with room for shuffle)
+    cutout_domains = tuple(cfg['highres']['cutout_domains']) if cfg['highres']['cutout_domains'] is not None else (170, 350, 340, 520)
+    lr_cutout_domains = tuple(cfg['lowres']['cutout_domains']) if cfg['lowres']['cutout_domains'] is not None else (170, 350, 340, 520)
+
+    # Setup conditional seasons (classification)
+    if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season']:
+        n_seasons = cfg['stationary_conditions']['seasonal_conditions']['n_seasons']
+    else:
+        n_seasons = None
+
+
+    # Make zarr groups
+    data_gen_zarr = zarr.open_group(hr_data_dir_gen, mode='r')
+
+    n_samples_gen = len(list(data_gen_zarr.keys()))
+
+    # Setup dataset
+    gen_dataset = DANRA_Dataset_cutouts_ERA5_Zarr(
+                            hr_variable_dir_zarr=hr_data_dir_gen,
+                            hr_data_size=hr_data_size_use,
+                            n_samples=n_samples_gen,
+                            cache_size=cfg['data_handling']['cache_size'],
+                            hr_variable=cfg['highres']['variable'],
+                            hr_model=cfg['highres']['model'],
+                            hr_scaling_method=cfg['highres']['scaling_method'],
+                            hr_scaling_params=cfg['highres']['scaling_params'],
+                            lr_conditions=cfg['lowres']['condition_variables'],
+                            lr_model=cfg['lowres']['model'],
+                            lr_scaling_methods=cfg['lowres']['scaling_methods'],
+                            lr_scaling_params=cfg['lowres']['scaling_params'],
+                            lr_cond_dirs_zarr=lr_cond_dirs_gen,
+                            geo_variables=geo_variables,
+                            lsm_full_domain=data_lsm,
+                            topo_full_domain=data_topo,
+                            cfg = cfg,
+                            split = "gen",
+                            shuffle=True,
+                            cutouts=cfg['transforms']['sample_w_cutouts'],
+                            cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
+                            n_samples_w_cutouts=n_samples_gen,
+                            sdf_weighted_loss=cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf'],
+                            scale=cfg['transforms']['scaling'],
+                            save_original=cfg['visualization']['show_both_orig_scaled'],
+                            conditional_seasons=cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'],
+                            n_classes=n_seasons,
+                            lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
+                            lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
+                            resize_factor=cfg['lowres']['resize_factor'],
+                            )
+    # Setup dataloaders
+    raw_workers = cfg['data_handling']['num_workers'] 
+    try:
+        num_workers = int(raw_workers) if raw_workers is not None else 0
+    except ValueError:
+        # Fallback: treat non-numeric as 0 workers
+        num_workers = 0
+
+    gen_loader = DataLoader(
+        gen_dataset,
+        batch_size              = cfg['evaluation']['batch_size'],
+        shuffle                 = False,
+        num_workers             = 0, #max(2, num_workers // 4),
+        # pin_memory              = pin_memory,
+        # persistent_workers      = num_workers > 0,
+        drop_last               = (len(gen_dataset) % cfg['training']['batch_size']) != 0,
+    )
+
+    # Print dataset information
+    # if verbose:
+    logger.info(f"Generation dataset: {len(gen_dataset)} samples\n")
+    
+    # Return the dataloaders
+    return gen_loader
 
 
 def infer_in_channels(cfg: dict) -> int:
@@ -331,6 +559,10 @@ def get_model(cfg):
     input_channels = infer_in_channels(cfg)
     output_channels = 1#len(cfg['highres']['variable'])  # Assuming a single output channel for the high-resolution variable
     
+    # Log the number of channels
+    logger.info(f"Input channels: {input_channels}")
+    logger.info(f"Output channels: {output_channels}")
+
     if cfg['lowres']['condition_variables'] is not None:
         sample_w_cond_img = True
     else:
@@ -365,7 +597,7 @@ def get_model(cfg):
                            )
     
     
-    return score_model, checkpoint_path, checkpoint_name
+    return score_model, checkpoint_dir, checkpoint_name
 
 
 def get_optimizer(cfg, model):

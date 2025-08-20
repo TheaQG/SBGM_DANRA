@@ -9,18 +9,20 @@
     UNIFIED CLI INTERFACE FOR SBGM_SD
 """
 import argparse
-from sbgm.cli import launch_sbgm, launch_generation
+from sbgm.cli import launch_sbgm, launch_generation, launch_evaluation
 
 
 def main():
     parser = argparse.ArgumentParser(description="SBGM_SD Unified CLI Interface")
-    parser.add_argument("task", choices=["train", "generate"])
+    parser.add_argument("task", choices=["train", "generate", "evaluate"])
     args = parser.parse_args()
 
     if args.task == "train":
         launch_sbgm.run()
     elif args.task == "generate":
         launch_generation.run()
+    elif args.task == "evaluate":
+        launch_evaluation.run()
     else:
         raise ValueError(f"Unknown task: {args.task}. ")
 
