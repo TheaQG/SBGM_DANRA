@@ -62,7 +62,7 @@ def evaluation_main(cfg):
 
 
     # NEEDS TO BE MADE INTO A LOOP FOR POSSIBILITY OF ALL GENERATION TYPES
-    for gen_type in cfg.evaluation.get('eval_stat_methods', ['multiple']):
+    for gen_type in cfg.evaluation.get('eval_gen_type', ['multiple']):
         logger.info(f'[INFO] Running evaluation for generated sample type: {gen_type}\n')
 
         if gen_type not in ['single', 'repeated', 'multiple']:
