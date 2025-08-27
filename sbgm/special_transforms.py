@@ -1,5 +1,9 @@
 '''
     This file contains custom transforms for data preprocessing.
+
+    TODO:
+        - Implement a 'inverse' flag instead of separate transform and backtransform classes
+        - Combine all types of transforms into a single class
 '''
 
 # Import libraries and modules 
@@ -8,6 +12,18 @@ import logging
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+# def get_transformations(cfg):
+#     """
+#     Get the transformation functions based on the configuration.
+#     """
+#     transformations = []
+#     if cfg.get("scale"):
+#         transformations.append(Scale(**cfg["scale"]))
+#     if cfg.get("zscore"):
+#         transformations.append(ZScoreTransform(**cfg["zscore"]))
+#     return transformations
 
 # Define custom transforms
 class Scale(object):
@@ -57,6 +73,8 @@ class ScaleBackTransform(object):
     The data is back-transformed to the original interval.
     '''
     def __init__(self,
+                 in_low = 0,
+                 in_high = 1,
                  data_min_in = 0,
                  data_max_in = 1
                  ):
@@ -66,6 +84,8 @@ class ScaleBackTransform(object):
             - data_min_in: lower bound of data interval
             - data_max_in: upper bound of data interval
         '''
+        self.in_low = in_low
+        self.in_high = in_high
         self.data_min_in = data_min_in
         self.data_max_in = data_max_in
 
@@ -76,11 +96,11 @@ class ScaleBackTransform(object):
             - sample: data sample to be back-transformed
         '''
         data = sample
-        OldRange = (1 - 0)
+        OldRange = (self.in_high - self.in_low)
         NewRange = (self.data_max_in - self.data_min_in)
 
         # Back-transforming the data
-        DataNew = (((data - 0) * NewRange) / OldRange) + self.data_min_in
+        DataNew = (((data - self.in_low) * NewRange) / OldRange) + self.data_min_in
 
         return DataNew
 

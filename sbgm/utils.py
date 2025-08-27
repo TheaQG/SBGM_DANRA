@@ -1268,6 +1268,23 @@ def plot_samples_and_generated(
 
 
 
+from omegaconf import OmegaConf
+
+def load_config(config_path):
+    """
+        Loads and resolves an OmegaConf configuration
+    """
+    if not OmegaConf.has_resolver("env"):
+        OmegaConf.register_new_resolver("env", lambda x: os.environ.get(x))
+    
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file does not exist: {config_path}")
+
+    cfg = OmegaConf.load(config_path)
+    cfg = OmegaConf.to_container(cfg, resolve=True)
+    cfg = OmegaConf.create(cfg)
+
+    return cfg
 
 
 # def load_config(yaml_file):

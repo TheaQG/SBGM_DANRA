@@ -1,0 +1,33 @@
+
+plotting:
+  save_cutout_example: true
+  fig_save_dir: ${env:DATA_FIGS_DIR}
+  show: false
+  save: true
+  visualize_aggregated: true
+  plot_stats: [mean, std, min, max] # Which statistics to plot
+
+statistics:
+  save_global_pixel_stats: true
+  stats_path: ${env:STATS_SAVE_DIR}
+  aggregate: true
+
+data:
+  aggregation_time: weekly
+  data_dir: ${env:DATA_DIR}
+  n_workers: 4
+  split: all
+
+highres:
+  model: DANRA 
+  variables: ['temp', 'prcp']
+  agg_methods: ['mean', 'sum']
+  domain_size: [589, 789]
+  crop_region: [0, 0, 100, 100]
+
+lowres:
+  model: ERA5
+  condition_variables: ['temp', 'prcp', 'ewvf', 'nwvf', 'cape'] # ['prcp', 'temp', 'ewvf', 'nwvf', 'cape', ....] (ERA5 variables)
+  agg_methods: ['mean', 'sum', 'mean', 'mean', 'mean']
+  domain_size: [589, 789]
+  crop_region: [0, 0, 100, 100]  
