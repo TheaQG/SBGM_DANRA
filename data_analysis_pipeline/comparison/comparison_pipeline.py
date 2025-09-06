@@ -1,0 +1,350 @@
+import os
+import random
+import logging
+import numpy as np
+from data_analysis_pipeline.stats_analysis.data_loading import DataLoader
+from data_analysis_pipeline.comparison.compare_fields import compare_single_day_fields
+from data_analysis_pipeline.comparison.compare_timeseries import compare_over_time
+from data_analysis_pipeline.comparison.compare_distributions import compare_power_spectra, plot_histograms, batch_compare_power_spectra, compute_distribution_stats, compare_distributions
+from sbgm.utils import plot_sample_with_boxplot
+
+# Setup logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("[%(levelname)s] %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+def run_comparison_pipeline(cfg):
+    """
+        Main entry point for running dataset comparisons. 
+        (Distributional, Field-based, Time-series based)
+    """
+
+    # === Extract config sections ===
+    highres_cfg = cfg["highres"]
+    lowres_cfg = cfg["lowres"]
+    comparison_cfg = cfg["comparison"]
+    data_dir = cfg["paths"]["data_dir"]
+
+    variable = comparison_cfg["variable"]
+    split = comparison_cfg.get("split", "all")  # Optional data split (e.g., "train", "val", "test")
+    transform = comparison_cfg.get("transformations", None)  # Optional transformations to apply
+    model_hr = highres_cfg["model"]
+    model_lr = lowres_cfg["model"]
+    crop_hr = highres_cfg.get("crop_region", None)
+    crop_lr = lowres_cfg.get("crop_region", None)
+    domain_size_hr = highres_cfg.get("domain_size", None)
+    domain_size_lr = lowres_cfg.get("domain_size", None)
+    n_workers = comparison_cfg.get("n_workers", 4)
+    mode = comparison_cfg["mode"]  # "field", "timeseries", "distribution", or "all"
+    show = comparison_cfg.get("show", False)
+    save_figures = comparison_cfg.get("save_figures", True)
+    save_path = comparison_cfg.get("save_path", "./figures")
+    print_results = comparison_cfg.get("print_results", True)
+    max_days = comparison_cfg.get("max_days", None)  # Limit number of days to process (for testing)
+
+    logger.info(f"\n[COMPARE] Saving figures to: {save_path if save_figures else 'Not saving figures'}")
+
+    # === Instantiate loaders ===
+    logger.info(f"HR: {model_hr} | LR: {model_lr} | Variable: {variable}")
+    hr_loader = DataLoader(
+        base_dir=data_dir,
+        n_workers=n_workers,
+        variable=variable,
+        model=model_hr,
+        domain_size=domain_size_hr,
+        split=split,
+        crop_region=crop_hr,
+        verbose=cfg.get("data", {}).get("verbose", False),
+        )
+
+    lr_loader = DataLoader(
+        base_dir=data_dir,
+        n_workers=n_workers,
+        variable=variable,
+        model=lowres_cfg["model"],
+        domain_size=domain_size_lr,
+        split=split,
+        crop_region=crop_lr,
+        verbose=cfg.get("data", {}).get("verbose", False),
+        )
+
+    if mode == "field":
+
+        ###############################
+        #                             #
+        # SINGLE/MULTI DAY COMPARISON #     Only load a single or a few specified days
+        #                             #
+        ###############################
+
+        field_mode_cfg = next((m for m in comparison_cfg["modes"] if m["mode"] == "field"), {})
+
+        comparison_types = field_mode_cfg.get("comparison_types", ["qualitative_visual"])
+
+
+        if "field_statistics" or "all" in (comparison_types if isinstance(comparison_types, list) else [comparison_types]):
+            ###############################
+            # SINGLE DAY FIELD STATISTICS #  Single day, numerical stats + diff map
+            ###############################
+            logger.info("\n\n           ### SINGLE DAY FIELD COMPARISON ###\n")
+            date = field_mode_cfg.get("dates", None)
+            if isinstance(date, list):
+                if len(date) > 1:
+                    logger.warning("Multiple dates specified for single-day field comparison. Using the first date only.")
+                date = date[0]
+
+            logger.info(f"Loading single day data for {date}")
+
+            mask = comparison_cfg.get("mask", None) # If null in config, becomes None here
+
+            if not date:
+                raise ValueError("Date must be specified for field comparison mode.")
+
+            hr_data = hr_loader.load_single_day(date)
+            lr_data = lr_loader.load_single_day(date)
+
+            result = compare_single_day_fields(
+                        hr_data,
+                        lr_data,
+                        mask=mask,
+                        variable=variable,
+                        model1=model_hr,
+                        model2=model_lr,
+                        save_path=save_path if save_figures else "",
+                        show=show,
+                        print_results=print_results
+                        )
+
+        if "qualitative_visual" or "all" in (comparison_types if isinstance(comparison_types, list) else [comparison_types]):
+            #################################
+            # QUALITATIVE VISUAL COMPARISON # Single or multiple days, side-by-side plots
+            #################################
+
+            if isinstance(comparison_cfg["dates"], list):
+                dates = field_mode_cfg.get("dates", [])
+                if len(dates) > field_mode_cfg.get("n_max", 5):
+                    logger.warning("Many dates specified for qualitative visual comparison. Limiting to first 5 dates.")
+                    dates = dates[:field_mode_cfg.get("n_max", 5)]
+                else:
+                    dates = [comparison_cfg["dates"]]
+
+                logger.info(f"\n\n           ### MULTI-DAY ({len(dates)} DAYS) QUALITATIVE VISUAL COMPARISON ###\n")
+
+                # Load data for all specified dates first
+                hr_data = hr_loader.load_multi(dates)
+                lr_data = lr_loader.load_multi(dates)
+
+                # Find shared dates between loaded HR and LR data
+                shared_dates = sorted(set(hr_data["timestamps"]) & set(lr_data["timestamps"]))
+                dates = shared_dates
+
+                hr_dict = {d: c for d, c in zip(hr_data["timestamps"], hr_data["cutouts"])}
+                lr_dict = {d: c for d, c in zip(lr_data["timestamps"], lr_data["cutouts"])}
+
+                plot_sample_with_boxplot(
+                    hr=hr_dict,
+                    lr=lr_dict,
+                    hr_model=model_hr,
+                    lr_model=model_lr,
+                    variable=variable,
+                    dates=dates,
+                    combine_into_grid=field_mode_cfg.get("combine_into_grid", True),
+                    save_path=save_path if save_path is not None else f"./figures/comparison/{variable}",
+                    show=show
+                    )
+            else:
+                logger.info(f"\n\n           ### SINGLE DAY QUALITATIVE VISUAL COMPARISON ###\n")
+                logger.info(f"               Date: {comparison_cfg['dates']}")
+                date = comparison_cfg["dates"]
+
+                hr_data = hr_loader.load_single_day(date)
+                lr_data = lr_loader.load_single_day(date)
+
+                plot_sample_with_boxplot(
+                    hr={date: hr_data["cutouts"]},
+                    lr={date: lr_data["cutouts"]},
+                    hr_model=model_hr,
+                    lr_model=model_lr,
+                    variable=variable,
+                    dates=[date],
+                    combine_into_grid=False,
+                    save_path=save_path if save_path is not None else f"./figures/comparison/{variable}",
+                    show=show
+                    )
+
+
+
+
+        
+
+    else:
+
+        ########################
+        #                      #
+        # FULL DATA COMPARISON #   Load all overlapping days from each dataset
+        #                      #
+        ########################
+
+        hr_data = hr_loader.load()
+        lr_data = lr_loader.load()
+        hr_dates = set(hr_data["timestamps"])
+        lr_dates = set(lr_data["timestamps"])
+        
+        shared_dates = sorted(hr_dates & lr_dates)
+        
+        logger.info(f"Found {len(shared_dates)} shared dates between HR and LR datasets.")
+        
+        if max_days:
+            shared_dates = shared_dates[:max_days]
+            logger.info(f"Limiting to first {max_days} days for testing.")
+
+            hr_data = {date: cutout for date, cutout in zip(hr_data["timestamps"], hr_data["cutouts"]) if date in shared_dates}
+            lr_data = {date: cutout for date, cutout in zip(lr_data["timestamps"], lr_data["cutouts"]) if date in shared_dates}
+
+        if mode == "timeseries":
+
+            ######################################
+            #                                    #                             
+            # DAILY STATS TIME SERIES COMPARISON #   Compare daily aggregated stats over all shared days
+            #                                    #                             
+            ######################################
+            
+
+            logger.info(f"\n\n           ### TIME SERIES COMPARISON OVER {len(shared_dates)} DAYS ###\n")
+
+            result = compare_over_time(
+                            hr_data,
+                            lr_data,
+                            model_hr,
+                            model_lr,
+                            variable,
+                            save_path=save_path if save_figures else "",
+                            show=show)
+            if print_results:
+                logger.info("=== Time series comparison summary ===")
+                for metric, stats in result.items():
+                    logger.info(f"{metric}: {stats:.4f}")
+
+        elif mode == "distribution":
+            
+            #############################
+            #                           #                             
+            # DISTRIBUTIONAL COMPARISON #   Compare distributions over all shared days
+            #                           #                             
+            #############################
+
+
+            distribution_mode_cfg = next((m for m in comparison_cfg["modes"] if m["mode"] == "distribution"), {})
+            comparison_types = distribution_mode_cfg.get("comparison_types", ["all"])
+
+            if len(shared_dates) == 1:
+                ##############
+                # SINGLE DAY #
+                ##############
+                for comparison_type in (comparison_types if isinstance(comparison_types, list) else [comparison_types]):
+                    logger.info(f"\n\n           ### DISTRIBUTIONAL COMPARISON ({comparison_type})###\n")
+
+                    date = shared_dates[0]
+                    logger.info(f"Only one date ({date}) found. Running single-day distribution comparison.")
+                    if comparison_type in ["power_spectra", "all"]:
+
+                        #############################
+                        # POWER SPECTRUM COMPARISON #
+                        #############################
+
+                        ps_metrics = compare_power_spectra(
+                                        np.array(hr_data[date]),
+                                        np.array(lr_data[date]),
+                                        model_hr,
+                                        model_lr,
+                                        variable,
+                                        save_path=save_path if save_figures else "",
+                                        show=show)
+                        if print_results:
+                            logger.info(f"=== Power Spectra comparison for {date} ===")
+                            if ps_metrics is not None:
+                                for metric, value in ps_metrics.items():
+                                    logger.info(f"{metric}: {value:.4f}")
+                            else:
+                                logger.warning("No power spectra metrics returned (ps_metrics is None).")
+                    if comparison_type in ["pixel_distributions", "all"]:
+                        
+                        #################################
+                        # PIXEL DISTRIBUTION COMPARISON #
+                        #################################
+
+                        stats = compare_distributions(
+                                        np.array(hr_data[date]),
+                                        np.array(lr_data[date]),
+                                        model_hr,
+                                        model_lr,
+                                        variable,
+                                        save_path=save_path if save_figures else "",
+                                        show=show)
+                        if print_results:
+                            logger.info(f"=== Pixel Distribution comparison for {date} ===")
+                            if stats is not None:
+                                for metric, value in stats.items():
+                                    logger.info(f"{metric}: {value:.4f}")
+                            else:
+                                logger.warning("No pixel distribution metrics returned (stats is None).")
+            else:
+                ##############
+                # MULTI DAYS #
+                ##############                
+                logger.info(f"Multiple dates found ({len(shared_dates)}). Running batch distribution comparison.")
+                for comparison_type in (comparison_types if isinstance(comparison_types, list) else [comparison_types]):
+                    if comparison_type in ["power_spectra", "all"]:
+                        
+                        #############################
+                        # POWER SPECTRUM COMPARISON #
+                        #############################
+
+                        ps_summary, ps_details = batch_compare_power_spectra(
+                                        dataset1 = hr_data,
+                                        dataset2 = lr_data,
+                                        model1 = model_hr,
+                                        model2 = model_lr,
+                                        variable = variable,
+                                        dx_model1 = highres_cfg.get("grid_spacing_km", 1.0),
+                                        dx_model2 = lowres_cfg.get("grid_spacing_km", 1.0),
+                                        save_path=save_path if save_figures else "",
+                                        show=show)
+                        if print_results:
+                            logger.info("=== Batch Power Spectra comparison summary ===")
+                            for metric, stats in ps_summary.items():
+                                if isinstance(stats, dict) and 'mean' in stats and 'std' in stats:
+                                    logger.info(f"{metric}: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
+                                else:
+                                    logger.info(f"{metric}: {stats:.4f}")
+                    if comparison_type in ["pixel_distributions", "all"]:
+                        
+                        #################################
+                        # PIXEL DISTRIBUTION COMPARISON #
+                        #################################
+
+                        # Aggregate all days' data into single numpy arrays for distribution comparison
+                        hr_array = np.concatenate([np.array(hr_data[date]).flatten() for date in shared_dates])
+                        lr_array = np.concatenate([np.array(lr_data[date]).flatten() for date in shared_dates])
+                        if variable in ['prcp']:
+                            plot_log = True
+                        else:
+                            plot_log = False
+                        pixel_stats = compare_distributions(
+                                        hr_array,
+                                        lr_array,
+                                        model_hr,
+                                        model_lr,
+                                        variable,
+                                        log_hist=plot_log,
+                                        save_path=save_path if save_figures else "",
+                                        show=show)
+                        if print_results:
+                            logger.info("=== Batch Pixel Distribution comparison summary ===")
+                            if pixel_stats is not None:
+                                for metric, value in pixel_stats.items():
+                                    logger.info(f"{metric}: {value:.4f}")
+                            else:
+                                logger.warning("No pixel distribution metrics returned (pixel_stats is None).")

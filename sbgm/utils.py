@@ -33,8 +33,9 @@ import netCDF4 as nc
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
+from typing import Optional, Union
 # --------------------------------------------------------------------------------
 # Helper: return numpy array with mask-channel removed, if shape == (2, H, W)
 # --------------------------------------------------------------------------------
@@ -619,10 +620,11 @@ def get_units(cfg):
              "cape": "J/kg",
              "nwvf": "m/s",
              "ewvf": "m/s",
-             "gp200": "hPa",
-             "gp500": "hPa",
-             "gp850": "hPa",
-             "gp1000": "hPa",
+             "msl": "hPa",
+             "z_pl_250": "m",
+             "z_pl_500": "m",
+             "z_pl_850": "m",
+             "z_pl_1000": "m",
              }
 
 
@@ -636,6 +638,26 @@ def get_units(cfg):
 
     return hr_unit, lr_units
 
+def get_unit_for_variable(variable: str):
+    """
+    Get the unit string for a specific variable.
+    """
+    units = {
+        "temp": r"$^\circ$C",
+        "prcp": "mm",
+        "cape": "J/kg",
+        "nwvf": "m/s",
+        "ewvf": "m/s",
+        "msl": "hPa",
+        "z_pl_250": "m",
+        "z_pl_500": "m",
+        "z_pl_850": "m",
+        "z_pl_1000": "m",
+    }
+
+    if variable not in units:
+        raise ValueError(f"[get_unit_for_variable] Variable '{variable}' not found in units dictionary.")
+    return units[variable]
 
 def get_cmaps(cfg):
     """
@@ -647,10 +669,11 @@ def get_cmaps(cfg):
              "cape": "viridis",
              "nwvf": "cividis",
              "ewvf": "magma",
-             "gp200": "coolwarm",
-             "gp500": "coolwarm",
-             "gp850": "coolwarm",
-             "gp1000": "coolwarm",
+             "msl": "coolwarm",
+             "z_pl_250": "coolwarm",
+             "z_pl_500": "coolwarm",
+             "z_pl_850": "coolwarm",
+             "z_pl_1000": "coolwarm",
              }
     
 
@@ -664,6 +687,79 @@ def get_cmaps(cfg):
 
     return hr_cmap, lr_cmaps
 
+def get_cmap_for_variable(variable: str):
+    """
+    Get the matplotlib colormap name for a specific variable.
+    """
+    cmaps = {"temp": "plasma",
+             "prcp": "inferno",
+             "cape": "viridis",
+             "nwvf": "cividis",
+             "ewvf": "magma",
+             "msl": "coolwarm",
+             "z_pl_250": "coolwarm",
+             "z_pl_500": "coolwarm",
+             "z_pl_850": "coolwarm",
+             "z_pl_1000": "coolwarm",
+             }
+
+    if variable not in cmaps:
+        # If variable not found, return a default colormap
+        logger.warning(f"[get_cmap_for_variable] Variable '{variable}' not found in cmap dictionary. Using default 'viridis'.")
+        return "viridis"
+    return cmaps[variable]
+
+def get_color_for_variable(variable: str, model: str):
+    """
+    Get a specific color for a variable based on the model type.
+    Models can be DANRA or ERA5 - same variables have different colors for the two models.
+    """
+    if model.lower() == "danra":
+        colors = {
+            "temp": "cornflowerblue",
+            "prcp": "darkorange",
+            "cape": "forestgreen",
+            "nwvf": "firebrick",
+            "ewvf": "darkmagenta",
+            "msl": "teal",
+            "z_pl_250": "pink",
+            "z_pl_500": "chocolate",
+            "z_pl_850": "orange", 
+            "z_pl_1000": "royalblue"
+        }
+    elif model.lower() == "era5":
+        colors = {
+            "temp": "mediumturquoise",
+            "prcp": "goldenrod",
+            "cape": "olive",
+            "nwvf": "coral",
+            "ewvf": "mediumpurple",
+            "msl": "skyblue",
+            "z_pl_250": "orchid",
+            "z_pl_500": "coral",
+            "z_pl_850": "tan",
+            "z_pl_1000": "midnightblue"
+        }
+    else:
+        # Default colors if model is unknown
+        colors = {
+            "temp": "cornflowerblue",
+            "prcp": "darkorange",
+            "cape": "forestgreen",
+            "nwvf": "firebrick",
+            "ewvf": "darkmagenta",
+            "msl": "teal",
+            "z_pl_250": "pink",
+            "z_pl_500": "chocolate",
+            "z_pl_850": "orange", 
+            "z_pl_1000": "royalblue"
+        }
+
+    if variable not in colors:
+        raise ValueError(f"[get_color_for_variable] Variable '{variable}' not found in color dictionary for model '{model}'.")
+    
+    return colors[variable]
+    
 
 def plot_sample(sample,
                 cfg,
@@ -847,6 +943,198 @@ def plot_sample(sample,
     fig.tight_layout()
 
     return fig, axs
+
+
+
+def plot_sample_with_boxplot(
+        hr: Union[np.ndarray, dict], # Expecting a 2D array or dict with multiple days
+        lr: Optional[Union[np.ndarray, dict]] = None,
+        gen: Optional[Union[np.ndarray, dict]] = None,
+        variable: str = "Variable",
+        hr_model: str = "HR Model",
+        lr_model: Optional[str] = None,
+        gen_model: Optional[str] = None,
+        dates: Optional[Union[str, list]] = None,
+        save_path: Optional[str] = None,
+        show: bool = False,
+        cmap_default: str = "viridis",
+        combine_into_grid: bool = False,
+        n_rows_max: int = 5,
+    ):
+    """
+        Plots HR, LR and generated images side-by-side with boxplots adjacent to each image.
+        Accepts either single arrays or dicts + dates for multiple days.
+        If combine_into_grid is True, multiple dates will be plotted in a grid layout in a single figure.
+        - If hr is a dict and date is a list -> loop throuhg each date
+        - If hr is a dict and date is a single str -> lookup that date once
+        - If hr is a NumPy array, date is ignored
+    """
+
+    if save_path is None:
+        save_path = f"./comparison/{variable}/"
+
+    # Get cmap for variable if possible
+    try:
+        cmap_default = get_cmap_for_variable(variable)
+    except ValueError:
+        pass
+
+    # === MULTIPLE DAYS ===
+    if isinstance(dates, list):
+        # === IF COMBINING INTO GRID PLOT IN ONE FIGURE ===
+        if combine_into_grid:
+            dates = dates[:n_rows_max]
+            fields = [('Gen', gen), (f'{hr_model}', hr), (f'{lr_model}', lr)]
+            fields = [(name, f) for name, f in fields if f is not None]
+            n_fields = len(fields)
+            n_rows = len(dates)
+
+            fig = plt.figure(figsize=(5 * n_fields * 1.5, 3.5 * n_rows))
+            gs = GridSpec(n_rows, n_fields * 2, width_ratios=[4, 1] * n_fields, figure=fig)
+
+            for row_idx, d in enumerate(dates):
+                row_data = []
+                for label, dataset in fields:
+                    if isinstance(dataset, dict) and d in dataset:
+                        row_data.append((label, dataset[d]))
+                    else:
+                        row_data.append((label, None))
+
+                vmin = min(np.min(x[1]) for x in row_data if x[1] is not None)
+                vmax = max(np.max(x[1]) for x in row_data if x[1] is not None)
+
+                for i, (label, data) in enumerate(row_data):
+                    ax_img = fig.add_subplot(gs[row_idx, i * 2])
+                    if data is not None:
+                        # Ensure data is a NumPy array before plotting
+                        if isinstance(data, dict):
+                            logger.warning(f"Cannot plot dictionary for label '{label}'. Skipping.")
+                            ax_img.set_title(f"{label} (invalid data type)")
+                            ax_img.axis('off')
+                            continue
+                        if not isinstance(data, np.ndarray):
+                            data = np.array(data)
+                        # Set date title to only be date (not time)
+                        try:
+                            d_title = d.split(' ')[0] if ' ' in d else d
+                        except Exception as e:
+                            logger.warning(f"Error extracting date title from '{d}': {e}")
+                            d_title = d
+                        
+                        im = ax_img.imshow(data, cmap=cmap_default, vmin=vmin, vmax=vmax)
+                        ax_img.set_title(f"{label} ({d_title})", fontsize=10)
+                        ax_img.axis('off')
+                        ax_img.invert_yaxis()  # Invert y-axis to match the original image orientation
+                        plt.colorbar(im, ax=ax_img, shrink=0.8)
+                    else:
+                        ax_img.set_title(f"{label} (missing)")
+                        ax_img.axis('off')
+
+                    ax_box = fig.add_subplot(gs[row_idx, i * 2 + 1])
+                    if data is not None:
+                        ax_box.boxplot(
+                                data.flatten(),
+                                vert=True,
+                                widths=1,
+                                showmeans=True,
+                                meanprops=dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick'),
+                                flierprops=dict(marker='o', markerfacecolor='none', markersize=2, linestyle='None', markeredgecolor='darkgreen', alpha=0.4),
+                                medianprops=dict(linestyle='-', linewidth=2, color='black'),
+                                patch_artist=True,
+                                )
+
+                    # ax_box.set_title("Box", fontsize=8)
+                    ax_box.set_xticks([])
+                    ax_box.tick_params(axis='y', labelsize=6)
+                    ax_box.set_frame_on(False)
+
+
+            fig.suptitle(f"{variable} | Multiple Dates", fontsize=16)
+            fig.tight_layout()
+            if save_path:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                path = os.path.join(save_path, f"{variable}_{hr_model}_vs_{lr_model}_boxplot__qualitative_visual.png")
+                plt.savefig(path, dpi=300, bbox_inches='tight')
+            if show:
+                plt.show()
+            plt.close()
+            return  # Don't fall through to single plot
+
+        # === IF NOT COMBINING, PLOT EACH DATE SEPARATELY IN MULTIPLE FIGURES ===
+        for d in dates:
+            plot_sample_with_boxplot(
+                hr=hr, lr=lr, gen=gen,
+                variable=variable,
+                hr_model=hr_model,
+                lr_model=lr_model,
+                gen_model=gen_model,
+                dates=d,
+                save_path=os.path.join(save_path, f"{variable}_{d}_boxplot__qualitative_visual.png") if save_path else None,
+                show=show,
+                cmap_default=cmap_default
+            )
+        return 
+
+    # === DICTIONARY LOOKUP ===
+    if isinstance(hr, dict):
+        if dates not in hr:
+            logger.warning(f"Date '{dates}' not found in HR data dictionary. Skipping plot.")
+            return
+        hr = hr[dates]
+        lr = lr.get(dates) if lr and isinstance(lr, dict) else None
+        gen = gen.get(dates) if gen and isinstance(gen, dict) else None
+
+    # === SINGLE PLOT ===
+
+    fields = [('HR', hr, hr_model)]
+    if gen is not None:
+        fields.insert(0, ('Generated', gen, gen_model if gen_model else "Gen Model"))
+    if lr is not None:
+        fields.append(('LR', lr, lr_model if lr_model else "LR Model"))
+
+    n_fields = len(fields)
+    fig = plt.figure(figsize=(5 * n_fields * 1.5, 5)) # 5 for each image, 1.5 for boxplot
+    gs = GridSpec(1, n_fields * 2, width_ratios=[4, 1] * n_fields, figure=fig)
+
+    vmin = min(np.nanmin(f[1]) for f in fields if isinstance(f[1], np.ndarray))
+    vmax = max(np.nanmax(f[1]) for f in fields if isinstance(f[1], np.ndarray))
+
+
+    for i, (label, data, model) in enumerate(fields):
+        if data is None:
+            continue
+        if not isinstance(data, np.ndarray):
+            data = np.array(data)
+        ax_img = fig.add_subplot(gs[0, i * 2])
+        im = ax_img.imshow(data, cmap=cmap_default, vmin=vmin, vmax=vmax)
+        ax_img.set_title(f"{label} ({model})", fontsize=14)
+        ax_img.axis('off')
+        ax_img.invert_yaxis()  # Invert y-axis to match the original image orientation
+
+        cbar = plt.colorbar(im, ax=ax_img, shrink=0.8)
+        cbar.ax.tick_params(labelsize=8)
+
+        ax_box = fig.add_subplot(gs[0, i * 2 + 1])
+        ax_box.boxplot(data.flatten(), vert=True, patch_artist=True,
+                          boxprops=dict(facecolor='lightblue', color='blue'),
+                          medianprops=dict(color='red'),
+                          flierprops=dict(marker='o', markerfacecolor='none', markersize=5, markeredgecolor='blue', alpha=0.5))
+        ax_box.set_xticks([])
+        ax_box.tick_params(axis='y', labelsize=8)
+
+
+    suptitle = f"{variable} | {dates}" if dates else variable
+    fig.suptitle(suptitle, fontsize=16)
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        logger.info(f"Plot saved to {save_path}")
+    if show:
+        plt.show()
+    plt.close()
+    
+    return 
+
 
 def plot_samples(samples, cfg, n_samples_threshold=3, figsize=(15, 8)):
     """
@@ -1265,8 +1553,6 @@ def plot_samples_and_generated(
 
     fig.tight_layout()
     return fig, axs
-
-
 
 from omegaconf import OmegaConf
 

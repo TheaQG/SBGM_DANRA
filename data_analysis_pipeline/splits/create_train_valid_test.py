@@ -229,9 +229,9 @@ def convert_splits_to_zarr(cfg):
                 with np.load(f) as data:
                     for key in data:
                         zarr_group.array(f"{fname}/{key}", data[key], chunks=True, dtype=np.float32)
-            
+        
             if not keep_npz:    
-                logger.info(f"Deleting LR {lr_var} .npz files from {split_dir}")
+                logger.info(f"Deletin LR {lr_var} .npz files from {split_dir}")
                 for f in npz_files:
                     os.remove(f) # Delete after writing
                 

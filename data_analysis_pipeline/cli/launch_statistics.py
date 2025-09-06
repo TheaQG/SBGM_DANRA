@@ -1,6 +1,6 @@
 import logging
 
-from data_analysis_pipeline.analysis.stats_main import statistics_main
+from data_analysis_pipeline.stats_analysis.stats_main import statistics_main
 
 
 logger = logging.getLogger(__name__)
