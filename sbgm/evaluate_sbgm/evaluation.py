@@ -109,7 +109,6 @@ class Evaluation:
         self.eval_imgs = torch.from_numpy(self.eval_imgs).squeeze()
         if self.lsm_imgs is not None:
             self.lsm_imgs = torch.from_numpy(self.lsm_imgs).squeeze()
-        self.cond_imgs = torch.from_numpy(self.cond_imgs).squeeze()
 
 
         print(self.gen_imgs.shape)
@@ -170,7 +169,7 @@ class Evaluation:
         if plot_with_cond:
             cond_imgs = self.cond_imgs[:n_samples]
             for i, cond_name in enumerate(self.lr_vars):
-                cond_channel = cond_imgs[:, i, :, :] # type: ignore
+                cond_channel = cond_imgs[:, i, :, :]
                 plot_list.append(cond_channel)
                 plot_titles.append(f'Condition: {cond_name}')
 
@@ -245,12 +244,12 @@ class Evaluation:
         # Save figure if specified
         if save_figs:
             if masked:
-                save_path = os.path.join(self.evaluation_fig_path, self.model_name_str, f'example_n_samples_{n_samples}_eval_gen_images_masked.png')
+                save_path = os.path.join(self.evaluation_fig_path, f'example_n_samples_{n_samples}_eval_gen_images_masked.png')
                 print(f'\nSaving figure to {save_path}')
                 fig.savefig(save_path, dpi=600, bbox_inches='tight')
 
             else:
-                save_path = os.path.join(self.evaluation_fig_path, self.model_name_str, f'example_n_samples_{n_samples}_eval_gen_images.png')
+                save_path = os.path.join(self.evaluation_fig_path, f'example_n_samples_{n_samples}_eval_gen_images.png')
                 print(f'\nSaving figure to {save_path}')
                 fig.savefig(save_path, dpi=600, bbox_inches='tight')
 
@@ -309,7 +308,7 @@ class Evaluation:
 
         # Save figure if specified
         if save_figs:
-            save_path = os.path.join(self.evaluation_fig_path, self.model_name_str, f'example_n_samples_{n_samples}_eval_gen_images.png')
+            save_path = os.path.join(self.evaluation_fig_path, f'example_n_samples_{n_samples}_eval_gen_images.png')
             print(f'\nSaving figure to {save_path}')
             fig.savefig(save_path, dpi=600, bbox_inches='tight')
 
@@ -321,7 +320,7 @@ class Evaluation:
 
         # Save statistics if specified
         if save_stats:
-            save_path = os.path.join(self.evaluation_stats_path, self.model_name_str, f'n_samples_{n_samples}_pixel_statistics.npz')
+            save_path = os.path.join(self.evaluation_stats_path, f'n_samples_{n_samples}_pixel_statistics.npz')
             print(f'\nSaving statistics to {save_path}')
             np.savez(save_path, gen_imgs_flat=gen_imgs_flat, eval_imgs_flat=eval_imgs_flat)
 
@@ -353,7 +352,7 @@ class Evaluation:
 
         # Save figure if specified
         if save_figs:
-            save_path = os.path.join(self.evaluation_fig_path, self.model_name_str, f'n_samples_{n_samples}_RMSE_MAE_histograms.png')
+            save_path = os.path.join(self.evaluation_fig_path, f'n_samples_{n_samples}_RMSE_MAE_histograms.png')
             print(f'Saving figure to {save_path}')
             fig.savefig(save_path, dpi=600, bbox_inches='tight')
 
@@ -365,7 +364,7 @@ class Evaluation:
 
         # Save statistics if specified
         if save_stats:
-            save_path = os.path.join(self.evaluation_stats_path, self.model_name_str, f'n_samples_{n_samples}_RMSE_MAE_statistics.npz')
+            save_path = os.path.join(self.evaluation_stats_path, f'n_samples_{n_samples}_RMSE_MAE_statistics.npz')
             print(f'Saving statistics to {save_path}')
             np.savez(save_path, mae_all=mae_all.numpy(), rmse_all=rmse_all.numpy())
 
@@ -433,7 +432,7 @@ class Evaluation:
 
         # Save figure if specified
         if save_figs:
-            save_path = os.path.join(self.evaluation_fig_path, self.model_name_str, f'n_samples_{n_samples}_spatial_statistics.png')
+            save_path = os.path.join(self.evaluation_fig_path, f'n_samples_{n_samples}_spatial_statistics.png')
             print(f'Saving figure to {save_path}')
             fig.savefig(save_path, dpi=600, bbox_inches='tight')
 

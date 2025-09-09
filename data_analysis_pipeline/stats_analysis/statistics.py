@@ -1,5 +1,7 @@
 import logging
 import datetime
+import os
+import json
 import numpy as np
 
 # Setup logging
@@ -10,84 +12,6 @@ formatter = logging.Formatter("[%(levelname)s] %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-def compute_statistics(data,
-                       aggregate=False,
-                       agg_time="monthly",
-                       agg_method="mean",
-                       return_timeseries=True,
-                       return_cutout_stats=True,
-                       return_all=True,
-                       print_stats=False
-                       ):
-    """
-        Compute statistics for the given data.
-        Mean, std, min, max etc. per file or full stack
-        If aggregate = True, aggregate temporally before computing statistcs
-    """
-    if return_all:
-        return_timeseries = True
-        return_cutout_stats = True
-
-    cutouts = data["cutouts"]
-    timestamps = data.get("timestamps", None)
-
-    logger.info(f"Length of cutouts: {len(cutouts)}")
-    logger.info(f"Shape of single cutout: {cutouts[0].shape}")
-    
-    if aggregate: 
-        aggregation = aggregate_data(data, agg_time, agg_method)
-        cutouts = aggregation["cutouts"]
-        timestamps = aggregation["timestamps"]
-
-    stack = np.stack(cutouts)  # Shape: (T, H, W)
-    global_flat = stack.flatten()  # Shape: (T * H * W,)
-
-    # === 1. Global statistics across all time and pixels ===
-    global_stats = {
-        "mean": np.mean(global_flat, axis=0),
-        "std": np.std(global_flat, axis=0),
-        "min": np.min(global_flat, axis=0),
-        "max": np.max(global_flat, axis=0),
-        "median": np.median(global_flat, axis=0),
-        "percentile_25": np.percentile(global_flat, 25, axis=0),
-        "percentile_75": np.percentile(global_flat, 75, axis=0)
-    }
-
-    # === 2. Per-timestep statistics (time-series) ===
-    time_series_stats = {}
-    if return_timeseries:
-        time_series_stats = {
-            "mean": np.mean(stack, axis=(1, 2)),  # Shape: (T,)
-            "std": np.std(stack, axis=(1, 2)),    # Shape: (T,)
-            "min": np.min(stack, axis=(1, 2)),    # Shape: (T,)
-            "max": np.max(stack, axis=(1, 2)),    # Shape: (T,)
-            "median": np.median(stack, axis=(1, 2)),  # Shape: (T,)
-            "percentile_25": np.percentile(stack, 25, axis=(1, 2)),  # Shape: (T,)
-            "percentile_75": np.percentile(stack, 75, axis=(1, 2))   # Shape: (T,)
-        }
-        if timestamps is not None:
-            time_series_stats["timestamps"] = timestamps
-
-    # === 3. Per-pixel statistics across all time ===
-    cutout_stats = {}
-    if return_cutout_stats:
-        cutout_stats = {
-            "mean": np.mean(stack, axis=0),  # Shape: (H, W)
-            "std": np.std(stack, axis=0),    # Shape: (H, W)
-            "min": np.min(stack, axis=0),    # Shape: (H, W)
-            "max": np.max(stack, axis=0),    # Shape: (H, W)
-            "median": np.median(stack, axis=0),  # Shape: (H, W)
-            "percentile_25": np.percentile(stack, 25, axis=0),  # Shape: (H, W)
-            "percentile_75": np.percentile(stack, 75, axis=0)   # Shape: (H, W)
-        }
-
-
-    if print_stats:
-        logger.info("\n   COMPUTED BASIC STATS:")
-        for key, value in global_stats.items():
-            logger.info(f"          {key}: {value}")
-
-    return global_stats, cutout_stats, time_series_stats
 
 
 def aggregate_data(data, agg_time, agg_method):
@@ -181,3 +105,218 @@ def aggregate_data(data, agg_time, agg_method):
         "cutouts": cutouts_stack,
         "timestamps": aggregated_timestamps
     }
+
+
+
+
+
+
+def compute_statistics(data,
+                       aggregate=False,
+                       agg_time="monthly",
+                       agg_method="mean",
+                       return_timeseries=True,
+                       return_cutout_stats=True,
+                       return_all=True,
+                       print_stats=False,
+                       save_glob_stats=True,
+                       variable="variable",
+                       model="model",
+                       split="all",
+                       domain_str="_589x789",
+                       crop_region_str="_0_0_180_180",
+                       cfg={},
+                       stats_save_path=".",
+                       log_stats=False,
+                       pool_pixels=True,
+                       ):
+    """
+        Compute statistics for the given data.
+        Mean, std, min, max etc. per file or full stack
+        If aggregate = True, aggregate temporally before computing statistcs
+    """
+    if return_all:
+        return_timeseries = True
+        return_cutout_stats = True
+
+    cutouts = data["cutouts"]
+    timestamps = data.get("timestamps", None)
+
+    logger.info(f"Length of cutouts: {len(cutouts)}")
+    logger.info(f"Shape of single cutout: {cutouts[0].shape}")
+    
+    if aggregate: 
+        aggregation = aggregate_data(data, agg_time, agg_method)
+        cutouts = aggregation["cutouts"]
+        timestamps = aggregation["timestamps"]
+        logger.info(f"After aggregation ({agg_method} over {agg_time}):")
+        logger.info(f"  New length of cutouts: {len(cutouts)}")
+        logger.info(f"  New shape of single cutout: {cutouts[0].shape}")
+
+    stack = np.stack(cutouts)  # Shape: (T, H, W)
+    global_flat = stack.flatten()  # Shape: (T * H * W,)
+
+    # === 1. Global statistics across all time and pixels ===
+    # Use global_stats to save these for training normalization
+    global_stats_result = compute_global_stats(
+        data_dict=data,
+        variable=variable,
+        model=model,
+        domain_str=domain_str,
+        split=split,
+        crop_region_str=crop_region_str,
+        cfg=cfg,
+        stats_save_path=stats_save_path,
+        save=save_glob_stats,
+        log_stats=log_stats,
+        pool_pixels=pool_pixels
+    )
+
+    # === 2. Per-timestep statistics (time-series) ===
+    time_series_stats = {}
+    if return_timeseries:
+        time_series_stats = {
+            "mean": np.mean(stack, axis=(1, 2)),  # Shape: (T,)
+            "std": np.std(stack, axis=(1, 2)),    # Shape: (T,)
+            "min": np.min(stack, axis=(1, 2)),    # Shape: (T,)
+            "max": np.max(stack, axis=(1, 2)),    # Shape: (T,)
+            "median": np.median(stack, axis=(1, 2)),  # Shape: (T,)
+            "percentile_25": np.percentile(stack, 25, axis=(1, 2)),  # Shape: (T,)
+            "percentile_75": np.percentile(stack, 75, axis=(1, 2))   # Shape: (T,)
+        }
+        if timestamps is not None:
+            time_series_stats["timestamps"] = timestamps
+
+    # === 3. Per-pixel statistics across all time ===
+    cutout_stats = {}
+    if return_cutout_stats:
+        cutout_stats = {
+            "mean": np.mean(stack, axis=0),  # Shape: (H, W)
+            "std": np.std(stack, axis=0),    # Shape: (H, W)
+            "min": np.min(stack, axis=0),    # Shape: (H, W)
+            "max": np.max(stack, axis=0),    # Shape: (H, W)
+            "median": np.median(stack, axis=0),  # Shape: (H, W)
+            "percentile_25": np.percentile(stack, 25, axis=0),  # Shape: (H, W)
+            "percentile_75": np.percentile(stack, 75, axis=0)   # Shape: (H, W)
+        }
+
+
+    if print_stats:
+        logger.info("\n   COMPUTED BASIC STATS:")
+        for key, value in global_stats_result.items():
+            logger.info(f"          {key}: {value}")
+
+    return global_stats_result, cutout_stats, time_series_stats
+
+
+
+
+
+def compute_global_stats(data_dict,
+                      variable,
+                      model,
+                      split,
+                      domain_str,
+                      crop_region_str,
+                      cfg,
+                      stats_save_path,
+                      save=False,
+                      log_stats=False,
+                      pool_pixels=True
+                      ):
+    """
+        Compute global pixel-wise statistics over the stack of cutouts
+        and save them for use in training normalization.
+    """
+    save_dir = os.path.join(stats_save_path, model, variable, split)
+    os.makedirs(save_dir, exist_ok=True)
+
+    cutouts = data_dict["cutouts"]
+    # Gives the stats for each pixel position across time, returns shape (H, W)
+    stacked = np.stack(cutouts) #np.stack([x.values for x in cutouts]) # Shape: (T, H, W)
+
+    # Pool across pixels if specified, otherwise keep spatial dimensions
+    if pool_pixels:
+        stacked = stacked.flatten()  # Shape: (T * H * W,)
+
+    global_mean = np.mean(stacked)
+    global_std = np.std(stacked)
+    global_min = np.min(stacked)
+    global_max = np.max(stacked)
+
+    # To avoid issues with log(0), we add a small constant
+    # Instead of just global_min >= 0, only get log stats if asked for it
+    if log_stats:
+        stacked = np.where(stacked <= 0, 1e-8, stacked)  # Replace non-positive values with a small constant
+        log_stack = np.log(stacked)
+        log_mean = np.mean(log_stack)
+        log_std = np.std(log_stack)
+        log_min = np.min(log_stack)
+        log_max = np.max(log_stack)
+    else:
+        log_mean = log_std = log_min = log_max = None
+
+
+    stats = {
+        "mean": global_mean,
+        "std": global_std,
+        "min": global_min,
+        "max": global_max,
+        "log_mean": log_mean,
+        "log_std": log_std,
+        "log_min": log_min,
+        "log_max": log_max
+    }
+
+    split = cfg.get("data", {}).get("split", "unknown")
+
+    if save:
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        filename = f"global_stats__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}.json"
+        filepath = os.path.join(save_dir, filename)
+
+    
+        with open(filepath, 'w') as f:
+            for k, v in stats.items():
+                if v is None:
+                    stats[k] = None
+                    logger.warning(f"{k} is None, saving as null in JSON.")
+                else:
+                    stats[k] = float(v)
+            json.dump(stats, f)
+
+
+        logger.info(f"[INFO] Global statistics saved to {filepath}")
+
+    return stats
+
+
+
+def load_global_stats(variable, model, domain_str, crop_region_str, split, dir_load):
+    """
+        Load previously saved global statistics for a given variable, model, domain, and crop region.
+    """
+    stats_load_dir = os.path.join(dir_load, model, variable, split)
+    stats_load_path = os.path.join(stats_load_dir, f"global_stats__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}.json")
+    
+    if not os.path.exists(stats_load_path):
+        logger.warning(f"Stats file not found: {stats_load_path}")
+        return None
+    logger.info(f"Loading stats from {stats_load_path}")
+
+    with open(stats_load_path, "r") as f:
+        stats = json.load(f)
+    
+    return stats
+
+
+
+
+
+
+
+
+
+
+

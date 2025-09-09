@@ -74,7 +74,7 @@ def convert_nc_to_zarr(nc_directory, zarr_file, VERBOSE=False):
             if VERBOSE:
                 logger.info(os.path.join(nc_directory, nc_file))
             # Load the .nc file
-            nc_data = nc.Dataset(os.path.join(nc_directory, nc_file)) # type: ignore
+            nc_data = nc.Dataset(os.path.join(nc_directory, nc_file))
             # Loop through all variables in the .nc file
             for var in nc_data.variables:
                 # Select the data from the variable

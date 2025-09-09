@@ -9,7 +9,7 @@ lowres:
   full_domain: [589, 789]
 
 data:
-  n_samples: 10
+  n_samples: 100
   sample_method: random
   data_path_full:  ${env:DATA_DIR}
   data_path_small: ${env:DATA_DIR_SMALL}

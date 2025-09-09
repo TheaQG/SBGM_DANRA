@@ -7,7 +7,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from sbgm.utils import get_model_string
-from evaluate_sbgm.evaluation import Evaluation
+from sbgm.evaluate_sbgm.evaluation import Evaluation
 
 def setup_logger(log_dir, name="train_log", log_to_stdout=True):
     # Set up the path for the log directory

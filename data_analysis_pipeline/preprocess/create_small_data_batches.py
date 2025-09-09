@@ -213,7 +213,7 @@ def split_and_copy_to_dirs(model1='DANRA',
 
             small_data_dirs[model][var] = {}
             # Create the small data batch directory 
-            small_data_dir = build_data_path(base_path=data_path_small, model=model, var=var, full_domain_dims=full_domain, split=all_data__dir_name_small, zarr_file=False)
+            small_data_dir = build_data_path(base_path=data_path_small, model=model, var=var, full_domain_dims=full_domain, split='', zarr_file=False)
 
             # Create the train, val and test directories
             os.makedirs(small_data_dir, exist_ok=True)
@@ -319,11 +319,11 @@ def dirs_to_zarr(data_path,
             test_dir = small_data_dirs[model][var]['test']
             # Convert the directories to zarr format
             logger.info(f"      Converting {train_dir} to zarr format...")
-            convert_npz_to_zarr(train_dir, os.path.join(small_data_dir_zarr, 'train.zarr'), VERBOSE=True)
+            convert_npz_to_zarr(train_dir, os.path.join(small_data_dir_zarr, 'train.zarr'), VERBOSE=False)
             logger.info(f"      Converting {val_dir} to zarr format...")
-            convert_npz_to_zarr(val_dir, os.path.join(small_data_dir_zarr, 'val.zarr'), VERBOSE=True)
+            convert_npz_to_zarr(val_dir, os.path.join(small_data_dir_zarr, 'val.zarr'), VERBOSE=False)
             logger.info(f"      Converting {test_dir} to zarr format...")
-            convert_npz_to_zarr(test_dir, os.path.join(small_data_dir_zarr, 'test.zarr'), VERBOSE=True)
+            convert_npz_to_zarr(test_dir, os.path.join(small_data_dir_zarr, 'test.zarr'), VERBOSE=False)
 
     logger.info("   Converted all small data batch directories to zarr format")
 
@@ -366,7 +366,7 @@ def run_small_data_batch_creation(cfg):
     split_ratio = data_cfg.get("split_ratio", [0.7, 0.15, 0.15])
 
     # Step 1: Select a random sample of files from the input directory (all samples dir).
-    logger.info("\n############ Step 1: Selecting sample files... ############\n")
+    logger.info("\n\n############ Step 1: Selecting sample files... ############\n")
     file_names = select_sample_files(model1=model1,
                                      model2=model2,
                                      full_domain_model1=full_domain_model1,
@@ -379,7 +379,7 @@ def run_small_data_batch_creation(cfg):
                                      all_data__dir_name=all_data__dir_name,
                                      all_data__dir_name_small=all_data__dir_name_small)
     # Step 2: Copy the selected files to the small data batch directory and split them into train, val and test directories.
-    logger.info("\n############ Step 2: Copying files to small data batch directories and splitting into train, val and test... ############\n")
+    logger.info("\n\n############ Step 2: Copying files to small data batch directories and splitting into train, val and test... ############\n")
     small_data_dirs = split_and_copy_to_dirs(model1=model1,
                                              model2=model2,
                                              vars_model1=vars_model1,
@@ -395,10 +395,10 @@ def run_small_data_batch_creation(cfg):
                                              all_data__dir_name_small=all_data__dir_name_small,
                                              split_ratio=split_ratio)
     # Step 3: Convert the small data batch directories to zarr format.
-    logger.info("\n############ Step 3: Converting small data batch directories to zarr format... ############\n")
+    logger.info("\n\n############ Step 3: Converting small data batch directories to zarr format... ############\n")
     dirs_to_zarr(data_path=data_path_small,
                  small_data_dirs=small_data_dirs,
                  all_data__dir_name_small=all_data__dir_name_small) 
-    logger.info("\n############ Small data batch creation process completed. ############\n")
+    logger.info("\n\n############ Small data batch creation process completed. ############\n")
 
 

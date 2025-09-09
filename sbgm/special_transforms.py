@@ -9,7 +9,9 @@
 # Import libraries and modules 
 import torch
 import logging
-
+import os
+import json
+from typing import Optional, List, Dict
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,37 @@ logger = logging.getLogger(__name__)
 #     if cfg.get("zscore"):
 #         transformations.append(ZScoreTransform(**cfg["zscore"]))
 #     return transformations
+
+
+# Make a function to compute transformations from stats dict
+def transform_from_stats(data, 
+                            transform_type: str,
+                            cfg,
+                            stats: dict):
+    """
+        Build transformations from stats dict
+    """
+    if transform_type == "zscore":
+        transform = ZScoreTransform(mean=stats["mean"], std=stats["std"])
+        data_transformed = transform(data)
+    elif transform_type == "scale01":
+        transform = Scale(0, 1, data_min_in=stats["min"], data_max_in=stats["max"])
+        data_transformed = transform(data)
+    elif transform_type == "scale_minus1_1":
+        transform = Scale(-1, 1, data_min_in=stats["min"], data_max_in=stats["max"])
+        data_transformed = transform(data)
+    elif transform_type in ["log_zscore", "log_01", "log_minus1_1", "log"]:
+        transform = PrcpLogTransform(scale_type=transform_type,
+                                    glob_mean_log=stats["log_mean"],
+                                    glob_std_log=stats["log_std"],
+                                    glob_min_log=stats["log_min"],
+                                    glob_max_log=stats["log_max"],
+                                    buffer_frac=cfg.get("data", {}).get("buffer_frac", 0.5))
+        data_transformed = transform(data)
+    else:
+        raise ValueError(f"Unknown transform type: {transform_type}")
+    return data_transformed
+
 
 # Define custom transforms
 class Scale(object):
@@ -105,7 +138,7 @@ class ScaleBackTransform(object):
         return DataNew
 
 
-import torch
+
 
 class ZScoreTransform(object):
     '''
@@ -451,3 +484,164 @@ def build_back_transforms(hr_var,
             raise ValueError(f"Unknown LR scaling method: {mth}")
 
     return bt
+
+
+def build_back_transforms_from_stats(hr_var: str,
+                                     hr_model: str,
+                                     domain_str_hr: str,
+                                     crop_region_str_hr: str,
+                                     hr_scaling_method: str,
+                                     hr_buffer_frac: float,
+                                     lr_vars: List[str],
+                                     lr_model: str,
+                                     crop_region_str_lr: str,
+                                     domain_str_lr: str,
+                                     lr_scaling_methods: List[str],
+                                     lr_buffer_frac: float, # Maybe should be a list to allow different buffers for different variables
+                                     split: str,
+                                     stats_dir_root: str) -> Dict[str, object]:
+    """
+        Build inverse transforms (back-transforms) for HR and LR variables using
+        saved global statistics (no manual input of stats needed).
+
+        Returns a dict that maps plot-keys (e.g. 'prcp_hr', 'prcp_lr', 'generated')
+        to callable inverse-transform objects.
+    """
+    bt = {}
+
+    # ---------- HR / generated (share the same space) ---------------------------
+    inv_hr = get_backtransforms_from_stats(variable=hr_var,
+                                          model=hr_model,
+                                          domain_str=domain_str_hr,
+                                          crop_region_str=crop_region_str_hr,
+                                          split=split,
+                                          transform_type=hr_scaling_method,
+                                          buffer_frac=hr_buffer_frac,
+                                          stats_file_path=stats_dir_root
+                                          )
+    bt[f"{hr_var}_hr"] = inv_hr
+    bt["generated"] = inv_hr  # 'generated' images are in the same space as the HR target
+
+    # ---------- LR conditions --------------------------------------------
+    for cond, mth in zip(lr_vars, lr_scaling_methods):
+        inv_lr = get_backtransforms_from_stats(variable=cond,
+                                              model=lr_model,
+                                              domain_str=domain_str_lr,
+                                              crop_region_str=crop_region_str_lr,
+                                              split=split,
+                                              transform_type=mth,
+                                              buffer_frac=lr_buffer_frac,
+                                              stats_file_path=stats_dir_root
+                                              )
+        bt[f"{cond}_lr"] = inv_lr
+
+    return bt
+
+
+
+def load_global_stats(variable, model, domain_str, crop_region_str, split, dir_load):
+    """
+        Load previously saved global statistics for a given variable, model, domain, and crop region.
+    """
+    stats_load_dir = os.path.join(dir_load, model, variable, split)
+    stats_load_path = os.path.join(stats_load_dir, f"global_stats__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}.json")
+    
+    if not os.path.exists(stats_load_path):
+        logger.warning(f"Stats file not found: {stats_load_path}")
+        return None
+    logger.info(f"Loading stats from {stats_load_path}")
+
+    with open(stats_load_path, "r") as f:
+        stats = json.load(f)
+    
+    return stats
+
+
+
+def get_transforms_from_stats(variable: str,
+                                model: str,
+                                domain_str: str,
+                                crop_region_str: str,
+                                split: str,
+                                transform_type: str,
+                                buffer_frac: float,
+                                stats: Optional[dict] = None,
+                                stats_file_path: str = '',
+                                ):
+    """
+        Build transformations from stats, either given stats or given file path
+        Must provide either stats or stats_file_path
+    """
+    if stats_file_path:
+        print(f"[INFO] Loading stats from {stats_file_path}")
+    if stats and stats_file_path:
+        print(f"[WARNING] Both stats and stats_file_path provided, using provided stats.")
+        stats_file_path = ''
+
+    if stats is None and stats_file_path:
+        if not os.path.exists(stats_file_path):
+            raise ValueError(f"Stats file not found: {stats_file_path}")
+        stats = load_global_stats(variable, model, domain_str, crop_region_str, split, stats_file_path)
+    if stats is None:
+        raise ValueError(f"Failed to load stats from {stats_file_path}")
+
+    if transform_type == "zscore":
+        return ZScoreTransform(mean=stats["mean"], std=stats["std"])
+    elif transform_type == "scale01":
+        return Scale(0, 1, data_min_in=stats["min"], data_max_in=stats["max"])
+    elif transform_type == "scale_minus1_1":
+        return Scale(-1, 1, data_min_in=stats["min"], data_max_in=stats["max"])
+    elif transform_type in ["log_zscore", "log_01", "log_minus1_1", "log"]:
+        return PrcpLogTransform(scale_type=transform_type,
+                                glob_mean_log=stats["log_mean"],
+                                glob_std_log=stats["log_std"],
+                                glob_min_log=stats["log_min"],
+                                glob_max_log=stats["log_max"],
+                                buffer_frac=buffer_frac
+                                )
+    else:
+        raise ValueError(f"Unknown transform type: {transform_type}")
+
+def get_backtransforms_from_stats(variable: str,
+                                  model: str,
+                                  domain_str: str,
+                                  crop_region_str: str,
+                                  split: str,
+                                  transform_type: str,
+                                  buffer_frac: float,
+                                  stats: Optional[dict] = None,
+                                  stats_file_path: str = '',
+                                  ):
+    """
+        Build backtransformations from stats, either given stats or given file path
+        Must provide either stats or stats_file_path
+    """
+    if stats_file_path:
+        print(f"[INFO] Loading stats from {stats_file_path}")
+    if stats and stats_file_path:
+        print(f"[WARNING] Both stats and stats_file_path provided, using provided stats.")
+        stats_file_path = ''
+
+    if stats is None and stats_file_path:
+        if not os.path.exists(stats_file_path):
+            raise ValueError(f"Stats file not found: {stats_file_path}")
+        stats = load_global_stats(variable, model, domain_str, crop_region_str, split, stats_file_path)
+    if stats is None:
+        raise ValueError(f"Failed to load stats from {stats_file_path}")
+
+    if transform_type == "zscore":
+        return ZScoreBackTransform(mean=stats["mean"], std=stats["std"])
+    elif transform_type == "scale01":
+        return ScaleBackTransform(0, 1, data_min_in=stats["min"], data_max_in=stats["max"])
+    elif transform_type == "scale_minus1_1":
+        return ScaleBackTransform(-1, 1, data_min_in=stats["min"], data_max_in=stats["max"])
+    elif transform_type in ["log_zscore", "log_01", "log_minus1_1", "log"]:
+        return PrcpLogBackTransform(scale_type=transform_type,
+                                glob_mean_log=stats["log_mean"],
+                                glob_std_log=stats["log_std"],
+                                glob_min_log=stats["log_min"],
+                                glob_max_log=stats["log_max"],
+                                buffer_frac=buffer_frac
+                                )
+    else:
+        raise ValueError(f"Unknown transform type: {transform_type}")

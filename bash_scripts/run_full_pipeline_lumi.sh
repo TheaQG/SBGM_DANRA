@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cfg_full
-#SBATCH --output=logs/cfg_full_%j.log
-#SBATCH --error=logs/cfg_full_%j.err
+#SBATCH --job-name=pipe_cfg_full
+#SBATCH --output=logs/pipe_cfg_full_%j.log
+#SBATCH --error=logs/pipe_cfg_full_%j.err
 #SBATCH --account=project_465001695
 #SBATCH --partition=standard-g
 #SBATCH --nodes=1
@@ -29,7 +29,7 @@ export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
 export DATA_DIR=$USER_DIR/Data/Data_DiffMod # Data_DiffMod_small
 export SAMPLE_DIR="$ROOT_DIR/models_and_samples/generated_samples"
 export CKPT_DIR="$ROOT_DIR/models_and_samples/trained_models"
-
+export CONFIG_DIR="$ROOT_DIR/sbgm/config"
 # === Define date in format DD_MM_YYYY for logging purposes ===
 # Export for use in the Python script
 export EXP_DATE=$(date +%d_%m_%Y)
@@ -46,5 +46,6 @@ echo "[INFO] SAMPLE_DIR    = $SAMPLE_DIR"
 echo "[INFO] CKPT_DIR      = $CKPT_DIR"
 
 # === Launch the training ===
+echo "[INFO] Launching the full training-generation-evaluation pipeline..."
 srun singularity exec $CONTAINER \
-    python -m sbgm.cli.main_app train 
+    python -m sbgm.cli.main_app --mode full_pipeline --config $CONFIG_DIR/full_run_config.yaml

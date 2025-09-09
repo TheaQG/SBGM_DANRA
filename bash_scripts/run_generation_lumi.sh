@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cfg_full
-#SBATCH --output=logs/cfg_full_%j.log
-#SBATCH --error=logs/cfg_full_%j.err
+#SBATCH --job-name=gen_cfg_full
+#SBATCH --output=logs/cfg_full_generation_%j.log
+#SBATCH --error=logs/cfg_full_generation_%j.err
 #SBATCH --account=project_465001695
 #SBATCH --partition=standard-g
 #SBATCH --nodes=1
@@ -27,19 +27,16 @@ export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
 
 # === Data and output directories === 
 export DATA_DIR=$USER_DIR/Data/Data_DiffMod # Data_DiffMod_small
-export SAMPLE_DIR="$ROOT_DIR/models_and_samples/generated_samples"
+export SAMPLE_DIR="$ROOT_DIR/evaluate_sbgm/generated_samples"
 export CKPT_DIR="$ROOT_DIR/models_and_samples/trained_models"
 
-# === Define date in format DD_MM_YYYY for logging purposes ===
-# Export for use in the Python script
-export EXP_DATE=$(date +%d_%m_%Y)
-
+# === Define date of trained model experiment (last digits in model name string) ===
+export EXP_DATE="12_08_2025"
 
 # === Optional: create logs directory if it doesn't exist ===
 mkdir -p logs
 
 # === Optional: Log the directories to verify ===
-echo "[INFO] Date of experiment = $EXP_DATE"
 echo "[INFO] ROOT_DIR      = $ROOT_DIR"
 echo "[INFO] DATA_DIR      = $DATA_DIR"
 echo "[INFO] SAMPLE_DIR    = $SAMPLE_DIR"
@@ -47,4 +44,4 @@ echo "[INFO] CKPT_DIR      = $CKPT_DIR"
 
 # === Launch the training ===
 srun singularity exec $CONTAINER \
-    python -m sbgm.cli.main_app train 
+    python -m sbgm.cli.main_app generate

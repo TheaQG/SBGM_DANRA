@@ -1,5 +1,7 @@
 # .gitignore file for the SBGM_DANRA project
 
+
+
 # Ignore logs
 .log
 

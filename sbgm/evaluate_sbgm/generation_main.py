@@ -7,8 +7,8 @@ from datetime import datetime
 from omegaconf import DictConfig, OmegaConf
 
 from sbgm.training_utils import get_model, get_gen_dataloader
-from sbgm.special_transforms import build_back_transforms
-from evaluate_sbgm.generation import SampleGenerator #run_generation_multiple, run_generation_single, run_generation_repeated
+from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
+from sbgm.evaluate_sbgm.generation import SampleGenerator #run_generation_multiple, run_generation_single, run_generation_repeated
 from sbgm.utils import get_model_string
 
 def setup_logger(log_dir, name="gen_log", log_to_stdout=True):
@@ -79,13 +79,41 @@ def generation_main(cfg):
     gen_dataloader = get_gen_dataloader(cfg)
 
     # --- 4. Prepare back transforms --------------------------------------------------------
-    back_transforms = build_back_transforms(hr_var=cfg.highres.variable,
-                                            hr_scaling_method= cfg.highres.scaling_method,
-                                            hr_scaling_params=cfg.highres.scaling_params,
-                                            lr_vars=cfg.lowres.condition_variables,
-                                            lr_scaling_methods=cfg.lowres.scaling_methods,
-                                            lr_scaling_params=cfg.lowres.scaling_params,
-                                            )
+    full_domain_dims_hr = cfg.highres.full_domain_dims if 'full_domain_dims' in cfg.highres else None
+    full_domain_dims_str_hr = f"{full_domain_dims_hr[0]}x{full_domain_dims_hr[1]}" if full_domain_dims_hr is not None else "full_domain"
+    crop_region_hr = cfg.highres.cutout_domains if 'cutout_domains' in cfg.highres else None
+    crop_region_hr_str = '_'.join(map(str, crop_region_hr)) if crop_region_hr is not None else "no_crop"
+
+    full_domain_dims_lr = cfg.lowres.full_domain_dims if 'full_domain_dims' in cfg.lowres else None
+    full_domain_dims_str_lr = f"{full_domain_dims_lr[0]}x{full_domain_dims_lr[1]}" if full_domain_dims_lr is not None else "full_domain"
+    crop_region_lr = cfg.lowres.cutout_domains if 'cutout_domains' in cfg.lowres else None
+    crop_region_lr_str = '_'.join(map(str, crop_region_lr)) if crop_region_lr is not None else "no_crop"
+    
+
+    back_transforms = build_back_transforms_from_stats(
+                        hr_var              = cfg['highres']['variable'],
+                        hr_model            = cfg['highres']['model'],
+                        domain_str_hr       = full_domain_dims_str_hr,
+                        crop_region_str_hr  = crop_region_hr_str,
+                        hr_scaling_method   = cfg['highres']['scaling_method'],
+                        hr_buffer_frac      = cfg['highres']['buffer_frac'] if 'buffer_frac' in cfg['highres'] else 0.0,
+                        lr_vars             = cfg['lowres']['condition_variables'],
+                        lr_model            = cfg['lowres']['model'],
+                        domain_str_lr       = full_domain_dims_str_lr,
+                        crop_region_str_lr  = crop_region_lr_str,
+                        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+                        lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
+                        split               = 'all',
+                        stats_dir_root      = cfg['paths']['stats_load_dir']
+                        )
+                        
+    # back_transforms = build_back_transforms(hr_var=cfg.highres.variable,
+    #                                         hr_scaling_method= cfg.highres.scaling_method,
+    #                                         hr_scaling_params=cfg.highres.scaling_params,
+    #                                         lr_vars=cfg.lowres.condition_variables,
+    #                                         lr_scaling_methods=cfg.lowres.scaling_methods,
+    #                                         lr_scaling_params=cfg.lowres.scaling_params,
+    #                                         )
     
 
     # --- Initialize SampleGenerator --------------------------------------------------------

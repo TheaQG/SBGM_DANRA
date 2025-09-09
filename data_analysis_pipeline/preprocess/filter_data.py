@@ -1,5 +1,69 @@
 import os
 import numpy as np
+import logging
+from tqdm import tqdm
+
+# Setup logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("[%(levelname)s] %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+
+def filter_files(data_dir, expected_shape=None, required_keys=None, delete_invalid=False):
+    """
+        Scan through .npz files in the given directory, check for corruption based on expected shape and required keys.
+        Corruption based on shape mismatch or missing keys.
+
+        Parameters:
+            data_dir (str): Directory containing .npz files to check.
+            expected_shape (tuple, optional): Expected shape of the data arrays. If None, shape is not checked.
+            required_keys (list, optional): List of keys that must be present in the .npz file. If None, keys are not checked.
+            delete_invalid (bool): If True, delete files that are found to be corrupted.
+
+        Returns:
+            valid_files (list): List of valid file paths.
+            corrupted_files (list): List of corrupted file paths.
+    """
+    files = [f for f in os.listdir(data_dir) if f.endswith('.npz')]
+    valid_files = []
+    corrupted_files = []
+
+    for fname in tqdm(files, desc="Filtering files"):
+        fpath = os.path.join(data_dir, fname)
+        try:
+            with np.load(fpath) as data:
+                # Check for required keys
+                if required_keys:
+                    if not all(key in data for key in required_keys):
+                        raise ValueError(f"Missing required keys in {fname}")
+
+                # Check for expected shape
+                if expected_shape:
+                    for v in data.values():
+                        if v.shape != expected_shape:
+                            raise ValueError(f"Shape mismatch in {fname}: expected {expected_shape}, got {v.shape}")
+
+        except Exception as e:
+            logger.warning(f"Corrupted file detected: {fname} | Reason: {e}")
+            corrupted_files.append(fpath)
+            if delete_invalid:
+                os.remove(fpath)
+                logger.info(f"Deleted corrupted file: {fname}")
+            continue
+
+        valid_files.append(fpath)
+    logger.info(f"Total files scanned: {len(files)}")
+    logger.info(f"Valid files: {len(valid_files)}")
+    logger.info(f"Corrupted files: {len(corrupted_files)}")
+    return valid_files, corrupted_files
+
+
+
+import os
+import numpy as np
 from shutil import copyfile
 from collections import Counter
 from datetime import datetime

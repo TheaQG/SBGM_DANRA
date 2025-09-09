@@ -9,7 +9,7 @@ import re
 import random
 import torch
 import logging
-import multiprocessing
+# import multiprocessing
 
 import numpy as np
 import torch.nn.functional as F
@@ -19,7 +19,8 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from scipy.ndimage import distance_transform_edt as distance
 
-from sbgm.special_transforms import *
+from sbgm.special_transforms import Scale, get_transforms_from_stats
+from sbgm.utils import correct_variable_units
 
 # Set logging
 logger = logging.getLogger(__name__)
@@ -309,6 +310,50 @@ def list_all_keys(zgroup):
             all_keys.extend([f"{key}/{sub}" for sub in sub_keys])
     return all_keys
 
+
+# Helper for robust array extraction
+def _first_hw_slice(arr: np.ndarray) -> np.ndarray:
+    """
+        Return a 2D (H, W) view by taking the first slice along any leading dimensions.
+        Works for shapes like (H, W), (1, H, W), (N, H, W), (N, 1, H, W), etc.
+    """
+    arr = np.asarray(arr) # Ensure it's a numpy array
+    if arr.ndim < 2:
+        raise ValueError(f"Array must have at least 2 dimensions, got shape {arr.shape}")
+    H, W = arr.shape[-2], arr.shape[-1]
+    return arr.reshape(-1, H, W)[0] # First slice of shape (H, W)
+
+# Helper for extracting field from zarr group entry with common dataset keys per variable
+def _extract_2d_from_zarr_entry(zgroup: zarr.Group, file_key: str, var_name: str) -> np.ndarray:
+    """
+        Load a 2D field from a zarr group entry, trying common dataset keys per variable.
+        Returns a numpy array with shape (H, W).
+    """
+    entry = zgroup[file_key]
+
+    KEY_CANDIDATES = {
+        'temp': ['t', 'data', 'arr_0'],
+        't2m': ['t', 'data', 'arr_0'],
+        'prcp': ['tp', 'data', 'arr_0'],
+        'tp': ['tp', 'data', 'arr_0'],
+        '_default': ['data', 'arr_0'],
+    }
+
+    candidates = KEY_CANDIDATES.get(var_name, []) + KEY_CANDIDATES['_default']
+    for k in candidates:
+        if k in entry:
+            arr = entry[k][()] # Load the array
+            return _first_hw_slice(arr) # Return as (H, W)
+        
+    # Fallback: try any array-like members under the entry
+    for k in entry.keys():
+        try:
+            arr = entry[k][()]
+            return _first_hw_slice(arr)
+        except Exception:
+            continue
+    raise KeyError(f"Could not find a suitable data array in zarr entry '{file_key}' for variable '{var_name}'. Tried keys: {candidates} and all members.")
+
 # all_keys = list_all_keys(self.lr_cond_zarr_dict[cond])
 # logger.debug(all_keys)
 
@@ -330,12 +375,12 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 hr_variable:str = 'temp',           # Variable to load (temp or prcp)
                 hr_model:str = 'DANRA',             # Model name (e.g. 'DANRA', 'ERA5')
                 hr_scaling_method:str = 'zscore',   # Scaling method for high resolution data
-                hr_scaling_params:dict = {'glob_mean':8.69251, 'glob_std':6.192434}, # Scaling parameters for high resolution data (if prcp, 'log_minus1_1' or 'log_01' include 'glob_min_log' and 'glob_max_log' and optional buffer_frac)
+                # hr_scaling_params:dict = {'glob_mean':8.69251, 'glob_std':6.192434}, # Scaling parameters for high resolution data (if prcp, 'log_minus1_1' or 'log_01' include 'glob_min_log' and 'glob_max_log' and optional buffer_frac)
                 # LR conditions and their scaling parameters (not including geo variables. they are handled separately)
                 lr_conditions:list = ['temp'],      # Variables to load as low resolution conditions
                 lr_model:str = 'ERA5',              # Model name (e.g. 'DANRA', 'ERA5')
                 lr_scaling_methods:list = ['zscore'], # Scaling methods for low resolution conditions
-                lr_scaling_params:list = [{'glob_mean':8.69251, 'glob_std':6.192434}], # Scaling parameters for low resolution conditions
+                # lr_scaling_params:list = [{'glob_mean':8.69251, 'glob_std':6.192434}], # Scaling parameters for low resolution conditions
                 lr_cond_dirs_zarr:Optional[dict] = None,      # Path to directories containing conditional data (in format dict({'condition1':dir1, 'condition2':dir2}))
                 # NEW: LR conditioning area size (if cropping is desired)
                 lr_data_size:Optional[tuple] = None,         # Size of low resolution data (2D image, tuple), e.g. (589,789) for full LR domain
@@ -376,8 +421,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # (Remove any geo variable from conditions list, if accidentally included)
         self.geo_variables = geo_variables
         # Check that there are the same number of scaling methods and parameters as conditions
-        if len(lr_conditions) != len(lr_scaling_methods) or len(lr_conditions) != len(lr_scaling_params):
-            raise ValueError('Number of conditions, scaling methods and scaling parameters must be the same')
+        if len(lr_conditions) != len(lr_scaling_methods): # or len(lr_conditions) != len(lr_scaling_params):
+            raise ValueError('Number of conditions and scaling methods must be the same')
 
         # Go through the conditions, and if condition is in geo_variables, remoce from list, and remove scaling methods and params associated with it
         # But only if any geo_variables exist
@@ -387,11 +432,11 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     idx = lr_conditions.index(geo_var)
                     lr_conditions.pop(idx)
                     lr_scaling_methods.pop(idx)
-                    lr_scaling_params.pop(idx)
+                    # lr_scaling_params.pop(idx)
         self.lr_conditions = lr_conditions
         self.lr_model = lr_model
         self.lr_scaling_methods = lr_scaling_methods
-        self.lr_scaling_params = lr_scaling_params
+        # self.lr_scaling_params = lr_scaling_params
         # If any conditions exist, set with_conditions to True
         self.with_conditions = len(self.lr_conditions) > 0
 
@@ -441,7 +486,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.hr_variable = hr_variable
         self.hr_model = hr_model
         self.hr_scaling_method = hr_scaling_method
-        self.hr_scaling_params = hr_scaling_params
+        # self.hr_scaling_params = hr_scaling_params
         
         # Save geo variables full-domain arrays
         self.lsm_full_domain = lsm_full_domain
@@ -504,71 +549,102 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
         if self.shuffle:
             self.common_dates = random.sample(self.common_dates, self.n_samples)
-
+        
         # Set cache for data loading - if cache_size is 0, no caching is used
-        self.cache = multiprocessing.Manager().dict()
+        # If num_workers > 0 each worker has its own Dataset instance
+        # self.cache = multiprocessing.Manager().dict()
+        self.cache = {}  # Use a simple dict for caching, if cache_size > 0
 
-        # Set transforms for conditions, and use specified scaling methods and parameters
         if self.scale:
-            self.transforms_dict = {}
-            for cond, method, params in zip(self.lr_conditions, self.lr_scaling_methods, self.lr_scaling_params):
-                # Base transform: to tensor and resize
+            # 1. Set condition transforms
+            self.lr_transforms_dict = {}
+            domain_str_hr = f"{cfg['highres']['full_domain_dims'][0]}x{cfg['highres']['full_domain_dims'][1]}" if cfg is not None else f"{self.hr_data_size[0]}x{self.hr_data_size[1]}"
+            domain_str_lr = f"{cfg['lowres']['full_domain_dims'][0]}x{cfg['lowres']['full_domain_dims'][1]}" if cfg is not None else f"{self.target_lr_size[0]}x{self.target_lr_size[1]}"
+            crop_region_hr = cfg['highres']['cutout_domains'] if (cfg is not None and self.cutouts and self.cutout_domains is not None) else "full"
+            crop_region_hr_str = '_'.join(map(str, crop_region_hr)) # if (cfg is not None and self.cutouts and self.cutout_domains is not None) else "full"
+            crop_region_lr = cfg['lowres']['cutout_domains'] if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
+            crop_region_lr_str = '_'.join(map(str, crop_region_lr)) # if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
+            split = 'all' # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first
+            stats_load_dir = cfg['paths']['stats_load_dir'] if cfg is not None else './stats'
+
+            for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
+                logger.info(f"LR condition: {cond_var}, scaling method: {trans_type}")
                 transform_list = [
                     SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced)
                 ]
-                # Use per-variable buffer_frac
-                buff = params.get('buffer_frac', 0.5)
-                if method == 'zscore':
-                    # ADD BUFFER FRACTION TO ZSCORE TRANSFORM
-                    transform_list.append(ZScoreTransform(params['glob_mean'], params['glob_std']))
-                elif method in ['log', 'log_01', 'log_minus1_1', 'log_zscore']:
-                    transform_list.append(PrcpLogTransform(eps=1e-10,
-                                                           scale_type=method,
-                                                           glob_mean_log=params['glob_mean_log'],
-                                                           glob_std_log=params['glob_std_log'],
-                                                           glob_min_log=params['glob_min_log'],
-                                                           glob_max_log=params['glob_max_log'],
-                                                           buffer_frac=buff))
-                elif method == '01':
-                    transform_list.append(Scale(0, 1, params['glob_min'], params['glob_max']))
-                self.transforms_dict[cond] = transforms.Compose(transform_list) 
-        else:
-            self.transforms_dict = {cond: transforms.Compose([
-                SafeToTensor(),
-                ResizeTensor(self.lr_size_reduced)
-            ]) for cond in self.lr_conditions}
 
-        # Build transform for the HR target variable similarly
-        if self.scale:
+                transform_list.append(get_transforms_from_stats(
+                    variable=cond_var,
+                    model=self.lr_model,
+                    domain_str=domain_str_lr,
+                    crop_region_str=crop_region_lr_str,
+                    split=split,
+                    transform_type=trans_type,
+                    buffer_frac=cfg['lowres'].get('buffer_frac', 0.5) if cfg is not None else 0.5,
+                    stats_file_path=stats_load_dir,
+                ))
+                self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
+
+            ############### OLD CODE - BEFORE USING get_transforms_from_stats ###############
+            # for cond, method, params in zip(self.lr_conditions, self.lr_scaling_methods, self.lr_scaling_params):
+            #     # Base transform: to tensor and resize
+            #     transform_list = [
+            #         SafeToTensor(),
+            #         ResizeTensor(self.lr_size_reduced)
+            #     ]
+            #     # Use per-variable buffer_frac
+            #     buff = params.get('buffer_frac', 0.5)
+            #     if method == 'zscore':
+            #         # ADD BUFFER FRACTION TO ZSCORE TRANSFORM
+            #         transform_list.append(ZScoreTransform(params['glob_mean'], params['glob_std']))
+            #     elif method in ['log', 'log_01', 'log_minus1_1', 'log_zscore']:
+            #         transform_list.append(PrcpLogTransform(eps=1e-10,
+            #                                                scale_type=method,
+            #                                                glob_mean_log=params['glob_mean_log'],
+            #                                                glob_std_log=params['glob_std_log'],
+            #                                                glob_min_log=params['glob_min_log'],
+            #                                                glob_max_log=params['glob_max_log'],
+            #                                                buffer_frac=buff))
+            #     elif method == '01':
+            #         transform_list.append(Scale(0, 1, params['glob_min'], params['glob_max']))
+            #     self.lr_transforms_dict[cond] = transforms.Compose(transform_list)
+
+
+            # 2. Set HR target transform
             hr_transform_list = [
                 SafeToTensor(),
                 ResizeTensor(self.hr_size_reduced)
             ]
-            hr_buff = self.hr_scaling_params.get('buffer_frac', 0.5)
-            if self.hr_scaling_method == 'zscore':
-                hr_transform_list.append(ZScoreTransform(self.hr_scaling_params['glob_mean'], self.hr_scaling_params['glob_std']))
-            elif self.hr_scaling_method in ['log', 'log_01', 'log_minus1_1', 'log_zscore']:
-                hr_transform_list.append(PrcpLogTransform(eps=1e-10,
-                                                          scale_type=self.hr_scaling_method,
-                                                          glob_mean_log=self.hr_scaling_params['glob_mean_log'],
-                                                          glob_std_log=self.hr_scaling_params['glob_std_log'],
-                                                          glob_min_log=self.hr_scaling_params['glob_min_log'],
-                                                          glob_max_log=self.hr_scaling_params['glob_max_log'],
-                                                          buffer_frac=hr_buff))
-            elif self.hr_scaling_method == '01':
-                hr_transform_list.append(Scale(0, 1, self.hr_scaling_params['glob_min'], self.hr_scaling_params['glob_max']))
+            hr_buff = cfg['highres'].get('buffer_frac', 0.5) if cfg is not None else 0.5
+            hr_transform_list.append(get_transforms_from_stats(
+                variable=self.hr_variable,
+                model=self.hr_model,
+                domain_str=domain_str_hr,
+                crop_region_str=crop_region_hr_str,
+                split='all', # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first
+                transform_type=self.hr_scaling_method,
+                buffer_frac=hr_buff,
+                stats_file_path=stats_load_dir,
+            ))
             self.hr_transform = transforms.Compose(hr_transform_list)
-        else:
-            self.hr_transform = transforms.Compose([
-                SafeToTensor(),
-                ResizeTensor(self.hr_size_reduced)
-            ])
-
-        # Build a transform for the geo variables, with possible scaling  to [0,1]
-        # Only if sampling with geo variables is used
-        if self.geo_variables is not None:
-            if self.scale:
+            ############### OLD CODE - BEFORE USING get_transforms_from_stats ###############
+            # if self.hr_scaling_method == 'zscore':
+            #     hr_transform_list.append(ZScoreTransform(self.hr_scaling_params['glob_mean'], self.hr_scaling_params['glob_std']))
+            # elif self.hr_scaling_method in ['log', 'log_01', 'log_minus1_1', 'log_zscore']:
+            #     hr_transform_list.append(PrcpLogTransform(eps=1e-10,
+            #                                               scale_type=self.hr_scaling_method,
+            #                                               glob_mean_log=self.hr_scaling_params['glob_mean_log'],
+            #                                               glob_std_log=self.hr_scaling_params['glob_std_log'],
+            #                                               glob_min_log=self.hr_scaling_params['glob_min_log'],
+            #                                               glob_max_log=self.hr_scaling_params['glob_max_log'],
+            #                                               buffer_frac=hr_buff))
+            # elif self.hr_scaling_method == '01':
+            #     hr_transform_list.append(Scale(0, 1, self.hr_scaling_params['glob_min'], self.hr_scaling_params['glob_max']))
+            # self.hr_transform = transforms.Compose(hr_transform_list)
+        
+            # 3. Set geo variable transforms (if any)
+            if self.geo_variables is not None:
                 if self.topo_full_domain is None:
                     raise ValueError("topo_full_domain must be provided if 'topo' is in geo_variables")
                 self.geo_transform_topo = transforms.Compose([
@@ -582,13 +658,30 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced),
                 ])
-            else:
+        else:
+            # 1. Set condition transforms
+            self.lr_transforms_dict = {cond: transforms.Compose([
+                SafeToTensor(),
+                ResizeTensor(self.lr_size_reduced)
+            ]) for cond in self.lr_conditions}
+
+            # 2. Set HR target transform
+            self.hr_transform = transforms.Compose([
+                SafeToTensor(),
+                ResizeTensor(self.hr_size_reduced)
+            ])
+
+            # 3. Set geo variable transforms (if any)
+            if self.geo_variables is not None:
                 self.geo_transform_topo = transforms.Compose([
                     transforms.Lambda(lambda x: np.ascontiguousarray(x)), # To make sure np.flipud is not messing up the tensor
                     SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced)
                 ])
                 self.geo_transform_lsm = self.geo_transform_topo
+
+
+
 
     def __len__(self):
         '''
@@ -613,7 +706,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 # Select random key to remove
                 key_to_remove = random.choice(keys)
                 # Remove key from cache
-                self.cache.pop(key_to_remove)
+                self.cache.pop(key_to_remove, None) # Safe removal, in case key is not found
             # Add data to cache
             self.cache[idx] = data
     
@@ -659,34 +752,37 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             lr_file_name = self.lr_file_map[cond][date]
             # Load LR condition data from its own zarr group
             try:
-                # logger.info(f'Loading LR {cond} data for {lr_file_name}')
-                # logger.debug(self.lr_cond_zarr_dict[cond].tree())
-                if cond == "temp":
-                    try:
-                        data = self.lr_cond_zarr_dict[cond][lr_file_name]['t']
-                        data = data[()][0,0,:,:] - 273.15
-                        # logger.debug("Key 't' found")
-                    except:
-                        data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
-                        data = data[()][:,:] - 273.15
-                        # logger.debug("Key 'data' found")
-                elif cond == "prcp":
-                    try:
-                        data = self.lr_cond_zarr_dict[cond][lr_file_name]['tp']
-                        data = data[()][0,0,:,:] * 1000
-                        data[data <= 0] = 1e-10
-                        # logger.debug("Key 'tp' found")
-                    except:
-                        data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
-                        data = data[()][:,:] * 1000
-                        data[data <= 0] = 1e-10
-                        # logger.debug("Key 'arr_0' found")
-                else:
-                    # Add custom logic for other LR conditions when needed
-                    data = self.lr_cond_zarr_dict[cond][lr_file_name]['data'][()]
+                ################### OLD WAY - BEFORE CREATING _extract_2d_from_zarr_entry() AND correct_variable_units() ###################
+                # # logger.info(f'Loading LR {cond} data for {lr_file_name}')
+                # # logger.debug(self.lr_cond_zarr_dict[cond].tree())
+                # if cond == "temp":
+                #     try:
+                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['t']
+                #         data = data[()][0,0,:,:] - 273.15
+                #         # logger.debug("Key 't' found")
+                #     except:
+                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
+                #         data = data[()][:,:] - 273.15
+                #         # logger.debug("Key 'data' found")
+                # elif cond == "prcp":
+                #     try:
+                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['tp']
+                #         data = data[()][0,0,:,:] * 1000
+                #         data[data <= 0] = 1e-10
+                #         # logger.debug("Key 'tp' found")
+                #     except:
+                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
+                #         data = data[()][:,:] * 1000
+                #         data[data <= 0] = 1e-10
+                #         # logger.debug("Key 'arr_0' found")
+                # else:
+                #     # Add custom logic for other LR conditions when needed
+                #     data = self.lr_cond_zarr_dict[cond][lr_file_name]['data'][()]
+                data = _extract_2d_from_zarr_entry(self.lr_cond_zarr_dict[cond], lr_file_name, cond)
+                # Apply unit corrections consistently
+                data = correct_variable_units(cond, self.lr_model, data)
             except Exception as e:
                 logger.error(f'Error loading {cond} data for {lr_file_name}. Error: {e}')
-                
                 data = None
             
             # Crop LR data using lr_point if cutouts are enabled and lr_point is not None
@@ -700,30 +796,35 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 sample_dict[f"{cond}_lr_original"] = data.copy() if data is not None else None
 
             # Apply specified transform (specific to various conditions)
-            if data is not None and self.transforms_dict.get(cond, None) is not None:
-                data = self.transforms_dict[cond](data)
+            if data is not None and self.lr_transforms_dict.get(cond, None) is not None:
+                data = self.lr_transforms_dict[cond](data)
             sample_dict[cond + "_lr"] = data
         
 
         # Load HR target variable data
         try:
-            # logger.info(f'Loading HR {self.hr_variable} data for {hr_file_name}')
-            # logger.debug(self.zarr_group_img[hr_file_name].tree())
-            if self.hr_variable == 'temp':
-                try:
-                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['t'][()][0,0,:,:], dtype=torch.float32) - 273.15
-                except:
-                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32) - 273.15
-            elif self.hr_variable == 'prcp':
-                try:
-                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['tp'][()][0,0,:,:], dtype=torch.float32)
-                except:
-                    hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32)
-                # Set all non-positive values to a small positive value (multiplied by a random number for robustness)
-                hr[hr <= 0] = 1e-10 * np.random.rand()
-            else:
-                # Add custom logic for other HR variables when needed
-                hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()], dtype=torch.float32)
+            ################### OLD WAY - BEFORE CREATING _extract_2d_from_zarr_entry() AND correct_variable_units() ###################
+            # # logger.info(f'Loading HR {self.hr_variable} data for {hr_file_name}')
+            # # logger.debug(self.zarr_group_img[hr_file_name].tree())
+            # if self.hr_variable == 'temp':
+            #     try:
+            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['t'][()][0,0,:,:], dtype=torch.float32) - 273.15
+            #     except:
+            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32) - 273.15
+            # elif self.hr_variable == 'prcp':
+            #     try:
+            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['tp'][()][0,0,:,:], dtype=torch.float32)
+            #     except:
+            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32)
+            #     # Set all non-positive values to a small positive value (multiplied by a random number for robustness)
+            #     hr[hr <= 0] = 1e-10 * np.random.rand()
+            # else:
+            #     # Add custom logic for other HR variables when needed
+            #     hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()], dtype=torch.float32)
+            hr_np = _extract_2d_from_zarr_entry(self.zarr_group_img, hr_file_name, self.hr_variable)
+            # Apply unit corrections consistently
+            hr_np = correct_variable_units(self.hr_variable, self.hr_model, hr_np)
+            hr = torch.tensor(hr_np, dtype=torch.float32)
         except Exception as e:
             logger.error(f'Error loading HR {self.hr_variable} data for {hr_file_name}. Error: {e}')
             hr = None

@@ -11,8 +11,13 @@ from data_analysis_pipeline.comparison.comparison_pipeline import run_comparison
 import copy 
 import os
 
+# Setup logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("[%(levelname)s] %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 def comparison_main(cfg):
     """
@@ -24,7 +29,9 @@ def comparison_main(cfg):
     mode_blocks = cfg.comparison.get("modes", [{"mode": cfg.comparison.get("mode", "distribution")}])
     base_save_path = cfg.comparison.get("save_path", "./figures/comparison")
 
+    logger.info(f"\n[COMPARE] Setting up comparison with variables: {variables}, modes: {[m['mode'] for m in mode_blocks]}")
     for variable in variables:
+        logger.info(f"\n[COMPARE] Preparing comparison for variable: {variable}")
         for mode_cfg in mode_blocks:
             # Create a deep copy of the full cfg for isolation
             cfg_copy = copy.deepcopy(cfg)
@@ -47,5 +54,5 @@ def comparison_main(cfg):
                 os.makedirs(cfg_copy.comparison.save_path, exist_ok=True)
 
 
-            logger.info(f"[INFO] Running comparison for variable: {variable} | mode: {mode_cfg['mode']}")
+            logger.info(f"\nRunning comparison for variable: {variable} | mode: {mode_cfg['mode']}")
             run_comparison_pipeline(cfg_copy)

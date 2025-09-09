@@ -1,6 +1,7 @@
 
 plotting:
   save_cutout_example: true
+  example_date: "20101010"
   fig_save_dir: ${env:DATA_FIGS_DIR}
   show: false
   save: true
@@ -15,11 +16,11 @@ statistics:
   print_results: ["global"]
 
 data:
-  aggregation_time: weekly
+  aggregation_time: monthly
   data_dir: ${env:DATA_DIR}
   n_workers: ${env:SLURM_CPUS_PER_TASK}
   split: all
-  verbose: false # Whether to enable verbose logging during data loading (only for debugging, slows down processing)
+  verbose: true # Whether to enable verbose logging during data loading (only for debugging, slows down processing)
 
 highres:
   model: DANRA 
@@ -30,7 +31,7 @@ highres:
 
 lowres:
   model: ERA5
-  condition_variables: ['temp', 'prcp', 'ewvf', 'nwvf', 'cape'] # ['prcp', 'temp', 'ewvf', 'nwvf', 'cape', ....] (ERA5 variables)
-  agg_methods: ['mean', 'sum', 'mean', 'mean', 'mean']
+  condition_variables: ['temp', 'prcp', 'ewvf', 'nwvf', 'cape', 'msl', 'z_pl_1000', 'z_pl_250', 'z_pl_500', 'z_pl_850'] # ['prcp', 'temp', 'ewvf', 'nwvf', 'cape', ....] (ERA5 variables)
+  agg_methods: ['mean', 'sum', 'mean', 'mean', 'mean', 'mean', 'mean', 'mean', 'mean', 'mean']
   domain_size: [589, 789]
   crop_region: [170, 350, 340, 520]

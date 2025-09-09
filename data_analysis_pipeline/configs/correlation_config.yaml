@@ -1,0 +1,39 @@
+paths:
+  output_dir: ${env:FIGS_SAVE_DIR}
+  stats_save_dir: ${env:STATS_SAVE_DIR}
+  stats_load_dir: ${env:STATS_LOAD_DIR}  # If different from save dir
+
+plotting:
+  fig_save_dir: ${env:ROOT_DIR}/data_analysis_pipeline/saved/correlation_run/
+  show: false
+  save: true
+
+correlation:
+  analysis_types: ["spatial", "temporal"]  # Later: ["lagged", "mutual_info", "cca"]
+  transformations:
+    prcp: log_zscore
+    temp: zscore
+    cape: log_zscore
+    msl: zscore
+    z_pl_500: zscore
+  print_results: true
+  n_days: 100
+  normalize: true
+
+data:
+  data_dir: ${env:DATA_DIR}
+  split: all
+  n_workers: ${env:SLURM_CPUS_PER_TASK}
+  verbose: false
+
+highres:
+  model: DANRA 
+  variables: ['temp', 'prcp']
+  domain_size: [589, 789]
+  crop_region: [170, 350, 340, 520]
+
+lowres:
+  model: ERA5
+  condition_variables: ['temp', 'prcp', 'msl', 'cape', 'z_pl_250', 'z_pl_500', 'z_pl_850', 'z_pl_1000']
+  domain_size: [589, 789]   # Can be different later
+  crop_region: [170, 350, 340, 520]

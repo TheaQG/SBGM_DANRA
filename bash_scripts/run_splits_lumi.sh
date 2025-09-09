@@ -31,6 +31,7 @@ export CONFIG_DIR="$ROOT_DIR/data_analysis_pipeline/configs/split_config.yaml"
 # === Optional: create logs directory if it doesn't exist ===
 mkdir -p logs
 echo "starting run"
+
 echo "Container: $CONTAINER"
 echo "Root Directory: $ROOT_DIR"
 echo "Data Directory: $DATA_DIR"

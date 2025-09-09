@@ -1,11 +1,11 @@
 import logging
-from data_analysis_pipeline.correlations.correlations_pipeline import run_data_correlations
+from data_analysis_pipeline.correlations.correlation_pipeline import run_data_correlations
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-def correlations_main(cfg):
+def correlation_main(cfg):
     """
         Entry point for data split + Zarr conversion. Run this from launch_splits.py
     """

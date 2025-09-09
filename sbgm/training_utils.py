@@ -15,7 +15,7 @@ from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
 from sbgm.score_unet import ScoreNet, Encoder, Decoder, marginal_prob_std_fn
 from sbgm.score_sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
 from sbgm.utils import build_data_path, get_units, get_cmaps, get_model_string
-from sbgm.special_transforms import build_back_transforms
+from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
 # from sbgm.evaluation.evaluation import evaluate_model
 
 # # Set up logging
@@ -97,14 +97,37 @@ def get_dataloader(cfg, verbose=True):
     # lr_scaling_params = cfg['lowres']['scaling_params']
 
     # Set up back transformations (for plotting and visual inspection + later evaluation)
-    back_transforms = build_back_transforms(
-        hr_var              = cfg['highres']['variable'],
-        hr_scaling_method   = cfg['highres']['scaling_method'],
-        hr_scaling_params   = cfg['highres']['scaling_params'],
-        lr_vars             = cfg['lowres']['condition_variables'],
-        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
-        lr_scaling_params   = cfg['lowres']['scaling_params']
-    )
+    # back_transforms = build_back_transforms(
+    #     hr_var              = cfg['highres']['variable'],
+    #     hr_scaling_method   = cfg['highres']['scaling_method'],
+    #     hr_scaling_params   = cfg['highres']['scaling_params'],
+    #     lr_vars             = cfg['lowres']['condition_variables'],
+    #     lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+    #     lr_scaling_params   = cfg['lowres']['scaling_params']
+    # )
+    full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
+    full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
+    crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
+    crop_region_hr_str = '_'.join(map(str, crop_region_hr)) #if isinstance(crop_region_hr, (list, tuple)) else crop_region_hr
+    crop_region_lr = cfg['lowres']['cutout_domains'] if cfg['lowres']['cutout_domains'] is not None else "full_region"
+    crop_region_lr_str = '_'.join(map(str, crop_region_lr)) #if isinstance(crop_region_lr, (list, tuple)) else crop_region_lr
+
+    back_transforms = build_back_transforms_from_stats(
+                        hr_var              = cfg['highres']['variable'],
+                        hr_model            = cfg['highres']['model'],
+                        domain_str_hr       = full_domain_dims_str_hr,
+                        crop_region_str_hr  = crop_region_hr_str,
+                        hr_scaling_method   = cfg['highres']['scaling_method'],
+                        hr_buffer_frac      = cfg['highres']['buffer_frac'] if 'buffer_frac' in cfg['highres'] else 0.0,
+                        lr_vars             = cfg['lowres']['condition_variables'],
+                        lr_model            = cfg['lowres']['model'],
+                        domain_str_lr       = full_domain_dims_str_lr,
+                        crop_region_str_lr  = crop_region_lr_str,
+                        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+                        lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
+                        split               = 'all',
+                        stats_dir_root      = cfg['paths']['stats_load_dir']
+                        )
 
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
         logger.info('SDF weighted loss enabled. Setting lsm and topo to true.\n')
@@ -201,11 +224,11 @@ def get_dataloader(cfg, verbose=True):
                             hr_variable=cfg['highres']['variable'],
                             hr_model=cfg['highres']['model'],
                             hr_scaling_method=cfg['highres']['scaling_method'],
-                            hr_scaling_params=cfg['highres']['scaling_params'],
+                            # hr_scaling_params=cfg['highres']['scaling_params'],
                             lr_conditions=cfg['lowres']['condition_variables'],
                             lr_model=cfg['lowres']['model'],
                             lr_scaling_methods=cfg['lowres']['scaling_methods'],
-                            lr_scaling_params=cfg['lowres']['scaling_params'],
+                            # lr_scaling_params=cfg['lowres']['scaling_params'],
                             lr_cond_dirs_zarr=lr_cond_dirs_train,
                             geo_variables=geo_variables,
                             lsm_full_domain=data_lsm,
@@ -234,11 +257,11 @@ def get_dataloader(cfg, verbose=True):
                             hr_variable=cfg['highres']['variable'],
                             hr_model=cfg['highres']['model'],
                             hr_scaling_method=cfg['highres']['scaling_method'],
-                            hr_scaling_params=cfg['highres']['scaling_params'],
+                            # hr_scaling_params=cfg['highres']['scaling_params'],
                             lr_conditions=cfg['lowres']['condition_variables'],
                             lr_model=cfg['lowres']['model'],
                             lr_scaling_methods=cfg['lowres']['scaling_methods'],
-                            lr_scaling_params=cfg['lowres']['scaling_params'],
+                            # lr_scaling_params=cfg['lowres']['scaling_params'],
                             lr_cond_dirs_zarr=lr_cond_dirs_valid,
                             geo_variables=geo_variables,
                             lsm_full_domain=data_lsm,
@@ -267,11 +290,11 @@ def get_dataloader(cfg, verbose=True):
                             hr_variable=cfg['highres']['variable'],
                             hr_model=cfg['highres']['model'],
                             hr_scaling_method=cfg['highres']['scaling_method'],
-                            hr_scaling_params=cfg['highres']['scaling_params'],
+                            # hr_scaling_params=cfg['highres']['scaling_params'],
                             lr_conditions=cfg['lowres']['condition_variables'],
                             lr_model=cfg['lowres']['model'],
                             lr_scaling_methods=cfg['lowres']['scaling_methods'],
-                            lr_scaling_params=cfg['lowres']['scaling_params'],
+                            # lr_scaling_params=cfg['lowres']['scaling_params'],
                             lr_cond_dirs_zarr=lr_cond_dirs_gen,
                             geo_variables=geo_variables,
                             lsm_full_domain=data_lsm,
@@ -416,14 +439,37 @@ def get_gen_dataloader(cfg, verbose=True):
     # lr_scaling_params = cfg['lowres']['scaling_params']
 
     # Set up back transformations (for plotting and visual inspection + later evaluation)
-    back_transforms = build_back_transforms(
-        hr_var              = cfg['highres']['variable'],
-        hr_scaling_method   = cfg['highres']['scaling_method'],
-        hr_scaling_params   = cfg['highres']['scaling_params'],
-        lr_vars             = cfg['lowres']['condition_variables'],
-        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
-        lr_scaling_params   = cfg['lowres']['scaling_params']
-    )
+    # back_transforms = build_back_transforms(
+    #     hr_var              = cfg['highres']['variable'],
+    #     hr_scaling_method   = cfg['highres']['scaling_method'],
+    #     hr_scaling_params   = cfg['highres']['scaling_params'],
+    #     lr_vars             = cfg['lowres']['condition_variables'],
+    #     lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+    #     lr_scaling_params   = cfg['lowres']['scaling_params']
+    # )
+    full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
+    full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
+    crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
+    crop_region_hr_str = '_'.join(map(str, crop_region_hr)) #if isinstance(crop_region_hr, (list, tuple)) else crop_region_hr
+    crop_region_lr = cfg['lowres']['cutout_domains'] if cfg['lowres']['cutout_domains'] is not None else "full_region"
+    crop_region_lr_str = '_'.join(map(str, crop_region_lr)) #if isinstance(crop_region_lr, (list, tuple)) else crop_region_lr
+
+    back_transforms = build_back_transforms_from_stats(
+                        hr_var              = cfg['highres']['variable'],
+                        hr_model            = cfg['highres']['model'],
+                        domain_str_hr       = full_domain_dims_str_hr,
+                        crop_region_str_hr  = crop_region_hr_str,
+                        hr_scaling_method   = cfg['highres']['scaling_method'],
+                        hr_buffer_frac      = cfg['highres']['buffer_frac'] if 'buffer_frac' in cfg['highres'] else 0.0,
+                        lr_vars             = cfg['lowres']['condition_variables'],
+                        lr_model            = cfg['lowres']['model'],
+                        domain_str_lr       = full_domain_dims_str_lr,
+                        crop_region_str_lr  = crop_region_lr_str,
+                        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+                        lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
+                        split               = 'all',
+                        stats_dir_root      = cfg['paths']['stats_load_dir']
+                        )
 
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
         logger.info('SDF weighted loss enabled. Setting lsm and topo to true.\n')
@@ -485,11 +531,11 @@ def get_gen_dataloader(cfg, verbose=True):
                             hr_variable=cfg['highres']['variable'],
                             hr_model=cfg['highres']['model'],
                             hr_scaling_method=cfg['highres']['scaling_method'],
-                            hr_scaling_params=cfg['highres']['scaling_params'],
+                            # hr_scaling_params=cfg['highres']['scaling_params'],
                             lr_conditions=cfg['lowres']['condition_variables'],
                             lr_model=cfg['lowres']['model'],
                             lr_scaling_methods=cfg['lowres']['scaling_methods'],
-                            lr_scaling_params=cfg['lowres']['scaling_params'],
+                            # lr_scaling_params=cfg['lowres']['scaling_params'],
                             lr_cond_dirs_zarr=lr_cond_dirs_gen,
                             geo_variables=geo_variables,
                             lsm_full_domain=data_lsm,

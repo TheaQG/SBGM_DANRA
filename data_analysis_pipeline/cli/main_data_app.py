@@ -1,12 +1,11 @@
 import argparse
 import logging
-import os
-import sys
 
 from data_analysis_pipeline.cli.launch_split_creation import run as run_split
 from data_analysis_pipeline.cli.launch_statistics import run as run_statistics
 from data_analysis_pipeline.cli.launch_comparison import run as run_comparison
 from data_analysis_pipeline.cli.launch_small_batches_creation import run as run_small_batches
+from data_analysis_pipeline.cli.launch_correlations import run as run_correlation
 from sbgm.utils import load_config
 
 
@@ -24,7 +23,7 @@ def main():
     logger.info("In main data app: Setting up to run...")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["create_splits", "run_statistics", "run_comparison", "create_small_batches"], required=True)
+    parser.add_argument("--mode", choices=["create_splits", "run_statistics", "run_comparison", "create_small_batches", "run_correlation"], required=True)
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_args()
 
@@ -42,7 +41,10 @@ def main():
     elif args.mode == "create_small_batches":
         logger.info("\t\tIn main data app: Creating small data batches...")
         run_small_batches(cfg)
-    else: 
+    elif args.mode == "run_correlation":
+        logger.info("\t\tIn main data app: Running data correlation...")
+        run_correlation(cfg)
+    else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
     print("Finished run...")

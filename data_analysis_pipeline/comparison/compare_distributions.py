@@ -83,16 +83,17 @@ def compare_power_spectra(
     nx = data_model1.shape[1]
     logger.info(f"Data shape: {data_model1.shape}, nx: {nx}")
     dx = dx_model1  # grid spacing in km
+    # Set float dtype to avoid overflow in wavelengths calculation
     wavelengths = (nx * dx) / np.arange(1, len(ps1)+1, dtype=np.float64)  # Avoid division by zero
     
     # Plotting
     fig, ax = plt.subplots(figsize=(10, 6))
     if loglog:
-        ax.loglog(wavelengths, ps1, label=model1, color='blue')
-        ax.loglog(wavelengths, ps2, label=model2, color='orange')
+        ax.loglog(wavelengths, ps1, label=model1, color=get_color_for_variable(variable, model=model1))
+        ax.loglog(wavelengths, ps2, label=model2, color=get_color_for_variable(variable, model=model2))
     else:
-        ax.plot(wavelengths, ps1, label=model1, color='blue')
-        ax.plot(wavelengths, ps2, label=model2, color='orange')
+        ax.plot(wavelengths, ps1, label=model1, color=get_color_for_variable(variable, model=model1))
+        ax.plot(wavelengths, ps2, label=model2, color=get_color_for_variable(variable, model=model2))
 
     ax.set_title(f'{title}Radially Averaged Power Spectrum Comparison')
     ax.set_xlabel('Wavelength (km)')
@@ -104,6 +105,7 @@ def compare_power_spectra(
         if not os.path.exists(save_path):
             os.makedirs(save_path)
         plt.savefig(os.path.join(save_path, f'{fname}.png'), dpi=300)
+        logger.info(f"      Saved power spectra comparison to {save_path}/{fname}.png")
     if show:
         plt.show()
     plt.close()
@@ -151,7 +153,7 @@ def batch_compare_power_spectra(
         Returns average metrics and optionally all daily metrics
     """
     title = f"{variable} | {model1} vs {model2} | "
-    fname = f"{variable}_models_{model1}_vs_{model2}_power_spectrum".replace(" ", "_")
+    fname = f"{variable}_{model1}_vs_{model2}_power_spectrum".replace(" ", "_")
 
     all_metrics = defaultdict(list) # Store lists of metrics for each time point
     spectra_1 = []
@@ -208,13 +210,13 @@ def batch_compare_power_spectra(
     if show_plot or save_path:
         fig, ax = plt.subplots(figsize=(10, 6))
         if loglog:
-            ax.loglog(wavelengths, mean_ps1, label=f'{model1} Mean', color='blue')
-            ax.loglog(wavelengths, mean_ps2, label=f'{model2} Mean', color='orange')
+            ax.loglog(wavelengths, mean_ps1, label=f'{model1} Mean', color=get_color_for_variable(variable, model=model1))
+            ax.loglog(wavelengths, mean_ps2, label=f'{model2} Mean', color=get_color_for_variable(variable, model=model2))
             # ax.fill_between(wavelengths, mean_ps1 - std_ps1, mean_ps1 + std_ps1, color='blue', alpha=0.3)
             # ax.fill_between(wavelengths, mean_ps2 - std_ps2, mean_ps2 + std_ps2, color='orange', alpha=0.3)
         else:
-            ax.plot(wavelengths, mean_ps1, label=f'{model1} Mean', color='blue', linewidth=2)
-            ax.plot(wavelengths, mean_ps2, label=f'{model2} Mean', color='orange', linewidth=2)
+            ax.plot(wavelengths, mean_ps1, label=f'{model1} Mean', color=get_color_for_variable(variable, model=model1), linewidth=2)
+            ax.plot(wavelengths, mean_ps2, label=f'{model2} Mean', color=get_color_for_variable(variable, model=model2), linewidth=2)
             # ax.fill_between(wavelengths, mean_ps1 - std_ps1, mean_ps1 + std_ps1, color='blue', alpha=0.3)
             # ax.fill_between(wavelengths, mean_ps2 - std_ps2, mean_ps2 + std_ps2, color='orange', alpha=0.3)
 
@@ -256,6 +258,7 @@ def batch_compare_power_spectra(
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
             plt.savefig(os.path.join(save_path, f'{fname}.png'), dpi=300)
+            logger.info(f"      Saved power spectra comparison to {save_path}/{fname}.png")
         if show:
             plt.show()
         plt.close()
@@ -310,12 +313,12 @@ def plot_histograms(data_model1,
     """
 
     title = f"{variable} | {model1} vs {model2} | Histogram Comparison"
-    fname = f"{variable}_models_{model1}_vs_{model2}_histogram".replace(" ", "_")
+    fname = f"{variable}_{model1}_vs_{model2}_histogram".replace(" ", "_")
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.hist(data_model1.flatten(), bins=bins, alpha=0.5, label=f"{model1}, {variable}", density=True)
-    ax.hist(data_model2.flatten(), bins=bins, alpha=0.5, label=f"{model2}, {variable}", density=True)
+    ax.hist(data_model1.flatten(), bins=bins, alpha=0.5, label=f"{model1}, {variable}", density=True, color=get_color_for_variable(variable, model=model1))
+    ax.hist(data_model2.flatten(), bins=bins, alpha=0.5, label=f"{model2}, {variable}", density=True, color=get_color_for_variable(variable, model=model2))
     
     if log:
         ax.set_yscale('log')
@@ -331,6 +334,7 @@ def plot_histograms(data_model1,
             os.makedirs(save_path)
 
         plt.savefig(f"{save_path}/{fname}", dpi=300)
+        logger.info(f"      Saved histogram to {save_path}/{fname}")
     if show:
         plt.show()
 
@@ -383,3 +387,103 @@ def compare_distributions(
     if return_metrics:
         stats = compute_distribution_stats(data_model1, data_model2)
         return stats
+
+def get_season(dt):
+    """
+        Return meteorological season for a given datetime object.
+    """
+    month = dt.month
+    if month in [12, 1, 2]:
+        return 'Winter'
+    elif month in [3, 4, 5]:
+        return 'Spring'
+    elif month in [6, 7, 8]:
+        return 'Summer'
+    else:
+        return 'Autumn'
+
+def compare_seasonal_distributions(
+    dataset1: dict,
+    dataset2: dict,
+    model1: str = 'Model 1',
+    model2: str = 'Model 2',
+    variable: str = 'Variable',
+    bins: int = 100,
+    log_hist: bool = False,
+    save_figures: bool = True,
+    show: bool = False,
+    save_path: str = './figures/seasonal_distribution_comparison',
+    return_metrics: bool = True
+    ):
+    """
+        Plot seasonal histograms comparing HR and LR models.
+        Produces:
+        (1) Two-panel figure: each model, all four seasons overlaid
+        (2) Four-panel figure: each season, both models overlaid
+    """
+
+    # === Organize data by season ===
+    season_bins_model1 = {'Winter': [], 'Spring': [], 'Summer': [], 'Autumn': []}
+    season_bins_model2 = {'Winter': [], 'Spring': [], 'Summer': [], 'Autumn': []}
+
+    for date, arr1 in dataset1.items():
+        if date in dataset2:
+            arr2 = dataset2[date]
+            season = get_season(date)
+            season_bins_model1[season].append(np.array(arr1).flatten())
+            season_bins_model2[season].append(np.array(arr2).flatten())
+
+    # Concatenate all seasonal arrays
+    for season in season_bins_model1:
+        season_bins_model1[season] = np.concatenate(season_bins_model1[season]) if season_bins_model1[season] else np.array([])
+        season_bins_model2[season] = np.concatenate(season_bins_model2[season]) if season_bins_model2[season] else np.array([])
+
+    # === Plot 1: 1x2 panels, each model, seasonal histograms ===
+    fig1, axs1 = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True, sharey=True)
+    colors = {'Winter': 'blue', 'Spring': 'darkgreen', 'Summer': 'darkorange', 'Autumn': 'firebrick'}
+    colors2 = {'Winter': 'cornflowerblue', 'Spring': 'mediumseagreen', 'Summer': 'gold', 'Autumn': 'coral'}
+    log_plot = variable in ['prcp']
+
+    for season, color in colors.items():
+        print(f"Plotting season: {season}, \n\t\tsample size model1: {season_bins_model1[season].size}, model2: {season_bins_model2[season].size}")
+        if season_bins_model1[season].size > 0:
+            axs1[0].hist(season_bins_model1[season], bins=bins, alpha=0.5, label=season, density=True, color=color, log=log_plot)
+        if season_bins_model2[season].size > 0:
+            axs1[1].hist(season_bins_model2[season], bins=bins, alpha=0.5, label=season, density=True, color=color, log=log_plot)
+
+    axs1[0].set_title(f'{model1}')
+    axs1[1].set_title(f'{model2}')
+    for ax in axs1:
+        ax.legend()
+        ax.set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
+        ax.set_ylabel('Log count' if log_plot else 'Count')
+    
+    fig1.suptitle(f"{variable} | Seasonal Histogram Comparison (by model)", fontsize=16)
+
+    # === Plot 2: 2x2 panels, each season, both models ===
+    fig2, axs2 = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True, sharey=True)
+    axs2 = axs2.flatten()
+    for i, season in enumerate(['Winter', 'Spring', 'Summer', 'Autumn']):
+        if season_bins_model1[season].size > 0:
+            axs2[i].hist(season_bins_model1[season], bins=bins, alpha=0.5, label=model1, density=True, color=colors[season], log=log_plot)
+        if season_bins_model2[season].size > 0:
+            axs2[i].hist(season_bins_model2[season], bins=bins, alpha=0.5, label=model2, density=True, color=colors2[season], log=log_plot)
+        axs2[i].set_title(f'{season}')
+        axs2[i].legend()
+        axs2[i].set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
+        axs2[i].set_ylabel('Log count' if log_plot else 'Count')
+
+    fig2.suptitle(f"{variable} | Seasonal Histogram Comparison (by season)", fontsize=16)
+
+    if save_figures:
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+        fname1 = f"{variable}_{model1}_vs_{model2}_seasonal_histogram_by_model".replace(" ", "_")
+        fname2 = f"{variable}_{model1}_vs_{model2}_seasonal_histogram_by_season".replace(" ", "_")
+        fig1.savefig(os.path.join(save_path, f'{fname1}.png'), dpi=300)
+        fig2.savefig(os.path.join(save_path, f'{fname2}.png'), dpi=300)
+        logger.info(f"      Saved seasonal histograms to {save_path}/{fname1}.png and {fname2}.png")
+    if show:
+        plt.show()
+    plt.close('all')
+    

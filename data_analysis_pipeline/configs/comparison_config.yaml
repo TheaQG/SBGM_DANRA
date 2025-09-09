@@ -2,13 +2,11 @@ comparison:
   variables: [temp, prcp]             # Variable to compare (must exist in both HR and LR)
   transformations: {prcp: log_zscore, temp: zscore} # Per-variable transformations
   modes: [
-    {mode: distribution, comparison_type: [power_spectra, pixel_distributions], max_days: 100},
-    {mode: field, date: "20101010"}, # Implement comparison_type as well, to allow for RMSE, bias, etc.
-    {mode: timeseries}
+    # {mode: distribution, comparison_types: ['power_spectra', 'pixel_distributions', 'seasonal_histograms'], max_days: false}, #
+    {mode: field, comparison_types: ['field_statistics', 'qualitative_visual'], dates: ["20000222", "20101010", "20101030"], combine_into_grid: true, mask: null, n_max: 5}, # Single day field comparison, no mask 
+    # {mode: timeseries}
   ]
   split_type: all            # Data split: 'train', 'valid', 'test', or 'all'
-  transformations: zscore    # Options: 'zscore', 'log', 'log_zscore', 'none'
-  max_days: 100              # Limit number of dates in large sets
   save: true                 # Whether to save figures to disk
   show: false                # Whether to display figures interactively
   save_path: ${env:DATA_FIGS_DIR} #${env:EVAL_DIR}/comparison_outputs/prcp

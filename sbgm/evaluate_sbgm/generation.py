@@ -19,7 +19,7 @@ from matplotlib import pyplot as plt
 
 from sbgm.score_sampling import pc_sampler
 from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
-from sbgm.utils import plot_samples_and_generated, extract_samples, get_model_string
+from sbgm.utils import plot_samples_and_generated, extract_samples, get_model_string, get_first_sample_dict
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +67,28 @@ class SampleGenerator:
             lsm_cond=lsm_cond,
             topo_cond=topo_cond,
             )
-        logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
-        return gen_sample.squeeze().detach().cpu()
+        # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
+        gen_sample = gen_sample.squeeze().detach().cpu()
+        # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
+
+        if gen_sample.ndim == 4:
+            gen_sample = gen_sample.squeeze(1) # remove channel dim only !!! IF REWRITING TO MULTI CHANNEL OUTPUT THIS NEEDS TO GO !!!
+        elif gen_sample.ndim == 3:
+            pass # [B, H, W], all good
+        elif gen_sample.ndim == 2:
+            gen_sample = gen_sample.unsqueeze(0) # add batch dim back
+        else:
+            raise ValueError(f"Unknown generated sample shape: {gen_sample.shape}")
+
+        return gen_sample
 
     def _apply_backtransforms(self, x, generated, cond_images, seasons):
         n = x.shape[0]
         hr_var_name = self.cfg.highres.variable + '_hr'
+
+        # Make sure the back transform doesn't squeeze the generated if single sample (shape [H, W]) by expanding to [1, H, W]
+        if generated.ndim == 2:
+            generated = generated.unsqueeze(0)
         x = torch.stack([maybe_inverse_transform(hr_var_name, x[i], self.back_transforms) for i in range(n)])
         generated = torch.stack([maybe_inverse_transform(hr_var_name, generated[i], self.back_transforms) for i in range(n)])
 
@@ -90,19 +106,72 @@ class SampleGenerator:
 
         return x, generated, cond_images
 
-    def _plot_and_save(self, samples, generated, name_suffix):
-        if self.cfg.evaluation.plot_examples:
-            fig, _ = plot_samples_and_generated(samples,
-                                                generated.unsqueeze(1) if generated.ndim == 3 else generated,
-                                                cfg=self.cfg,
-                                                transform_back_bf_plot=False,
-                                                back_transforms=None,
-                                                n_samples_threshold=self.cfg.evaluation.n_samples_threshold)
-            fig.savefig(os.path.join(self.fig_path, f'gen_samples_{name_suffix}.png'), dpi=300)
-            if self.cfg.evaluation.show_plots:
-                plt.show()
+    def _plot_and_save(self,
+                        samples,
+                        generated,
+                        name_suffix,
+                        n_samples=None,
+                        transform_back_bf_plot=False,
+                        back_transforms=None
+                        ):
+        '''
+            Plot and save generated samples, supporting flexible sample count
+        '''
+
+        # Loop through samples and print shape
+        for k, v in samples.items():
+            if torch.is_tensor(v):
+                logger.info(f"[DEBUG] Sample '{k}' shape: {v.shape}")
             else:
-                plt.close(fig)
+                logger.info(f"[DEBUG] Sample '{k}' value: {v}")
+
+        logger.info(f"[DEBUG] Generated shape: {generated.shape}")
+
+        # Ensure samples is a list of single-sample dicts
+        if isinstance(samples, dict):
+            batch_size = next((v.shape[0] for v in samples.values() if isinstance(v, torch.Tensor)), 1)
+            sample_list = []
+            for i in range(batch_size):
+                sample_i = {}
+                for k, v in samples.items():
+                    if torch.is_tensor(v):
+                        vi = v[i]
+                        if vi.ndim == 2:
+                            sample_i[k] = vi.unsqueeze(0)  # add batch dim
+                        elif vi.ndim == 3:
+                            sample_i[k] = vi  # already [C,H,W] or [B,H,W]
+                        else:
+                            sample_i[k] = vi  # leave as is; plotting will handle or skip
+                    else:
+                        sample_i[k] = v
+                sample_list.append(sample_i)
+
+        # Ensure generated is 3D or 4D with batch dim
+        if isinstance(generated, torch.Tensor) and generated.ndim == 2:
+            generated = generated.unsqueeze(0)
+
+        # Determine how many samples to plot. Fallback is self.cfg.evaluation.n_samples_threshold_plot (we don't want to accidentally plot 5000 samples)
+        threshold = n_samples if n_samples is not None else self.cfg.evaluation.n_samples_threshold_plot
+
+        # Ensure generated is correct shape: [B, H. W]
+        if isinstance(generated, torch.Tensor):
+            if generated.ndim == 2:
+                generated = generated.unsqueeze(0) # [1, H, W]
+            elif generated.ndim == 4 and generated.shape[1] == 1:
+                generated = generated.squeeze(1) # [B, H, W]
+
+        fig, _ = plot_samples_and_generated(samples,
+                                            generated.unsqueeze(1) if generated.ndim == 3 else generated,
+                                            cfg=self.cfg,
+                                            transform_back_bf_plot=transform_back_bf_plot,
+                                            back_transforms=back_transforms,
+                                            n_samples_threshold=threshold
+                                            )
+        fig.savefig(os.path.join(self.fig_path, f'gen_samples_{name_suffix}.png'), dpi=300)
+        if self.cfg.evaluation.show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
 
     def _save_npz(self, data_dict, name_suffix):
         for key, value in data_dict.items():
@@ -112,20 +181,33 @@ class SampleGenerator:
                 logger.info(f"Saved {key}, {name_suffix} to {path}")
 
     def generate_multiple(self):
+        '''
+        Generate cfg.evaluation.batch_size different samples, based on different inputs from dataset
+        '''
         samples = next(iter(self.dataloader))
         x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
         n = x.shape[0]
         generated = self._run_sampler(n, seasons, cond_images, lsm, topo)
 
+        # Plotting before back transform to avoid confussion on transformations
+        if self.cfg.evaluation.plot_examples:
+            logger.info("Plotting examples...\n")
+            self._plot_and_save(samples,
+                                generated,
+                                f"multi_n_{n}",
+                                n_samples=self.cfg.evaluation.n_samples_threshold_plot,
+                                transform_back_bf_plot=self.cfg.evaluation.transform_back,
+                                back_transforms=self.back_transforms
+                                )
+
         if self.cfg.evaluation.transform_back:
             x, generated, cond_images = self._apply_backtransforms(x, generated, cond_images, seasons)
-
-        self._plot_and_save(samples, generated, f"multi_n_{n}")
 
         self._save_npz({
             "gen_samples": generated,
             "eval_samples": x,
+            "lsm_samples": lsm,
             "seasons": seasons,
         }, f"multi_n_{n}")
 
@@ -137,19 +219,43 @@ class SampleGenerator:
         return
 
     def generate_single(self):
+        '''
+            Generate one (1) sample from the dataset
+        '''
         samples = next(iter(self.dataloader))
         x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
+        # Take only the first sample
+        x = x[:1]
+        seasons = seasons[:1] if seasons is not None else None
+        lsm = lsm[:1] if lsm is not None else None
+        topo = topo[:1] if topo is not None else None
+        cond_images = cond_images[:1] if cond_images is not None else None
+        
         generated = self._run_sampler(1, seasons, cond_images, lsm, topo)
+
+        samples_single = get_first_sample_dict(samples)
+
+        # Plotting before back transform to avoid confussion on transformations
+        if self.cfg.evaluation.plot_examples:
+            logger.info(f"Plotting examples...\n")
+            self._plot_and_save(samples_single,
+                                generated,
+                                "single",
+                                n_samples=1,
+                                transform_back_bf_plot=self.cfg.evaluation.transform_back,
+                                back_transforms=self.back_transforms
+                                )
+        logger.info(f"[DEBUG] Shape of generated before back transform: {generated.shape}")
 
         if self.cfg.evaluation.transform_back:
             x, generated, cond_images = self._apply_backtransforms(x, generated, cond_images, seasons)
-
-        self._plot_and_save(samples, generated, "single")
+            logger.info(f"[DEBUG] Shape of generated after back transform: {generated.shape}")
 
         self._save_npz({
             "gen_samples": generated,
             "eval_samples": x,
+            "lsm_samples": lsm,
             "seasons": seasons,
         }, "single")
 
@@ -161,22 +267,42 @@ class SampleGenerator:
         return
 
     def generate_repeated(self):
+        '''
+            Generate cfg.evaluation.n_repeats samples from the same single sample from dataset
+        '''
         samples = next(iter(self.dataloader))
         x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
+
+        # Take only the first sample
+        x = x[:1]
+        seasons = seasons[:1] if seasons is not None else None
+        lsm = lsm[:1] if lsm is not None else None
+        topo = topo[:1] if topo is not None else None
+        cond_images = cond_images[:1] if cond_images is not None else None
 
         n_repeats = self.cfg.evaluation.n_repeats
         generated_list = [self._run_sampler(1, seasons, cond_images, lsm, topo) for _ in range(n_repeats)]
         generated = torch.stack(generated_list)
+        
+        samples_repeated = {k: v[0].repeat(n_repeats, *[1 for _ in v.shape[1:]]) if torch.is_tensor(v) else v for k, v in samples.items()}
+
+        if self.cfg.evaluation.plot_examples:
+            self._plot_and_save(samples_repeated,
+                                generated,
+                                f"repeated_{n_repeats}",
+                                n_samples=self.cfg.evaluation.n_samples_threshold_plot,
+                                transform_back_bf_plot=self.cfg.evaluation.transform_back,
+                                back_transforms=self.back_transforms
+                                )
 
         if self.cfg.evaluation.transform_back:
-            x, generated, cond_images = self._apply_backtransforms(x, generated, cond_images, seasons)
+            x, generated, cond_images = self._apply_backtransforms(x, generated, cond_images, seasons)  
 
-        samples_repeated = {k: v.repeat(n_repeats, *[1 for _ in v.shape[1:]]) if torch.is_tensor(v) else v for k, v in samples.items()}
-        self._plot_and_save(samples_repeated, generated, f"repeated_{n_repeats}")
 
         self._save_npz({
             "gen_samples": generated,
             "eval_samples": x,
+            "lsm_samples": lsm,
             "seasons": seasons,
         }, f"repeated_{n_repeats}")
 
@@ -199,180 +325,168 @@ class SampleGenerator:
 
 
 
+# def run_generation_multiple(cfg,
+#                             dataloader,
+#                             model,
+#                             back_transforms,
+#                             device
+#                             ):
+#     """
+#     Generate multiple samples from trained model.
+#     """
+
+#     model.eval()
+
+#     model_name_str = get_model_string(cfg)
+
+#     # Set up paths and create if not exist
+#     output_dir = cfg.paths.sample_dir
+#     output_path = os.path.join(output_dir, 'generation', model_name_str)
+#     fig_path = os.path.join(output_path, 'generated_figures')
+#     sample_path = os.path.join(output_path, 'generated_samples')
+
+
+#     os.makedirs(fig_path, exist_ok=True)
+#     os.makedirs(sample_path, exist_ok=True)
 
 
 
+#     # Extract the samples
+#     samples = next(iter(dataloader))
+#     x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, device)
 
+#     # Check device for samples
+#     logger.info(f"x device: {x.device}")
+#     logger.info(f"seasons device: {seasons.device}")
+#     logger.info(f"cond_images device: {cond_images.device if cond_images is not None else 'None'}")
+#     logger.info(f"lsm_hr device: {lsm_hr.device if lsm_hr is not None else 'None'}")
+#     logger.info(f"lsm device: {lsm.device if lsm is not None else 'None'}")
+#     logger.info(f"sdf device: {sdf.device if sdf is not None else 'None'}")
+#     logger.info(f"topo device: {topo.device if topo is not None else 'None'}")
+#     logger.info(f"hr_points device: {hr_points.device if hr_points is not None else 'None'}")
+#     logger.info(f"lr_points device: {lr_points.device if lr_points is not None else 'None'}")
 
+#     # Get batch size from extracted samples batch dimension
+#     n_gen_samples = x.shape[0]
+#     batch_size = n_gen_samples
 
-
-
-
-
-
-
-def run_generation_multiple(cfg,
-                            dataloader,
-                            model,
-                            back_transforms,
-                            device
-                            ):
-    """
-    Generate multiple samples from trained model.
-    """
-
-    model.eval()
-
-    model_name_str = get_model_string(cfg)
-
-    # Set up paths and create if not exist
-    output_dir = cfg.paths.sample_dir
-    output_path = os.path.join(output_dir, 'generation', model_name_str)
-    fig_path = os.path.join(output_path, 'generated_figures')
-    sample_path = os.path.join(output_path, 'generated_samples')
-
-
-    os.makedirs(fig_path, exist_ok=True)
-    os.makedirs(sample_path, exist_ok=True)
-
-
-
-    # Extract the samples
-    samples = next(iter(dataloader))
-    x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, device)
-
-    # Check device for samples
-    logger.info(f"x device: {x.device}")
-    logger.info(f"seasons device: {seasons.device}")
-    logger.info(f"cond_images device: {cond_images.device if cond_images is not None else 'None'}")
-    logger.info(f"lsm_hr device: {lsm_hr.device if lsm_hr is not None else 'None'}")
-    logger.info(f"lsm device: {lsm.device if lsm is not None else 'None'}")
-    logger.info(f"sdf device: {sdf.device if sdf is not None else 'None'}")
-    logger.info(f"topo device: {topo.device if topo is not None else 'None'}")
-    logger.info(f"hr_points device: {hr_points.device if hr_points is not None else 'None'}")
-    logger.info(f"lr_points device: {lr_points.device if lr_points is not None else 'None'}")
-
-    # Get batch size from extracted samples batch dimension
-    n_gen_samples = x.shape[0]
-    batch_size = n_gen_samples
-
-    # Print the shape of the extracted samples
-    logger.info(f"Samples to generate: {n_gen_samples}")
-    logger.info(f"Batch size: {batch_size}")
-    logger.info(f"x shape: {x.shape}")
-    logger.info(f"seasons shape: {len(seasons)}")
-    logger.info(f"cond_images shape: {cond_images.shape}")
-    logger.info(f"lsm shape: {lsm.shape}")
-    logger.info(f"topo shape: {topo.shape}")
+#     # Print the shape of the extracted samples
+#     logger.info(f"Samples to generate: {n_gen_samples}")
+#     logger.info(f"Batch size: {batch_size}")
+#     logger.info(f"x shape: {x.shape}")
+#     logger.info(f"seasons shape: {len(seasons)}")
+#     logger.info(f"cond_images shape: {cond_images.shape}")
+#     logger.info(f"lsm shape: {lsm.shape}")
+#     logger.info(f"topo shape: {topo.shape}")
 
     
 
-    generated = pc_sampler(
-        score_model=model,
-        marginal_prob_std=marginal_prob_std_fn,
-        diffusion_coeff=diffusion_coeff_fn,
-        batch_size=batch_size,
-        num_steps=cfg.sampler.n_timesteps,
-        device=device,
-        img_size=cfg.highres.data_size[0],
-        y=seasons,
-        cond_img=cond_images,
-        lsm_cond=lsm,
-        topo_cond=topo
-    ).squeeze().detach().cpu()
+#     generated = pc_sampler(
+#         score_model=model,
+#         marginal_prob_std=marginal_prob_std_fn,
+#         diffusion_coeff=diffusion_coeff_fn,
+#         batch_size=batch_size,
+#         num_steps=cfg.sampler.n_timesteps,
+#         device=device,
+#         img_size=cfg.highres.data_size[0],
+#         y=seasons,
+#         cond_img=cond_images,
+#         lsm_cond=lsm,
+#         topo_cond=topo
+#     ).squeeze().detach().cpu()
 
-    logger.info(f"Generated samples shape: {generated.shape}")
-    logger.info(f"Generated unsqueezed: {generated.unsqueeze(1).shape}")
+#     logger.info(f"Generated samples shape: {generated.shape}")
+#     logger.info(f"Generated unsqueezed: {generated.unsqueeze(1).shape}")
 
 
-    if cfg.evaluation.plot_examples:
-        logger.info("Creating figure...")
-        fig, _ = plot_samples_and_generated(samples,
-                                            generated.unsqueeze(1),
-                                            cfg=cfg,
-                                            transform_back_bf_plot=cfg.visualization.transform_back_bf_plot,
-                                            back_transforms=back_transforms,
-                                            n_samples_threshold=4
-        )
-        fig.savefig(os.path.join(fig_path, f'gen_samples_multi_n_{n_gen_samples}.png'), dpi=300)
-        if cfg.evaluation.show_plots:
-            plt.show()
-        else:
-            plt.close(fig)
+#     if cfg.evaluation.plot_examples:
+#         logger.info("Creating figure...")
+#         fig, _ = plot_samples_and_generated(samples,
+#                                             generated.unsqueeze(1),
+#                                             cfg=cfg,
+#                                             transform_back_bf_plot=cfg.visualization.transform_back_bf_plot,
+#                                             back_transforms=back_transforms,
+#                                             n_samples_threshold=4
+#         )
+#         fig.savefig(os.path.join(fig_path, f'gen_samples_multi_n_{n_gen_samples}.png'), dpi=300)
+#         if cfg.evaluation.show_plots:
+#             plt.show()
+#         else:
+#             plt.close(fig)
     
-    if cfg.evaluation.transform_back:
-        # Print available back transforms
-        logger.info(f"Available back transforms: {list(back_transforms.keys())}")
-        # Get the name of the HR variable, to access back transforms
-        hr_im_name = cfg.highres.variable + '_hr' 
+#     if cfg.evaluation.transform_back:
+#         # Print available back transforms
+#         logger.info(f"Available back transforms: {list(back_transforms.keys())}")
+#         # Get the name of the HR variable, to access back transforms
+#         hr_im_name = cfg.highres.variable + '_hr' 
         
         
-        # Loop through the hr truth samples and back transform each sample
-        for i in range(n_gen_samples):
-            hr_sample = x[i]
-            hr_sample_btrans = maybe_inverse_transform(hr_im_name, hr_sample, back_transforms)
-            x[i] = hr_sample_btrans
+#         # Loop through the hr truth samples and back transform each sample
+#         for i in range(n_gen_samples):
+#             hr_sample = x[i]
+#             hr_sample_btrans = maybe_inverse_transform(hr_im_name, hr_sample, back_transforms)
+#             x[i] = hr_sample_btrans
 
-        # Loop through the hr generated samples and back transform each sample
-        for i in range(n_gen_samples):
-            hr_gen_sample = generated[i]
-            hr_gen_sample_btrans = maybe_inverse_transform(hr_im_name, hr_gen_sample, back_transforms)
-            generated[i] = hr_gen_sample_btrans
+#         # Loop through the hr generated samples and back transform each sample
+#         for i in range(n_gen_samples):
+#             hr_gen_sample = generated[i]
+#             hr_gen_sample_btrans = maybe_inverse_transform(hr_im_name, hr_gen_sample, back_transforms)
+#             generated[i] = hr_gen_sample_btrans
 
 
-        # Also backtransform lr
-        if cond_images is not None:
-            cond_keys = cfg.lowres.condition_variables if cfg.lowres.condition_variables is not None else []
-            logger.info(f"Conditional images, shape: {cond_images.shape}")
-            logger.info(f"Conditional images: {cond_images}")
+#         # Also backtransform lr
+#         if cond_images is not None:
+#             cond_keys = cfg.lowres.condition_variables if cfg.lowres.condition_variables is not None else []
+#             logger.info(f"Conditional images, shape: {cond_images.shape}")
+#             logger.info(f"Conditional images: {cond_images}")
 
             
             
-            # First, loop through samples (B, C, H, W), where B in this case are samples, C in this case are number of conditionals (usually 'temp' and 'prcp')
-            cond_images_btrans = []
-            for i in range(n_gen_samples):
-                cond_im_sample = cond_images[i]
-                # Loop through conditions (i.e. C)
-                cond_var_btrans = []
-                for k, cond_var in zip(cond_keys, cond_im_sample):
-                    k = k + '_lr'
-                    logger.info(f"Applying inverse transformation for key: {k}")
-                    cond_im_sample_btrans = maybe_inverse_transform(k, cond_var, back_transforms)
-                    cond_var_btrans.append(cond_im_sample_btrans)
-                cond_images_btrans.append(cond_var_btrans)
-            cond_images = cond_images_btrans
+#             # First, loop through samples (B, C, H, W), where B in this case are samples, C in this case are number of conditionals (usually 'temp' and 'prcp')
+#             cond_images_btrans = []
+#             for i in range(n_gen_samples):
+#                 cond_im_sample = cond_images[i]
+#                 # Loop through conditions (i.e. C)
+#                 cond_var_btrans = []
+#                 for k, cond_var in zip(cond_keys, cond_im_sample):
+#                     k = k + '_lr'
+#                     logger.info(f"Applying inverse transformation for key: {k}")
+#                     cond_im_sample_btrans = maybe_inverse_transform(k, cond_var, back_transforms)
+#                     cond_var_btrans.append(cond_im_sample_btrans)
+#                 cond_images_btrans.append(cond_var_btrans)
+#             cond_images = cond_images_btrans
 
 
 
-    # Try converting the data to numpy
-    logger.info("Saving generated samples...")
-    np.savez_compressed(os.path.join(sample_path, f'gen_samples_multi_n_{n_gen_samples}'), generated.cpu().numpy())
-    logger.info("Completed saving generated samples...")
+#     # Try converting the data to numpy
+#     logger.info("Saving generated samples...")
+#     np.savez_compressed(os.path.join(sample_path, f'gen_samples_multi_n_{n_gen_samples}'), generated.cpu().numpy())
+#     logger.info("Completed saving generated samples...")
 
-    logger.info("Saving true samples...")
-    np.savez_compressed(os.path.join(sample_path, f'eval_samples_multi_n_{n_gen_samples}'), x.cpu().numpy())
-    logger.info("Completed saving true samples...")
+#     logger.info("Saving true samples...")
+#     np.savez_compressed(os.path.join(sample_path, f'eval_samples_multi_n_{n_gen_samples}'), x.cpu().numpy())
+#     logger.info("Completed saving true samples...")
     
-    if cond_images is not None:
-        # Get the names of the conditions
-        cond_im_names = cfg.lowres.condition_variables if cfg.lowres.condition_variables is not None else []
-        # Run through conditions and save in separate files
-        for i, cond_im in enumerate(cond_images):
-            cond_im_name = cond_im_names[i] if i < len(cond_im_names) else f'condition_{i}'
-            logger.info(f"Saving cond {cond_im_name} samples...")
+#     if cond_images is not None:
+#         # Get the names of the conditions
+#         cond_im_names = cfg.lowres.condition_variables if cfg.lowres.condition_variables is not None else []
+#         # Run through conditions and save in separate files
+#         for i, cond_im in enumerate(cond_images):
+#             cond_im_name = cond_im_names[i] if i < len(cond_im_names) else f'condition_{i}'
+#             logger.info(f"Saving cond {cond_im_name} samples...")
 
-            # Now cond_im is list, so convert to tensor
-            cond_im_tensor = torch.stack(cond_im)
-            np.savez_compressed(os.path.join(sample_path, f'cond_samples_single_{cond_im_name}'), cond_im_tensor.cpu().numpy())
-            logger.info(f"Completed saving cond {cond_im_name} samples...")
-    if seasons is not None:
-        logger.info("Saving seasons samples...")
-        np.savez_compressed(os.path.join(sample_path, f'seasons_multi_n_{n_gen_samples}'), seasons.cpu().numpy())
-        logger.info("Completed saving seasons samples...")
+#             # Now cond_im is list, so convert to tensor
+#             cond_im_tensor = torch.stack(cond_im)
+#             np.savez_compressed(os.path.join(sample_path, f'cond_samples_single_{cond_im_name}'), cond_im_tensor.cpu().numpy())
+#             logger.info(f"Completed saving cond {cond_im_name} samples...")
+#     if seasons is not None:
+#         logger.info("Saving seasons samples...")
+#         np.savez_compressed(os.path.join(sample_path, f'seasons_multi_n_{n_gen_samples}'), seasons.cpu().numpy())
+#         logger.info("Completed saving seasons samples...")
 
 
-    logger.info(f"Finished generating and saving {n_gen_samples} samples..")
-    logger.info(f"Generated samples (and figure) saved to {sample_path}.")
+#     logger.info(f"Finished generating and saving {n_gen_samples} samples..")
+#     logger.info(f"Generated samples (and figure) saved to {sample_path}.")
     
             
 
@@ -398,148 +512,148 @@ def run_generation_multiple(cfg,
 
 
 
-def run_generation_single(cfg,
-                            dataloader,
-                            model,
-                            back_transforms,
-                            device
-                            ):
-    """
-    Generate multiple samples from trained model.
-    """
+# def run_generation_single(cfg,
+#                             dataloader,
+#                             model,
+#                             back_transforms,
+#                             device
+#                             ):
+#     """
+#     Generate multiple samples from trained model.
+#     """
 
-    model.eval()
-    output_dir = cfg.paths.sample_dir
+#     model.eval()
+#     output_dir = cfg.paths.sample_dir
 
-    # Extract the samples
-    samples = next(iter(dataloader))
-    x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, device)
+#     # Extract the samples
+#     samples = next(iter(dataloader))
+#     x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, device)
     
-    batch_size = 1
+#     batch_size = 1
 
-    generated = pc_sampler(
-        score_model=model,
-        marginal_prob_std=marginal_prob_std_fn,
-        diffusion_coeff=diffusion_coeff_fn,
-        batch_size=batch_size,
-        num_steps=cfg.sampler.n_timesteps,
-        device=device,
-        img_size=cfg.highres.data_size[0],
-        y=seasons,
-        cond_img=cond_images,
-        lsm_cond=lsm,
-        topo_cond=topo
-    ).squeeze().detach().cpu()
+#     generated = pc_sampler(
+#         score_model=model,
+#         marginal_prob_std=marginal_prob_std_fn,
+#         diffusion_coeff=diffusion_coeff_fn,
+#         batch_size=batch_size,
+#         num_steps=cfg.sampler.n_timesteps,
+#         device=device,
+#         img_size=cfg.highres.data_size[0],
+#         y=seasons,
+#         cond_img=cond_images,
+#         lsm_cond=lsm,
+#         topo_cond=topo
+#     ).squeeze().detach().cpu()
 
-    if cfg.evaluation.transform_back:
-        generated = maybe_inverse_transform('hr', generated, back_transforms)
-        x = maybe_inverse_transform('hr', x, back_transforms)
+#     if cfg.evaluation.transform_back:
+#         generated = maybe_inverse_transform('hr', generated, back_transforms)
+#         x = maybe_inverse_transform('hr', x, back_transforms)
 
-        # Also backtransform lr
-        if cond_images is not None:
-            cond_keys = cfg.lowres.condition_variables
-            cond_images_btrans = []
-            for k, cond_im in zip(cond_keys, cond_images):
-                if k in back_transforms:
-                    cond_images_btrans.append(maybe_inverse_transform(k, cond_im, back_transforms))
-                else:
-                    cond_images_btrans.append(cond_im)
-            cond_images = cond_images_btrans
+#         # Also backtransform lr
+#         if cond_images is not None:
+#             cond_keys = cfg.lowres.condition_variables
+#             cond_images_btrans = []
+#             for k, cond_im in zip(cond_keys, cond_images):
+#                 if k in back_transforms:
+#                     cond_images_btrans.append(maybe_inverse_transform(k, cond_im, back_transforms))
+#                 else:
+#                     cond_images_btrans.append(cond_im)
+#             cond_images = cond_images_btrans
 
-    np.savez_compressed(os.path.join(output_dir, 'gen_samples_single'), generated.numpy())
-    np.savez_compressed(os.path.join(output_dir, 'eval_samples_single'), x.numpy())
-    if cond_images is not None:
-        np.savez_compressed(os.path.join(output_dir, 'cond_samples_single'), cond_images.cpu().numpy())
-    if seasons is not None:
-        np.savez_compressed(os.path.join(output_dir, 'seasons_single'), seasons.cpu().numpy())
+#     np.savez_compressed(os.path.join(output_dir, 'gen_samples_single'), generated.numpy())
+#     np.savez_compressed(os.path.join(output_dir, 'eval_samples_single'), x.numpy())
+#     if cond_images is not None:
+#         np.savez_compressed(os.path.join(output_dir, 'cond_samples_single'), cond_images.cpu().numpy())
+#     if seasons is not None:
+#         np.savez_compressed(os.path.join(output_dir, 'seasons_single'), seasons.cpu().numpy())
 
-    if cfg.evaluation.plot_examples:
-        fig, _ = plot_samples_and_generated(samples,
-                                            generated.unsqueeze(0),
-                                            cfg=cfg,
-                                            transform_back_bf_plot=False, # Transform back is done above
-        )
-        fig.savefig(os.path.join(output_dir, 'gen_samples_single.png'), dpi=300)
-        if cfg.evaluation.show_plots:
-            plt.show()
-        else:
-            plt.close(fig)
+#     if cfg.evaluation.plot_examples:
+#         fig, _ = plot_samples_and_generated(samples,
+#                                             generated.unsqueeze(0),
+#                                             cfg=cfg,
+#                                             transform_back_bf_plot=False, # Transform back is done above
+#         )
+#         fig.savefig(os.path.join(output_dir, 'gen_samples_single.png'), dpi=300)
+#         if cfg.evaluation.show_plots:
+#             plt.show()
+#         else:
+#             plt.close(fig)
 
 
 
-def run_generation_repeated(cfg,
-                            dataloader,
-                            model,
-                            back_transforms,
-                            device
-                            ):
-    """
-    Generate multiple samples from trained model.
-    """
+# def run_generation_repeated(cfg,
+#                             dataloader,
+#                             model,
+#                             back_transforms,
+#                             device
+#                             ):
+#     """
+#     Generate multiple samples from trained model.
+#     """
 
-    model.eval()
-    n_repeats = cfg.evaluation.n_repeats
-    output_dir = cfg.paths.sample_dir
+#     model.eval()
+#     n_repeats = cfg.evaluation.n_repeats
+#     output_dir = cfg.paths.sample_dir
 
-    # Extract the samples
-    samples = next(iter(dataloader))
-    x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, device)
+#     # Extract the samples
+#     samples = next(iter(dataloader))
+#     x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, device)
     
-    batch_size = 1
-    generated_list = []
+#     batch_size = 1
+#     generated_list = []
 
-    for _ in range(n_repeats):
-        g = pc_sampler(
-            score_model=model,
-            marginal_prob_std=marginal_prob_std_fn,
-            diffusion_coeff=diffusion_coeff_fn,
-            batch_size=batch_size,
-            num_steps=cfg.sampler.n_timesteps,
-            device=device,
-            img_size=cfg.highres.data_size[0],
-            y=seasons,
-            cond_img=cond_images,
-            lsm_cond=lsm,
-            topo_cond=topo
-        ).squeeze().detach().cpu()
-        generated_list.append(g)
+#     for _ in range(n_repeats):
+#         g = pc_sampler(
+#             score_model=model,
+#             marginal_prob_std=marginal_prob_std_fn,
+#             diffusion_coeff=diffusion_coeff_fn,
+#             batch_size=batch_size,
+#             num_steps=cfg.sampler.n_timesteps,
+#             device=device,
+#             img_size=cfg.highres.data_size[0],
+#             y=seasons,
+#             cond_img=cond_images,
+#             lsm_cond=lsm,
+#             topo_cond=topo
+#         ).squeeze().detach().cpu()
+#         generated_list.append(g)
 
-    generated = torch.stack(generated_list)
+#     generated = torch.stack(generated_list)
 
-    if cfg.evaluation.transform_back:
-        generated = maybe_inverse_transform('hr', generated, back_transforms)
-        x = maybe_inverse_transform('hr', x, back_transforms)
+#     if cfg.evaluation.transform_back:
+#         generated = maybe_inverse_transform('hr', generated, back_transforms)
+#         x = maybe_inverse_transform('hr', x, back_transforms)
 
-        # Also backtransform lr
-        if cond_images is not None:
-            cond_keys = cfg.lowres.condition_variables
-            cond_images_btrans = []
-            for k, cond_im in zip(cond_keys, cond_images):
-                if k in back_transforms:
-                    cond_images_btrans.append(maybe_inverse_transform(k, cond_im, back_transforms))
-                else:
-                    cond_images_btrans.append(cond_im)
+#         # Also backtransform lr
+#         if cond_images is not None:
+#             cond_keys = cfg.lowres.condition_variables
+#             cond_images_btrans = []
+#             for k, cond_im in zip(cond_keys, cond_images):
+#                 if k in back_transforms:
+#                     cond_images_btrans.append(maybe_inverse_transform(k, cond_im, back_transforms))
+#                 else:
+#                     cond_images_btrans.append(cond_im)
 
-            cond_images = cond_images_btrans
+#             cond_images = cond_images_btrans
 
-    np.savez_compressed(os.path.join(output_dir, 'gen_samples_repeated'), generated.numpy())
-    np.savez_compressed(os.path.join(output_dir, 'eval_samples_repeated'), x.numpy())
-    if cond_images is not None:
-        np.savez_compressed(os.path.join(output_dir, 'cond_samples_repeated'), cond_images.cpu().numpy())
-    if seasons is not None:
-        np.savez_compressed(os.path.join(output_dir, 'seasons_repeated'), seasons.cpu().numpy())
+#     np.savez_compressed(os.path.join(output_dir, 'gen_samples_repeated'), generated.numpy())
+#     np.savez_compressed(os.path.join(output_dir, 'eval_samples_repeated'), x.numpy())
+#     if cond_images is not None:
+#         np.savez_compressed(os.path.join(output_dir, 'cond_samples_repeated'), cond_images.cpu().numpy())
+#     if seasons is not None:
+#         np.savez_compressed(os.path.join(output_dir, 'seasons_repeated'), seasons.cpu().numpy())
 
-    if cfg.evaluation.plot_examples:
-        fig, _ = plot_samples_and_generated(samples,
-                                            generated,
-                                            cfg=cfg,
-                                            transform_back_bf_plot=False,  # Transform back is done above
-        )
-        fig.savefig(os.path.join(output_dir, f'gen_n_repeats_{n_repeats}.png'), dpi=300)
-        if cfg.evaluation.show_plots:
-            plt.show()
-        else:
-            plt.close(fig)
+#     if cfg.evaluation.plot_examples:
+#         fig, _ = plot_samples_and_generated(samples,
+#                                             generated,
+#                                             cfg=cfg,
+#                                             transform_back_bf_plot=False,  # Transform back is done above
+#         )
+#         fig.savefig(os.path.join(output_dir, f'gen_n_repeats_{n_repeats}.png'), dpi=300)
+#         if cfg.evaluation.show_plots:
+#             plt.show()
+#         else:
+#             plt.close(fig)
 
 
 
