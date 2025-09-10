@@ -17,10 +17,14 @@
 import argparse
 import os
 import sys
+import logging
 
 from sbgm.cli import launch_sbgm, launch_generation, launch_evaluation
 from data_analysis_pipeline.cli import launch_split_creation
 from sbgm.utils import get_model_string, load_config
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 def check_model_exists(cfg):
@@ -45,6 +49,11 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config_path)
+
+    logger.info(f"\n\n=== ENTERED SBGM_SD MAIN APP")
+    logger.info(f"          Experiment name: {cfg.experiment.name}")
+    logger.info(f"          Mode: {args.mode}")
+    logger.info(f"          Config path: {args.config_path}\n\n")
 
     if args.mode == "split":
         launch_split_creation.run(cfg)

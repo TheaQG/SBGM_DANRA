@@ -1,6 +1,7 @@
 import os
 import torch
 import copy
+import math
 import pickle
 import tqdm
 import logging 
@@ -17,6 +18,9 @@ from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler
 from sbgm.training_utils import get_model_string, get_cmaps, get_units
 
+# Speed up conv algo selection on fixed input sizes
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
 '''
     ToDo:
         - Add support for mixed precision training
@@ -59,6 +63,9 @@ class TrainingPipeline_general:
 
         # Set class variables
         self.model = model
+        # Set debug_pre_sigma_div from cfg if exists, else default to True
+        self.model.debug_pre_sigma_div = cfg['training'].get('debug_pre_sigma_div', True)
+
         self.loss_fn = loss_fn
         self.marginal_prob_std_fn = marginal_prob_std_fn
         self.diffusion_coeff_fn = diffusion_coeff_fn
@@ -322,7 +329,8 @@ class TrainingPipeline_general:
             # Add batch loss to total loss
             loss_sum += batch_loss.item()
             # Update the bar
-            pbar.set_postfix(loss=loss_sum / (idx + 1))
+            if idx % self.cfg['training'].get('train_postfix_every', 10) == 0:
+                pbar.set_postfix(loss=loss_sum / (idx + 1))
         
         # Calculate average loss
         avg_loss = loss_sum / len(dataloader)
@@ -445,7 +453,7 @@ class TrainingPipeline_general:
             # Extract samples
             x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
             # No gradients needed for validation
-            with torch.no_grad():
+            with torch.inference_mode(): #torch.no_grad(): # New in PyTorch 1.9, slightly faster than torch.no_grad()
                 # Use mixed precision training if needed
                 if hasattr(self, 'scaler') and self.scaler:
                     with autocast():
@@ -472,8 +480,8 @@ class TrainingPipeline_general:
             # Add batch loss to total loss
             loss += batch_loss.item()
             # Update the bar
-
-            pbar.set_postfix(loss=loss / (idx + 1))
+            if idx % self.cfg['training'].get('train_postfix_every', 10) == 0:
+                pbar.set_postfix(loss=loss / (idx + 1))
 
         # Calculate average loss
         avg_loss = loss / len(dataloader)

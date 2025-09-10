@@ -1,5 +1,6 @@
 import os
-import torch 
+import torch
+import torch.nn as nn 
 import zarr
 import logging
 
@@ -340,8 +341,11 @@ def get_dataloader(cfg, verbose=True):
         val_dataset,
         batch_size              = cfg['training']['batch_size'],
         shuffle                 = False,
-        num_workers             = 0, # num_workers, # choose 0 if we want to ensures no race conditions with cache
-        # pin_memory              = False,
+        num_workers             = int(cfg['data_handling']['num_workers']),#max(2, num_workers // 4),
+        pin_memory              = torch.cuda.is_available(), #pin_memory,
+        persistent_workers      = True, #num_workers > 0, # keeps workers alive between epochs
+        prefetch_factor         = 2, # Each worker preloads 2 batches
+        drop_last               = (len(val_dataset) % cfg['training']['batch_size']) != 0
     )
     gen_loader = DataLoader(
         gen_dataset,
@@ -609,6 +613,20 @@ def get_model(cfg):
     logger.info(f"Input channels: {input_channels}")
     logger.info(f"Output channels: {output_channels}")
 
+    # === Model architecture knobs (decoder upsampling/norm/activation) ===
+    model_cfg = cfg.get('model', {})
+    use_resize_conv = bool(model_cfg.get('use_resize_conv', True))
+    decoder_norm = model_cfg.get('decoder_norm', 'group')  # Options: 'group', 'instance', None
+    decoder_gn_groups = int(model_cfg.get('decoder_gn_groups', 8))  # Number of groups for GroupNorm
+    decoder_activation_name = model_cfg.get('decoder_activation', 'SiLU')  # Options: 'relu', 'sily', 'gelu', etc.
+    decoder_activation_name_lower = decoder_activation_name.lower()
+
+    _act_map = {'relu': nn.ReLU,
+                'silu': nn.SiLU,
+                'gelu': nn.GELU,}
+    decoder_activation = _act_map.get(decoder_activation_name_lower, nn.ReLU)  # Default to SiLU if not found
+    logger.info(f"[MODEL] use_resize_conv: {use_resize_conv}, decoder_norm: {decoder_norm}, decoder_gn_groups: {decoder_gn_groups}, decoder_activation: {decoder_activation_name}")
+
     if cfg['lowres']['condition_variables'] is not None:
         sample_w_cond_img = True
     else:
@@ -635,11 +653,16 @@ def get_model(cfg):
                       output_channels=output_channels,
                       time_embedding=cfg['sampler']['time_embedding'],
                       n_heads=cfg['sampler']['num_heads'],
+                      use_resize_conv=use_resize_conv,
+                      norm=decoder_norm,
+                      gn_groups=decoder_gn_groups,
+                      activation=decoder_activation,
                       )
 
     score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
                            encoder=encoder,
                            decoder=decoder,
+                           debug_pre_sigma_div=False
                            )
     
     

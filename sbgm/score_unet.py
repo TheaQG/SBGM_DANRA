@@ -28,82 +28,124 @@ class SinusoidalEmbedding(nn.Module):
         Randomly samples weights during initialization. These weights
         are fixed during optimization - non-trainable.
     '''
-    def __init__(self, embed_dim, scale=30.):
+    def __init__(self, embed_dim: int, scale: float = 30.0, device=None, dtype=torch.float32):
         super().__init__()
+        if embed_dim % 2 != 0:
+            raise ValueError(f"Embedding dimension must be even, got {embed_dim}.")
+        
+        # Fixed random frequencies; saved in state_dict but no gradients
         # Initialize the weights as random Gaussian weights multiplied by the scale
-        self.W = nn.Parameter(torch.randn(embed_dim // 2) * scale, requires_grad=False)
-    def forward(self, x):
-        # Calculate the projection of the input x onto the weights
-        x_proj = x[:, None] * self.W[None,:] * 2 * np.pi
-        # Calculate the sinusoidal and cosinusoidal of the projections and concatenate
-        proj = torch.cat([x_proj.sin(), x_proj.cos()], dim=-1)
-        return proj
+        W = torch.randn(embed_dim // 2, dtype=dtype, device=device) * scale
+        self.register_buffer('W', W, persistent=True)  # persistent=True to save in state_dict
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B] or [B, 1] (time steps); project to [B, embed_dim//2], then concat sin/cos -> [B, embed_dim]
+        x = x.view(-1).to(device=self.W.device, dtype=self.W.dtype)  # [B]
+        x_proj = x[:, None] * self.W[None, :] * (2.0 * torch.pi)  # [B, embed_dim//2]
+        return torch.cat([x_proj.sin(), x_proj.cos()], dim=-1)  # [B, embed_dim]
 
         
 
+
+# class ImageSelfAttention(nn.Module):
+#     ''' 
+#         MAYBRITT SCHILLINGER
+#         Class for image self-attention. Self-attention is a mechanism that allows the model to focus on more important features.
+#         Focus on one thing and ignore other things that seem irrelevant at the moment.
+#         The attention value is of size (N, C, H, W), where N is the number of samples, C is the number of channels, and H and W are the height and width of the input.
+#     '''
+#     def __init__(self, input_channels:int, n_heads:int, device = None):
+#         '''
+#             Initialize the class.
+#             Input:
+#                 - input_channels: number of input channels
+#                 - n_heads: number of heads (how many different parts of the input are attended to)
+#         '''
+#         # Initialize the class
+#         super(ImageSelfAttention, self).__init__()
+#         # Set the device
+#         if device is None:
+#             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#         else:
+#             self.device = device
+#         # Set the device for the class
+#         self.to(self.device)
+        
+#         # Set the class variables
+#         self.input_channels = input_channels
+#         self.n_heads = n_heads
+#         # Multi-head attention layer, for calculating the attention
+#         self.mha = nn.MultiheadAttention(self.input_channels, self.n_heads, batch_first=True)
+#         # Layer normalization layer, for normalizing the input
+#         self.layernorm = nn.LayerNorm([self.input_channels])
+#         # FF layer, for calculating the attention value
+#         self.ff = nn.Sequential(
+#             nn.LayerNorm([self.input_channels]), # Layer normalization
+#             nn.Linear(self.input_channels, self.input_channels), # Linear layer
+#             nn.GELU(), # GELU activation function
+#             nn.Linear(self.input_channels, self.input_channels) # Linear layer
+#         )
+        
+#     def forward(self, x:torch.Tensor):
+#         '''
+#             Forward function for the class. The self-attention is applied to the input x.
+#             Self-attention is calculated by calculating the dot product of the input with itself.
+#         '''
+
+#         # shape of x: (N, C, H, W), (N samples, C channels, height, width)
+#         _, C, H, W = x.shape
+
+#         # Reshape the input to (N, C, H*W) and permute to (N, H*W, C)
+#         x = x.reshape(-1, C, H*W).permute(0, 2, 1)
+#         # Normalize the input
+#         x_ln = self.layernorm(x)
+#         # Calculate the attention value and attention weights 
+#         attn_val, _ = self.mha(x_ln, x_ln, x_ln)
+#         # Add the attention value to the input
+#         attn_val = attn_val + x
+#         # Apply the FF layer to the attention value
+#         attn_val = attn_val + self.ff(attn_val)
+#         # Reshape the attention value to (N, C, H, W)
+#         attn_val = attn_val.permute(0, 2, 1).reshape(-1, C, H, W)
+#         return attn_val
 
 class ImageSelfAttention(nn.Module):
-    ''' 
-        MAYBRITT SCHILLINGER
-        Class for image self-attention. Self-attention is a mechanism that allows the model to focus on more important features.
-        Focus on one thing and ignore other things that seem irrelevant at the moment.
-        The attention value is of size (N, C, H, W), where N is the number of samples, C is the number of channels, and H and W are the height and width of the input.
-    '''
-    def __init__(self, input_channels:int, n_heads:int, device = None):
-        '''
-            Initialize the class.
-            Input:
-                - input_channels: number of input channels
-                - n_heads: number of heads (how many different parts of the input are attended to)
-        '''
-        # Initialize the class
-        super(ImageSelfAttention, self).__init__()
-        # Set the device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = device
-        # Set the device for the class
-        self.to(self.device)
-        
-        # Set the class variables
+    """
+        Channel-first image self-attention over flattened spatial tokens.
+        Returns y = x + MHA(LayerNorm(x)) + FF(LayerNorm(x + MHA(...))) (pre-LayerNorm residual block).
+    """
+    def __init__(self,
+                 input_channels: int,
+                 n_heads: int,
+                 dropout: float = 0.0,):
+        super().__init__()
+        if input_channels % n_heads != 0:
+            raise ValueError(f"Number of input channels ({input_channels}) must be divisible by number of heads ({n_heads}).")
         self.input_channels = input_channels
         self.n_heads = n_heads
-        # Multi-head attention layer, for calculating the attention
-        self.mha = nn.MultiheadAttention(self.input_channels, self.n_heads, batch_first=True)
-        # Layer normalization layer, for normalizing the input
-        self.layernorm = nn.LayerNorm([self.input_channels])
-        # FF layer, for calculating the attention value
+
+        self.mha = nn.MultiheadAttention(embed_dim=input_channels, num_heads=n_heads, dropout=dropout, batch_first=True)
+        self.ln1 = nn.LayerNorm(input_channels)
+        self.ln2 = nn.LayerNorm(input_channels)
         self.ff = nn.Sequential(
-            nn.LayerNorm([self.input_channels]), # Layer normalization
-            nn.Linear(self.input_channels, self.input_channels), # Linear layer
-            nn.GELU(), # GELU activation function
-            nn.Linear(self.input_channels, self.input_channels) # Linear layer
+            nn.Linear(input_channels, input_channels),
+            nn.GELU(),
+            nn.Linear(input_channels, input_channels)
         )
-        
-    def forward(self, x:torch.Tensor):
-        '''
-            Forward function for the class. The self-attention is applied to the input x.
-            Self-attention is calculated by calculating the dot product of the input with itself.
-        '''
 
-        # shape of x: (N, C, H, W), (N samples, C channels, height, width)
-        _, C, H, W = x.shape
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (N, C, H, W)
+        N, C, H, W = x.shape
+        x_tokens = x.reshape(N, C, H * W).permute(0, 2, 1)  # (N, S, C), S=H*W
 
-        # Reshape the input to (N, C, H*W) and permute to (N, H*W, C)
-        x = x.reshape(-1, C, H*W).permute(0, 2, 1)
-        # Normalize the input
-        x_ln = self.layernorm(x)
-        # Calculate the attention value and attention weights 
-        attn_val, _ = self.mha(x_ln, x_ln, x_ln)
-        # Add the attention value to the input
-        attn_val = attn_val + x
-        # Apply the FF layer to the attention value
-        attn_val = attn_val + self.ff(attn_val)
-        # Reshape the attention value to (N, C, H, W)
-        attn_val = attn_val.permute(0, 2, 1).reshape(-1, C, H, W)
-        return attn_val
+        h = self.ln1(x_tokens)
+        attn_out, _ = self.mha(h, h, h)  # (N, S, C)
+        h = x_tokens + attn_out
 
+        y_tokens = h + self.ff(self.ln2(h))  # (N, S, C)
+        y = y_tokens.permute(0, 2, 1).reshape(N, C, H, W)  # (N, C, H, W)
+
+        return y
 
 
 class Encoder(ResNet):
@@ -144,26 +186,21 @@ class Encoder(ResNet):
         
         # Initialize the ResNet with the given block and block_layers
         super(Encoder, self).__init__(self.block, self.block_layers)
-        
-        # Set the device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = device
-        # Set device for the ResNet
-        self.to(self.device)
-        
+
+        # Device attribute (do not move submodules here, call self.to(device) at the end of init)
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                
         # Initialize the sinusoidal time embedding layer with the given time_embedding
-        self.sinusiodal_embedding = SinusoidalEmbedding(self.time_embedding).to(self.device)
+        self.sinusoidal_embedding = SinusoidalEmbedding(self.time_embedding)
 
         
         # Set the channels for the feature maps (five feature maps, one for each layer, with 64, 64, 128, 256, 512 channels)
         fmap_channels = [64, 64, 128, 256, 512]
 
         # Set the time projection layers, for projecting the time embedding onto the feature maps
-        self.time_projection_layers = self.make_time_projections(fmap_channels).to(self.device)
+        self.time_projection_layers = self.make_time_projections(fmap_channels)
         # Set the attention layers, for calculating the attention for each feature map
-        self.attention_layers = self.make_attention_layers(fmap_channels).to(self.device)
+        self.attention_layers = self.make_attention_layers(fmap_channels)
         
         # Set the first convolutional layer, with N input channels(=input_channels) and 64 output channels
         self.conv1 = nn.Conv2d(
@@ -171,7 +208,7 @@ class Encoder(ResNet):
             kernel_size=(8, 8), # Previous kernelsize (7,7)
             stride=(2, 2), 
             padding=(3, 3), 
-            bias=False).to(self.device)
+            bias=False)
         
         # Set the second convolutional layer, with 64 input channels and 64 output channels
         self.conv2 = nn.Conv2d(
@@ -179,7 +216,7 @@ class Encoder(ResNet):
             kernel_size=(8, 8), # Previous kernelsize (7,7)
             stride=(2, 2),  
             padding=(3, 3),
-            bias=False).to(self.device)
+            bias=False)
 
         # If conditional, set the label embedding layer from the number of classes to the time embedding size
         if num_classes is not None:
@@ -193,19 +230,19 @@ class Encoder(ResNet):
 
         
         
-    def pos_encoding(self, t, channels):
-        inv_freq = 1.0 / (
-            1000
-            ** (torch.arange(0, channels, 2).float() / channels)
-        )
-        inv_freq = inv_freq.to(self.device)
-        t = t.to(self.device)
+    # def pos_encoding(self, t, channels):
+    #     inv_freq = 1.0 / (
+    #         1000
+    #         ** (torch.arange(0, channels, 2).float() / channels)
+    #     )
+    #     inv_freq = inv_freq.to(self.device)
+    #     t = t.to(self.device)
 
 
-        pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
-        pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
-        pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
-        return pos_enc
+    #     pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
+    #     pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
+    #     pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
+    #     return pos_enc
 
     def forward(self,  # type: ignore
                 x:torch.Tensor, 
@@ -230,24 +267,23 @@ class Encoder(ResNet):
                 - fmap1, fmap2, fmap3, fmap4, fmap5: feature maps
 
         '''
-        # Send the input to the device
-        x = x.to(self.device)
-        t = t.to(self.device)
+        dev = x.device
+        t = t.to(dev)
 
         if lsm_cond is not None:
             if lsm_cond.shape[0] != x.shape[0]:
                 raise ValueError(f"Batch mismatch: x= {x.shape[0]}, lsm_cond={lsm_cond.shape[0]}.")
-            lsm_cond = lsm_cond.to(self.device)
+            lsm_cond = lsm_cond.to(dev)
             x = torch.cat([x, lsm_cond], dim=1)
         if topo_cond is not None:
             if topo_cond.shape[0] != x.shape[0]:
                 raise ValueError(f"Batch mismatch: x= {x.shape[0]}, topo_cond={topo_cond.shape[0]}.")
-            topo_cond = topo_cond.to(self.device)
+            topo_cond = topo_cond.to(dev)
             x = torch.cat([x, topo_cond], dim=1)
 
         if cond_img is not None:
 
-            cond_img = cond_img.to(self.device)
+            cond_img = cond_img.to(dev)
             # logger.debug('\n\nCond image shape: ', cond_img.shape)
             # logger.debug('Input shape: ', x.shape)
             # logger.debug('Concatenating conditional image to input')
@@ -258,16 +294,15 @@ class Encoder(ResNet):
 
 
         # Send the inputs to the device
-        x = x.to(self.device)
         if y is not None:
-            y = y.to(self.device)
+            y = y.to(dev)
         
         # Embed the time positions
         t = t.unsqueeze(-1).type(torch.float)
-        t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
-        t = t.to(self.device)   
+        # t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
+        t = self.sinusoidal_embedding(t.view(-1)) # Use the sinusoidal embedding instead of the positional encoding (to align with Decoder)
     
-        #t = self.sinusiodal_embedding(t)
+        #t = self.sinusoidal_embedding(t)
         # Add the label embedding to the time embedding
         if y is not None:
             t += self.label_emb(y)
@@ -354,9 +389,17 @@ class Encoder(ResNet):
                 - fmap_channels: list containing the number of channels for each feature map
         '''
         # Initialize the attention layers. One attention layer is used for each feature map.
-        layers = nn.ModuleList([
-            ImageSelfAttention(ch, self.n_heads) for ch in fmap_channels
-        ])
+        
+        # NEW: attention only at layers >= len(fmap_channels) - 2
+        fmap_channels = list(fmap_channels)
+        layers = nn.ModuleList(
+            [ImageSelfAttention(ch, self.n_heads) if i >= len(fmap_channels) - 2 else nn.Identity() for i, ch in enumerate(fmap_channels)]
+        )
+
+        # OLD: Attention at all layers
+        # layers = nn.ModuleList([
+        #     ImageSelfAttention(ch, self.n_heads) for ch in fmap_channels
+        # ])
         
         return layers
     
@@ -378,7 +421,11 @@ class DecoderBlock(nn.Module):
             activation: type[nn.Module] = nn.ReLU,
             compute_attn:bool=True,
             n_heads:int=4,
-            device = None
+            device = None,
+            *,
+            use_resize_conv: bool = True,
+            norm: str = "instance", # "instance" | "group"
+            gn_groups: int = 8
             ):
         '''
             Initialize the class.
@@ -390,18 +437,16 @@ class DecoderBlock(nn.Module):
                 - activation: activation function to use (default: ReLU)
                 - compute_attn: boolean indicating whether to compute the attention (default: True)
                 - n_heads: number of heads for the self-attention layer (default: 4, meaning 4 heads for the self-attention layer)
+                - use_resize_conv: whether to use resize convolution instead of transposed convolution for upsampling (default: True)
+                - norm: normalization layer to use (default: instance normalization)
+                - gn_groups: number of groups for group normalization (default: 8)
         '''
 
         # Initialize the class
-        super(DecoderBlock, self).__init__()
-        # Set the device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = device
-        # Set the device for the class
-        self.to(self.device)
-        
+        super().__init__()
+
+        # Keep device attribute for reference (only move submodules at the end of init with self.to(device))
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Initialize the class variables
         self.input_channels = input_channels
@@ -410,41 +455,105 @@ class DecoderBlock(nn.Module):
         self.time_embedding = time_embedding
         self.compute_attn = compute_attn
         self.n_heads = n_heads
+        self.use_resize_conv = use_resize_conv
+        self.norm_kind = norm
+        self.gn_groups = gn_groups
         
-        # Initialize the attention layer, if compute_attn is True
-        if self.compute_attn:
-            # Initialize the attention layer
-            self.attention = ImageSelfAttention(self.output_channels, self.n_heads).to(self.device)
+        # -------------------------------
+        # (A) Upsampling path
+        # -------------------------------
+        if self.use_resize_conv:
+            # resize -> conv_up keeps channels the same
+            self.upsample = nn.Upsample(scale_factor = self.upsample_scale, mode="bilinear", align_corners=False)
+            self.conv_up = nn.Conv2d(self.input_channels, self.input_channels, kernel_size=3, padding=1, bias=False)
+            mid_ch = self.input_channels
         else:
-            # Initialize the identity layer as the attention layer
-            self.attention = nn.Identity().to(self.device)
+            # deconv path (kept for ablation/toggling purposes)
+            self.transpose = nn.ConvTranspose2d(
+                self.input_channels, self.input_channels, 
+                kernel_size=self.upsample_scale, stride=self.upsample_scale)
+            mid_ch = self.transpose.out_channels # (= input_channels with current setup)
+
+        # -------------------------------
+        # (B) Normalization helpers
+        # -------------------------------
+        def make_norm(c: int):
+            if self.norm_kind == "group":
+                return nn.GroupNorm(num_groups=max(1, min(self.gn_groups, c)), num_channels=c)
+            return nn.InstanceNorm2d(c)
         
-        # Initialize the sinusoidal time embedding layer with the given time_embedding
-        self.sinusiodal_embedding = SinusoidalEmbedding(self.time_embedding).to(self.device)
-        
-        # Initialize the time projection layer, for projecting the time embedding onto the feature maps. SiLU activation function and linear layer.
+        # Norm before main 3x3 (acts on mid_ch)
+        self.norm1 = make_norm(mid_ch)
+
+        # Main 3x3 conv to reach the block's output width
+        self.conv = nn.Conv2d(mid_ch, self.output_channels, kernel_size=3, padding=1)
+
+        # Norm after main conv
+        self.norm2 = make_norm(self.conv.out_channels)
+
+        # Activation 
+        self.activation = activation()
+
+        # -------------------------------
+        # (C) Time embedding path
+        # -------------------------------
+        self.sinusoidal_embedding = SinusoidalEmbedding(self.time_embedding)
         self.time_projection_layer = nn.Sequential(
                 nn.SiLU(),
                 nn.Linear(self.time_embedding, self.output_channels)
-            ).to(self.device)
+            )
+        
+        # -------------------------------
+        # (D) Attention layer
+        # -------------------------------
+        if self.compute_attn:
+            self.attention = ImageSelfAttention(self.output_channels, self.n_heads)
+        else:
+            self.attention = nn.Identity()
 
-        # Initialize the transposed convolutional layer. 
-        self.transpose = nn.ConvTranspose2d(
-            self.input_channels, self.input_channels, 
-            kernel_size=self.upsample_scale, stride=self.upsample_scale).to(self.device)
-        
-        # Define the instance normalization layer, for normalizing the input
-        self.instance_norm1 = nn.InstanceNorm2d(self.transpose.in_channels).to(self.device)
 
-        # Define the convolutional layer
-        self.conv = nn.Conv2d(
-            self.transpose.out_channels, self.output_channels, kernel_size=3, stride=1, padding=1).to(self.device)
+
+
+
+
+        ###### OLD CODE ######
+        # # Initialize the attention layer, if compute_attn is True
+        # if self.compute_attn:
+        #     # Initialize the attention layer
+        #     self.attention = ImageSelfAttention(self.output_channels, self.n_heads).to(self.device)
+        # else:
+        #     # Initialize the identity layer as the attention layer
+        #     self.attention = nn.Identity().to(self.device)
         
-        # Define second instance normalization layer, for normalizing the input
-        self.instance_norm2 = nn.InstanceNorm2d(self.conv.out_channels).to(self.device)
+        # # Initialize the sinusoidal time embedding layer with the given time_embedding
+        # self.sinusoidal_embedding = SinusoidalEmbedding(self.time_embedding).to(self.device)
         
-        # Define the activation function
-        self.activation = activation()
+        # # Initialize the time projection layer, for projecting the time embedding onto the feature maps. SiLU activation function and linear layer.
+        # self.time_projection_layer = nn.Sequential(
+        #         nn.SiLU(),
+        #         nn.Linear(self.time_embedding, self.output_channels)
+        #     ).to(self.device)
+
+        # # Initialize the transposed convolutional layer. 
+        # self.transpose = nn.ConvTranspose2d(
+        #     self.input_channels, self.input_channels, 
+        #     kernel_size=self.upsample_scale, stride=self.upsample_scale).to(self.device)
+        
+        # self.upsample = nn.Upsample(scale_factor = self.upsample_scale, mode="bilinear", align_corners=False).to(self.device)
+        # self.conv_up = nn.Conv2d(self.input_channels, self.input_channels, kernel_size=3, padding=1).to(self.device)
+        
+        # # Define the instance normalization layer, for normalizing the input
+        # self.instance_norm1 = nn.InstanceNorm2d(self.transpose.in_channels).to(self.device)
+
+        # # Define the convolutional layer
+        # self.conv = nn.Conv2d(
+        #     self.transpose.out_channels, self.output_channels, kernel_size=3, stride=1, padding=1).to(self.device)
+        
+        # # Define second instance normalization layer, for normalizing the input
+        # self.instance_norm2 = nn.InstanceNorm2d(self.conv.out_channels).to(self.device)
+        
+        # # Define the activation function
+        # self.activation = activation()
 
     
     def forward(self,
@@ -453,36 +562,99 @@ class DecoderBlock(nn.Module):
                 t:Optional[torch.Tensor]=None
                 ):
         '''
-            Forward function for the class. The input fmap, previous feature map prev_fmap, and time embedding t are used to calculate the output.
-            The output is the decoded input fmap.
+            Args:
+                fmap:       [B, C_in, H, W] incoming feature map
+                prev_fmap:  optional skip/residual to add after the main conv (must match output shape)
+                t:          timestep; either scalar indices [B] to be sinusoidally embedded here,
+                            or a precomputed embedding [B, time_dim]
+
+            Returns:
+                [B, C_out, H*ups, W*ups]
         '''
-        # Prepare the input fmap by applying a transposed convolutional, instance normalization, convolutional, and second instance norm layers
-        output = self.transpose(fmap)#.to(self.device)
-        output = self.instance_norm1(output)#.to(self.device)
-        output = self.conv(output)#.to(self.device)
-        output = self.instance_norm2(output)#.to(self.device)
+
+        # === Pick the right norm attributes regardless of init version ===
+        n1 = getattr(self, "norm1", getattr(self, "instance_norm1", None))
+        n2 = getattr(self, "norm2", getattr(self, "instance_norm2", None))
+        if n1 is None or n2 is None:
+            raise ValueError("Norm layers not found; possible init error.")
         
-        # Apply residual connection with previous feature map. If prev_fmap is a tensor and not None, the feature maps must be of the same shape.
+        # === Upsample path (resize-congv or deconv) ===
+        if getattr(self, "use_resize_conv", True):
+            x = self.upsample(fmap) # bilinear upsample
+            x = n1(x)               # norm on mid_ch
+            x = self.conv_up(x)     # 3x3 conv
+        else:
+            x = self.transpose(fmap) # ConvTranspose2d upsample (OLD, kept for ablation/toggling purposes)
+            x = n1(x)
+
+        # === Main conv to output width + norm ===
+        x = self.conv(x)        # [B, C_out, H*ups, W*ups]
+        x = n2(x)               # norm on output
+
+        # === Add previous feature map (residual/skip) if given ===
         if prev_fmap is not None and torch.is_tensor(prev_fmap):
-            assert (prev_fmap.shape == output.shape), 'feature maps must be of same shape. Shape of prev_fmap: {}, shape of output: {}'.format(prev_fmap.shape, output.shape)
-            # Add the previous feature map to the output
-            output = output + prev_fmap.to(self.device)
+            if prev_fmap.shape != x.shape:
+                raise AssertionError(f"prev_fmap shape {prev_fmap.shape} must match output shape {tuple(x.shape)}")
+            if prev_fmap.device != x.device:
+                prev_fmap = prev_fmap.to(x.device)
+            x = x + prev_fmap
+
+        # === time embedding/projection (broadcast add) ===
+        if t is not None:
+            # Accept either raw timesteps [B] or pre-embedded [B, time_dim]
+            if t.dim() == 1 or (t.dim() == 2 and t.shape[-1] != getattr(self, "time_embedding", self.time_embedding)):
+                t_emb = self.sinusoidal_embedding(t.view(-1))  # [B, time_dim]
+            else:
+                t_emb = t
+            t_proj = self.time_projection_layer(t_emb).unsqueeze(-1).unsqueeze(-1)  # [B, C_out, 1, 1]
+            if t_proj.device != x.device:
+                t_proj = t_proj.to(x.device)
+            x = x + t_proj  # broadcast add
+
+        # === Non-linearity ===
+        x = self.activation(x)
+
+        # === Optional spatial self-attention (residual) ===
+        attn = getattr(self, "attention", None)
+        if attn is not None:
+            # NEW: single-added attention (pre-norm)
+            x = attn(x)
             
-        # Apply timestep embedding if t is a tensor
-        if torch.is_tensor(t):
-            # Embed the time positions
-            t = self.sinusiodal_embedding(t).to(self.device)
-            # Project the time embedding onto the feature maps
-            t_emb = self.time_projection_layer(t).to(self.device)
-            # Add the projected time embedding to the output
-            output = output + t_emb[:, :, None, None].to(self.device)
-            
-            # Calculate the attention for the output
-            output = self.attention(output).to(self.device)
+            # OLD: double-added attention (pre-norm + post-norm)
+            # attn_out = attn(x)
+            # x = x + attn_out.to(self.device) if attn_out is not None else x # 
+
+        return x
+
+
+        ##### OLD CODE #####
+        # # Prepare the input fmap by applying a transposed convolutional, instance normalization, convolutional, and second instance norm layers
+        # output = self.transpose(fmap)#.to(self.device)
+        # output = self.instance_norm1(output)#.to(self.device)
+        # output = self.conv(output)#.to(self.device)
+        # output = self.instance_norm2(output)#.to(self.device)
         
-        # Apply the activation function to the output
-        output = self.activation(output).to(self.device)
-        return output
+        # # Apply residual connection with previous feature map. If prev_fmap is a tensor and not None, the feature maps must be of the same shape.
+        # if prev_fmap is not None and torch.is_tensor(prev_fmap):
+        #     assert (prev_fmap.shape == output.shape), 'feature maps must be of same shape. Shape of prev_fmap: {}, shape of output: {}'.format(prev_fmap.shape, output.shape)
+        #     # Add the previous feature map to the output
+        #     output = output + prev_fmap.to(self.device)
+            
+        # # Apply timestep embedding if t is a tensor
+        # if torch.is_tensor(t):
+        #     # Embed the time positions
+        #     t = self.sinusoidal_embedding(t).to(self.device)
+        #     # Project the time embedding onto the feature maps
+        #     t_emb = self.time_projection_layer(t).to(self.device)
+        #     # Add the projected time embedding to the output
+        #     output = output + t_emb[:, :, None, None].to(self.device)
+            
+        #     # Calculate the attention for the output
+        #     output = self.attention(output).to(self.device)
+        
+        # # Apply the activation function to the output
+        # output = self.activation(output).to(self.device)
+        # return output
     
 
 
@@ -500,7 +672,12 @@ class Decoder(nn.Module):
                  time_embedding:int,
                  first_fmap_channels:int=64,
                  n_heads:int=4,
-                 device = None
+                 device = None,
+                 *,
+                 use_resize_conv: bool = True,
+                 norm: str = "instance", # "instance" | "group"
+                 gn_groups: int = 8,
+                 activation: type[nn.Module] = nn.ReLU
                  ):
         '''
             Initialize the class. 
@@ -513,14 +690,10 @@ class Decoder(nn.Module):
         '''
 
         # Initialize the class
-        super(Decoder, self).__init__()
+        super().__init__()
+
         # Set the device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = device
-        # Set the device for the class
-        self.to(self.device)
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Initialize the class variables
         self.last_fmap_channels = last_fmap_channels
@@ -528,18 +701,33 @@ class Decoder(nn.Module):
         self.time_embedding = time_embedding
         self.first_fmap_channels = first_fmap_channels
         self.n_heads = n_heads
+        self.use_resize_conv = use_resize_conv
+        self.norm = norm
+        self.gn_groups = gn_groups
+        self.activation = activation
 
         # Initialize the residual layers (four residual layers)
-        self.residual_layers = self.make_layers().to(self.device)
+        self.residual_layers = self.make_layers()
 
-        # Initialize the final layer, a decoder block without previous feature map and without attention
+        # Initialize the final layer: no attention, identity activation (if no extra non-linearity is wanted at the end)
         self.final_layer = DecoderBlock(
-            self.residual_layers[-1].input_channels, self.output_channels,
-            time_embedding=self.time_embedding, activation=nn.Identity, 
-            compute_attn=False, n_heads=self.n_heads).to(self.device)
-
-        # Set final layer second instance norm to identity as the final layer does not have a previous feature map
-        self.final_layer.instance_norm2 = nn.Identity() # type: ignore
+            self.residual_layers[-1].input_channels,
+            self.output_channels,
+            time_embedding=self.time_embedding,
+            activation=nn.Identity,
+            compute_attn=False, # No computation of attention on final layer
+            n_heads=self.n_heads,
+            device=self.device,
+            use_resize_conv=self.use_resize_conv,
+            norm=self.norm,
+            gn_groups=self.gn_groups,
+            )
+        # After creating final layer, make sure no activation or normalization (otherwise mode ljust learns zero mean/unit variance)
+        if hasattr(self.final_layer, "norm1"): 
+            self.final_layer.norm1 = nn.Identity()
+        if hasattr(self.final_layer, "norm2"):
+            self.final_layer.norm2 = nn.Identity()
+        self.final_layer.activation = nn.Identity() 
 
 
     def forward(self, *fmaps, t:Optional[torch.Tensor]=None):
@@ -549,23 +737,24 @@ class Decoder(nn.Module):
                 - fmaps: feature maps
                 - t: time embedding tensor
         '''
-        # Reverse the feature maps in a list, fmaps(reversed): fmap5, fmap4, fmap3, fmap2, fmap1
-        fmaps = [fmap for fmap in reversed(fmaps)]
+        # Expect n+1 feature maps if you built n residual layers
+        assert len(fmaps) == len(self.residual_layers) + 1, f"Decoder expected {len(self.residual_layers)+1} feature maps, got {len(fmaps)}"
 
+        # Reverse the feature maps in a list, fmaps(reversed): fmap5, fmap4, fmap3, fmap2, fmap1
+        fmaps = list(reversed(fmaps))
         output = None
 
         # Loop over the residual layers
-        for idx, m in enumerate(self.residual_layers):
+        for idx, block in enumerate(self.residual_layers):
             if idx == 0:
                 # If idx is 0, the first residual layer is used.
-                output = m(fmaps[idx], fmaps[idx+1], t).to(self.device)
-                continue
-            # If idx is not 0, the other residual layers are used.
-            output = m(output, fmaps[idx+1], t).to(self.device)
-        
+                output = block(fmaps[idx], fmaps[idx+1], t)
+            else:
+                # If idx is not 0, the other residual layers are used.
+                output = block(output, fmaps[idx+1], t)
         # No previous fmap is passed to the final decoder block
         # and no attention is computed
-        output = self.final_layer(output).to(self.device)
+        output = self.final_layer(output)
         return output
 
       
@@ -580,37 +769,38 @@ class Decoder(nn.Module):
 
         # Loop over the number of residual layers
         for i in range(n):
-            # If i is 0, the first residual layer is used.
-            if i == 0: in_ch = self.last_fmap_channels
-            # If i is not 0, the other residual layers are used.
-            else: in_ch = layers[i-1].output_channels
-
-            # Set the number of output channels for the residual layer
+            in_ch = self.last_fmap_channels if i == 0 else layers[i-1].output_channels
             out_ch = in_ch // 2 if i != (n-1) else self.first_fmap_channels
 
             # Initialize the residual layer as a decoder block
-            layer = DecoderBlock(
-                in_ch, out_ch, 
+            layers.append(DecoderBlock(
+                in_ch,
+                out_ch, 
                 time_embedding=self.time_embedding,
-                compute_attn=True, n_heads=self.n_heads, device=self.device).to(self.device)
-            
-            # Add the residual layer to the list of residual layers
-            layers.append(layer)
+                compute_attn=(i < 2), # Attention only on first two decoders (i.e. lowest spatial resolutions, closest to bottleneck). Adding attention to larger maps is very expensive and cause instability in training.
+                n_heads=self.n_heads,
+                device=self.device,
+                use_resize_conv=self.use_resize_conv,
+                norm=self.norm,
+                gn_groups=self.gn_groups,
+                activation=self.activation
+            ))
 
-        # Return the residual layers as a ModuleList
-        layers = nn.ModuleList(layers).to(self.device)
-        return layers
+        return nn.ModuleList(layers)
+
 
 class ScoreNet(nn.Module):
     '''
         Class for the diffusion net. The diffusion net is used to encode and decode the input.
-        The diffusion net is a UNET with self-attention layers, and will be used for downscaling in the DDPM.
+        UNet-based score model: encoder-decoder with time conditioning
+        Assumes VE-SDE (Variance Exploding SDE) training target; for EDM preconditioning see note below.
     '''
     def __init__(self,
-                 marginal_prob_std,
-                 encoder:Encoder,
-                 decoder:Decoder,
-                 device = None
+                 marginal_prob_std, # callable: t->[B], matches VE schedule
+                 encoder: nn.Module,
+                 decoder: nn.Module,
+                 device = None,
+                 debug_pre_sigma_div: bool = True
                  ):
         '''
             Initialize the class.
@@ -620,21 +810,20 @@ class ScoreNet(nn.Module):
                 - decoder: decoder module
         '''
         # Initialize the class
-        super(ScoreNet, self).__init__()
+        super().__init__()
+
         # Set the device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = device
-        
-        self.to(self.device)
-        
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                
         # Set the marginal probability standard deviation
         self.marginal_prob_std = marginal_prob_std
-
         # Set the encoder and decoder modules
-        self.encoder = encoder.to(self.device)
-        self.decoder = decoder.to(self.device)
+        self.encoder = encoder
+        self.decoder = decoder
+        self.debug_pre_sigma_div = debug_pre_sigma_div
+
+        # Move everything to the device, single move for whole model tree
+        self.to(self.device)
 
     
     def forward(self,
@@ -652,39 +841,77 @@ class ScoreNet(nn.Module):
                 - t: time embedding tensor 
                 - y: label tensor
         '''
-        # Encode the input x
+        # === Device/dtype alignment ===
+        dev = x.device
+        t = t.to(dev).float()
+        if y is not None:
+            y = y.to(dev).long() # long for embedding lookup
+        if cond_img is not None:
+            cond_img = cond_img.to(dev)
+        if lsm_cond is not None:
+            lsm_cond = lsm_cond.to(dev)
+        if topo_cond is not None:
+            topo_cond = topo_cond.to(dev)
 
-        enc_fmaps = self.encoder(x,
-                                 t=t,
-                                 y=y,
-                                 cond_img=cond_img,
-                                 lsm_cond=lsm_cond,
-                                 topo_cond=topo_cond,
-                                 )
-        # Decode the encoded input, using the encoded feature maps
-        segmentation_mask = self.decoder(*enc_fmaps, t=t)
+        # === Encode ===
+        # Expect encoder to return a list/tuple of feature maps for skip connections
+        enc_fmaps = self.encoder(x, t, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
 
-        # Normalize the segmentation mask with the marginal probability standard deviation
-        segmentation_mask = segmentation_mask / self.marginal_prob_std(t)[:, None, None, None]
-        
-        return segmentation_mask
+        # Optional sanity check (helps catch shape/order mismatches early)
+        # assert isinstance(enc_fmaps, (list, tuple)) and len(enc_fmaps) >= 2, "Encoder must return a list/tuple of >=2 feature maps"
 
-def marginal_prob_std(t, sigma, device = None):
-    '''
-        Function to compute standard deviation of 
-        the marginal $p_{0t}(x(t)|x(0))$
-        Input:
-            - t: time embedding tensor
-            - sigma: the sigma parameter in our SDE
-    '''
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        device = device
+        # === Decode ===
+        score = self.decoder(*enc_fmaps, t=t)
 
-    t = t.to(device)
+        # === DEBUG: Distribution before sigma-division ===
+        if getattr(self, "debug_pre_sigma_div", True):
+            with torch.no_grad():
+                pre_m = float(score.mean())
+                pre_s = float(score.std())
+                svals =self.marginal_prob_std(t)
+                logger.info(f"[pre-σ-div] mean = {pre_m:.4g}, std = {pre_s:.4g}, σ ∈ [{svals.min():.4g}, {svals.max():.4g}]")
+
+        # === VE-SDE normalization ===
+        # NOTE: for EDM-style preconditioning, the score output would need to be scaled by a (t-dependent) factor here
+        std = self.marginal_prob_std(t) # [B]
+        score = score / std.view(-1, 1, 1, 1) # [B, C, H, W] broadcast div
+
+        return score
+
+def marginal_prob_std(t: torch.Tensor,
+                      sigma: float,
+                      eps: float = 1e-6,
+                      ) -> torch.Tensor:
+    """
+        Safer marginal probability standard deviation function that ensures numerical stability.
+        Computes the standard deviation of p_(0t)(x(t)|x(0)) for VE-SDE with lognormal variance schedule sigma^t.
+        Sigma: base (>1), e.g. 25.0
+        returns shape [B], dtype/device same as t
+    """
+    t = t.to(dtype=torch.float32, device=t.device)
+    s = torch.tensor(sigma, dtype=t.dtype, device=t.device)
+    # sigma^(2t) = exp(2t log(sigma))
+    sigma_t_sq = torch.exp((2. * t) * torch.log(s))
+    std = torch.sqrt((sigma_t_sq - 1.) / (2. * torch.log(s)))
+    # small floor to avoid dicision blow ups when t ~ 0
+    return torch.clamp(std, min=eps)
+
+# def marginal_prob_std(t, sigma, device = None):
+#     '''
+#         Function to compute standard deviation of 
+#         the marginal $p_{0t}(x(t)|x(0))$
+#         Input:
+#             - t: time embedding tensor
+#             - sigma: the sigma parameter in our SDE
+#     '''
+#     if device is None:
+#         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     else:
+#         device = device
+
+#     t = t.to(device)
     
-    return torch.sqrt((sigma**(2 * t) - 1.) / 2. / np.log(sigma))
+#     return torch.sqrt((sigma**(2 * t) - 1.) / 2. / np.log(sigma))
 
 def diffusion_coeff(t, sigma, device = None):
     '''
@@ -697,10 +924,9 @@ def diffusion_coeff(t, sigma, device = None):
         Returns:
             - The vector of diffusion coefficients
     '''
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     diff_coeff = sigma**t
-    diff_coeff = diff_coeff.to(device)
+    diff_coeff = diff_coeff.to(t.device)
     return diff_coeff
 
 sigma =  25.0#@param {'type':'number'}
@@ -735,8 +961,9 @@ def loss_fn(model,
     # Perturb the input x with the random noise vector z
     perturbed_x = x + std[:, None, None, None] * z
 
-    assert x.shape[0] == cond_img.shape[0] == lsm_cond.shape[0] == topo_cond.shape[0] == y.shape[0], \
-        f'Batch size mismatch: x={x.shape[0]}, cond_img={cond_img.shape[0]}, lsm_cond={lsm_cond.shape[0]}, topo_cond={topo_cond.shape[0]}, y={y.shape[0]}'
+    for name, arr in [('cond_img', cond_img), ('lsm_cond', lsm_cond), ('topo_cond', topo_cond), ('y', y)]:
+        if arr is not None and arr.shape[0] != x.shape[0]:
+            raise ValueError(f'Batch size mismatch: x={x.shape[0]}, {name}={arr.shape[0]}')
     
     # Estimate the score at the perturbed input x and the random time step t
     score = model(perturbed_x, random_t, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)

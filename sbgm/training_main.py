@@ -23,8 +23,8 @@ def train_main(cfg):
     log_dir = os.path.join(cfg["paths"]["checkpoint_dir"], 'logs')
     logger = setup_logger(log_dir)
 
-    logger.info("=== Starting SBGM_SD Training Pipeline ===")
-    logger.info(f"Experiment name: {cfg['experiment']['name']}")
+    logger.info("\n\n=== Starting SBGM_SD Training Pipeline ===")
+    logger.info(f"          Experiment name: {cfg['experiment']['name']}")
 
     # Set path to figures, samples, losses
     save_str = get_model_string(cfg)
@@ -41,13 +41,13 @@ def train_main(cfg):
     if device_str == 'cuda':
         if torch.cuda.is_available():
             device = torch.device('cuda')
-            logger.info(f"▸ Using GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"          ▸ Using GPU: {torch.cuda.get_device_name(0)}")
         else:
             device = torch.device('cpu')
-            logger.info("▸ CUDA is not available, using CPU instead.")
+            logger.info(f"          ▸ CUDA is not available, using CPU instead.")
     else:
         device = torch.device('cpu')
-        logger.info("▸ Using CPU for training.")
+        logger.info(f"          ▸ Using CPU for training.")
 
     # Load data
     train_dataloader, val_dataloader, gen_dataloader = get_dataloader(cfg)
@@ -60,7 +60,7 @@ def train_main(cfg):
     for i, _ in enumerate(train_dataloader):
         if i == 100:
             avg = (perf_counter() - start) / 100
-            logger.info(f"▸ Dataloader average fetch time ~{avg:.3f} s / batch ")
+            logger.info(f"          ▸ Dataloader average fetch time ~{avg:.3f} s / batch\n\n")
 
 
 
@@ -69,14 +69,14 @@ def train_main(cfg):
     for key, value in sample.items():
         try:
             # Log the shape of the tensor
-            logger.info(f'{key}: {value.shape}')
+            logger.info(f'          {key}: {value.shape}')
             # Log the device of the tensor
-            logger.info(f'{key} device: {value.device}')
+            logger.info(f'              {key} device: {value.device}')
         except AttributeError:
-            logger.info(f'{key}: {value}')
+            logger.info(f'          {key}: {value}')
         if key == 'classifier':
-            logger.info(f'▸ Classifier: {value}')
-    
+            logger.info(f'          ▸ Classifier: {value}')
+
 
     if cfg['visualization']['plot_initial_sample']:
         fig, _ = plot_sample(sample, cfg)
@@ -89,7 +89,7 @@ def train_main(cfg):
         save_path = os.path.join(path_figures, SAVE_NAME)
         fig.savefig(save_path, bbox_inches='tight', dpi=300)
         
-        logger.info(f"▸ Saved initial sample plot to {save_path}")
+        logger.info(f"\n\n          ▸ Saved initial sample plot to {save_path}")
     
     
     #Setup checkpoint path
@@ -120,11 +120,11 @@ def train_main(cfg):
     lr_scheduler_type = cfg['training'].get('lr_scheduler', None)
     
     if lr_scheduler_type is not None:
-        logger.info(f"▸ Using learning rate scheduler: {lr_scheduler_type}")
+        logger.info(f"          ▸ Using learning rate scheduler: {lr_scheduler_type}")
         scheduler = get_scheduler(cfg, optimizer)
     else:
         scheduler = None
-        logger.info("▸ No learning rate scheduler specified, using default learning rate.")
+        logger.info(f"          ▸ No learning rate scheduler specified, using default learning rate.")
 
     # Define the training pipeline
     pipeline = TrainingPipeline_general(model=model,
@@ -140,31 +140,31 @@ def train_main(cfg):
     
     # Load checkpoint if it exists
     if cfg['training']['load_checkpoint'] and os.path.exists(checkpoint_path):
-        logger.info(f"▸ Loading pretrained weights from checkpoint {checkpoint_path}")
+        logger.info(f"          ▸ Loading pretrained weights from checkpoint {checkpoint_path}")
 
         pipeline.load_checkpoint(checkpoint_path, load_ema=cfg['training']['load_ema'],)
     else:
-        logger.info(f"▸ No checkpoint found at {checkpoint_path}. Starting training from scratch.")
+        logger.info(f"          ▸ No checkpoint found at {checkpoint_path}. Starting training from scratch.")
 
     
     # If training on cuda, print device name and empty cache
     if cfg['training']['device'] == 'cuda' and torch.cuda.is_available():
-        logger.info(f"▸ Using GPU: {torch.cuda.get_device_name(0)}")
-        logger.info(f"▸ Model is using {torch.cuda.memory_allocated() / 1e9:.2f} GB of GPU memory.")
-        logger.info(f"▸ Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        logger.info(f"\n\n          ▸ Using GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"          ▸ Model is using {torch.cuda.memory_allocated() / 1e9:.2f} GB of GPU memory.")
+        logger.info(f"          ▸ Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
-        logger.info(f"▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-        logger.info(f"▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
-        logger.info(f"▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
+        logger.info(f"\n          ▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        logger.info(f"          ▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
+        logger.info(f"          ▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
         torch.cuda.empty_cache()
     else:
-        logger.info("▸ Using CPU for training.")
-        logger.info(f"▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-        logger.info(f"▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
-        logger.info(f"▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
+        logger.info("\n\n          ▸ Using CPU for training.")
+        logger.info(f"          ▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        logger.info(f"          ▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
+        logger.info(f"          ▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
 
     # Perform training
-    logger.info("▸ Starting training...")
+    logger.info(f"\n\n          === STARTING TRAINING MAIN LOOP ===\n")
     pipeline.train(train_dataloader,
                    val_dataloader,
                    gen_dataloader,
@@ -173,7 +173,7 @@ def train_main(cfg):
                    verbose=cfg['training']['verbose'],
                    use_mixed_precision= cfg['training']['use_mixed_precision'],
     )
-    logger.info("▸ Training completed, model saved.")
+    logger.info("\n\n       === TRAINING COMPLETE ===\n\n")
 
 
 

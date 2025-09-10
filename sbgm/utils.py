@@ -427,44 +427,44 @@ def extract_samples(samples, device=None):
     
     if len(hr_keys) == 0:
         raise ValueError('No HR image found in samples dictionary.')
-    hr_img = samples[hr_keys[0]].to(device).float()
+    hr_img = samples[hr_keys[0]].to(device, non_blocking=True).float()
     # if len(hr_keys) > 1:
     #     logger.warning(f'Multiple HR images found. Using the first one: {hr_keys[0]}')
     
     # Classifier (if available)
     classifier = samples.get('classifier', None)
     if classifier is not None:
-        classifier = classifier.to(device)#.float()
+        classifier = classifier.to(device, non_blocking=True)#.float()
 
     # LR conditions: if multiple, stack along channel dimensio
     lr_keys = [k for k in samples.keys() if k.endswith('_lr') and not k.endswith('_original')]
     if len(lr_keys) == 0:
         lr_img = None
     elif len(lr_keys) == 1:
-        lr_img = samples[lr_keys[0]].to(device).float()
+        lr_img = samples[lr_keys[0]].to(device, non_blocking=True).float()
     else:
-        lr_list = [samples[k].to(device).float() for k in sorted(lr_keys)]
+        lr_list = [samples[k].to(device, non_blocking=True).float() for k in sorted(lr_keys)]
         lr_img = torch.cat(lr_list, dim=1)
 
     # HR mask (LSM)
     lsm_hr = samples.get('lsm_hr', None)
     if lsm_hr is not None:
-        lsm_hr = lsm_hr.to(device).float()
+        lsm_hr = lsm_hr.to(device, non_blocking=True).float()
     
     # Land/sea mask (LSM)
     lsm = samples.get('lsm', None)
     if lsm is not None:
-        lsm = lsm.to(device).float()
+        lsm = lsm.to(device, non_blocking=True).float()
     
     # SDF
     sdf = samples.get('sdf', None)
     if sdf is not None:
-        sdf = sdf.to(device).float()
+        sdf = sdf.to(device, non_blocking=True).float()
 
     # Topography
     topo = samples.get('topo', None)
     if topo is not None:
-        topo = topo.to(device).float()
+        topo = topo.to(device, non_blocking=True).float()
 
     # HR crop points (if available)
     hr_points = samples.get('hr_point', None)

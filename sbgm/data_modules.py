@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from typing import Optional, List, Tuple
 from torch.utils.data import Dataset
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 from scipy.ndimage import distance_transform_edt as distance
 
 from sbgm.special_transforms import Scale, get_transforms_from_stats
@@ -54,10 +55,11 @@ def preprocess_lsm_topography(lsm_path, topo_path, target_size, scale=False, fli
         topo_tensor = (topo_tensor - topo_tensor.min()) / (topo_tensor.max() - topo_tensor.min())
     
     # 4. Upscale the Fields to match target size
-    resize_transform = transforms.Resize(target_size, antialias=True)
-    lsm_tensor = resize_transform(lsm_tensor)
-    topo_tensor = resize_transform(topo_tensor)
-    
+    resize_lsm = transforms.Resize(target_size, interpolation=InterpolationMode.NEAREST, antialias=False) # Nearest for masks to avoid interpolation artifacts (keep values 0 and 1 only)
+    resize_topo = transforms.Resize(target_size, interpolation=InterpolationMode.BILINEAR, antialias=True) # Bilinear for continuous topo data
+    lsm_tensor = resize_lsm(lsm_tensor)
+    topo_tensor = resize_topo(topo_tensor)
+
     return lsm_tensor, topo_tensor
 
 def preprocess_lsm_topography_from_data(lsm_data, topo_data, target_size, scale=True):
@@ -81,10 +83,11 @@ def preprocess_lsm_topography_from_data(lsm_data, topo_data, target_size, scale=
         topo_tensor = (topo_tensor - topo_tensor.min()) / (topo_tensor.max() - topo_tensor.min())
     
     # 3. Upscale the Fields to match target size
-    resize_transform = transforms.Resize(target_size, antialias=True)
-    lsm_tensor = resize_transform(lsm_tensor)
-    topo_tensor = resize_transform(topo_tensor)
-    
+    resize_lsm = transforms.Resize(target_size, interpolation=InterpolationMode.NEAREST, antialias=False) # Nearest for masks to avoid interpolation artifacts (keep values 0 and 1 only)
+    resize_topo = transforms.Resize(target_size, interpolation=InterpolationMode.BILINEAR, antialias=True) # Bilinear for continuous topo data
+    lsm_tensor = resize_lsm(lsm_tensor)
+    topo_tensor = resize_topo(topo_tensor)
+
     return lsm_tensor, topo_tensor
 
 def generate_sdf(mask):
@@ -293,8 +296,15 @@ class ResizeTensor:
         elif x.ndim != 4:
             raise ValueError(f"ResizeTensor: Unsupported shape {x.shape}")
         
-        # interpolate → [1, C, new_H, new_W]
-        x = F.interpolate(x, size=self.size, mode=self.mode, align_corners=self.align_corners)
+        # Align_corners is only used for mode='bilinear' or 'bicubic'
+        if self.mode in ["bilinear", "bicubic"]:
+            # interpolate → [1, C, new_H, new_W]
+            x = F.interpolate(x, size=self.size, mode=self.mode, align_corners=self.align_corners)
+        elif self.mode == "nearest":
+            x = F.interpolate(x, size=self.size, mode=self.mode)
+        else:
+            raise ValueError(f"ResizeTensor: Unsupported mode {self.mode}")
+
         # remove batch dim → [C, new_H, new_W]
         return x.squeeze(0) # → [C, H, W] or [1, H, W] depending on input
 
@@ -647,16 +657,20 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             if self.geo_variables is not None:
                 if self.topo_full_domain is None:
                     raise ValueError("topo_full_domain must be provided if 'topo' is in geo_variables")
+                topo_scale_min = cfg['stationary_conditions']['geographic_conditions']['norm_min'] if (cfg is not None and 'stationary_conditions' in cfg and 'geographic_conditions' in cfg['stationary_conditions']) else -1.0
+                topo_scale_max = cfg['stationary_conditions']['geographic_conditions']['norm_max'] if (cfg is not None and 'stationary_conditions' in cfg and 'geographic_conditions' in cfg['stationary_conditions']) else 1.0
+                logger.info(f"Topography will be scaled to [{topo_scale_min}, {topo_scale_max}] interval.")
+                # Update topo scaling transform to use cfg values if provided
                 self.geo_transform_topo = transforms.Compose([
                     transforms.Lambda(lambda x: np.ascontiguousarray(x)), # To make sure np.flipud is not messing up the tensor
                     SafeToTensor(),
-                    ResizeTensor(self.lr_size_reduced),
-                    Scale(0, 1, self.topo_full_domain.min(), self.topo_full_domain.max())
+                    ResizeTensor(self.lr_size_reduced, mode='bilinear', align_corners=False),
+                    Scale(topo_scale_min, topo_scale_max, self.topo_full_domain.min(), self.topo_full_domain.max())
                 ])
                 self.geo_transform_lsm = transforms.Compose([
                     transforms.Lambda(lambda x: np.ascontiguousarray(x)), # To make sure np.flipud is not messing up the tensor
                     SafeToTensor(),
-                    ResizeTensor(self.lr_size_reduced),
+                    ResizeTensor(self.lr_size_reduced, mode='nearest'), # Nearest for categorical data
                 ])
         else:
             # 1. Set condition transforms
@@ -718,6 +732,12 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             - Loads the stationary geo variables (lsm and topo) from provided full-domain arrays
             - Applies cutouts and the appropriate transforms
         '''
+
+        # If caching is used, check if item is in cache
+        if self.cache_size > 0 and (self.split != 'train' or not self.cutouts):
+            cached = self.cache.get(idx, None)
+            if cached is not None:
+                return cached
 
         # Get the common date corresponding to the index
         date = self.common_dates[idx]
@@ -847,9 +867,11 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             # Separate geo transform, with resize to HR size
             geo_transform_lsm_hr = transforms.Compose([
                 SafeToTensor(),
-                ResizeTensor(self.hr_size_reduced)
+                ResizeTensor(self.hr_size_reduced, mode='nearest')  # Nearest for masks to avoid interpolation artifacts (keep values 0 and 1 only)
             ])
             lsm_hr = geo_transform_lsm_hr(lsm_hr)
+            # Re-binarize after resizing, just in case
+            lsm_hr = (lsm_hr > 0.5).to(lsm_hr.dtype)  # Ensure binary mask (0 and 1)
             sample_dict['lsm_hr'] = lsm_hr
 
 
@@ -882,6 +904,9 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 
                 if geo_data is not None and geo_transform is not None:
                     geo_data = geo_transform(geo_data)
+                    # For lsm, re-binarize after resizing, just in case
+                    if geo == 'lsm':
+                        geo_data = (geo_data > 0.5).to(geo_data.dtype)  # Ensure binary mask (0 and 1)
 
                 sample_dict[geo] = geo_data
 
