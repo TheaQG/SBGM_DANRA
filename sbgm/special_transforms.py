@@ -240,9 +240,10 @@ class PrcpLogTransform(object):
     '''
     Class for log-transforming the precipitation data.
     Data is transformed to log-space and optionally scaled to [0, 1] or to mu=0, sigma=1.
+    eps should not be too small, as it can lead to numerical issues and affect the distribution of low values.
     '''
     def __init__(self,
-                 eps=1e-10,
+                 eps=0.01, # Small epsilon to avoid log(0) - chosen based on physical precipitation considerations
                  scale_type='log_zscore', # 'log_zscore', 'log_01', 'log_minus1_1', 'log', 
                  glob_mean_log=None,
                  glob_std_log=None,
@@ -339,6 +340,22 @@ class PrcpLogTransform(object):
 
         return log_sample
     
+
+# class PrcpLogBackTransform:
+#     def __init__(self, mean_log, std_log, clamp_log_min=None, clamp_log_max=None):
+#         self.mu  = float(mean_log)
+#         self.sig = float(std_log)
+#         self.clamp_log_min = clamp_log_min
+#         self.clamp_log_max = clamp_log_max
+
+#     def __call__(self, z: torch.Tensor) -> torch.Tensor:
+#         logx = z * self.sig + self.mu
+#         if self.clamp_log_min is not None or self.clamp_log_max is not None:
+#             lo = -float("inf") if self.clamp_log_min is None else float(self.clamp_log_min)
+#             hi =  float("inf") if self.clamp_log_max is None else float(self.clamp_log_max)
+#             logx = torch.clamp(logx, lo, hi)
+#         return torch.exp(logx)
+    
 # Back transform the log-transformed data, with min and max values provided
 class PrcpLogBackTransform(object):
     '''
@@ -352,6 +369,8 @@ class PrcpLogBackTransform(object):
                  glob_min_log=None,
                  glob_max_log=None,
                  buffer_frac=0.5,
+                 clamp_log_min=None,
+                 clamp_log_max=None,
                 #  **kwargs # Swallow any unused keys
                  ):
         '''
@@ -365,6 +384,11 @@ class PrcpLogBackTransform(object):
         self.glob_min_log = glob_min_log
         self.glob_max_log = glob_max_log
         self.buffer_frac = buffer_frac
+        self.clamp_log_min = clamp_log_min
+        self.clamp_log_max = clamp_log_max
+
+        self.hi = float("inf") if self.clamp_log_max is None else float(self.clamp_log_max)
+        self.lo = -float("inf") if self.clamp_log_min is None else float(self.clamp_log_min)
 
         if self.glob_min_log is not None and self.glob_max_log is not None:
             # Optionally, expand the log range by a fraction of the range
@@ -409,6 +433,7 @@ class PrcpLogBackTransform(object):
             # Scale the log-transformed data back to the original range
             back_transformed_sample = log_sample * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
             # Inverse log-transform the data
+            back_transformed_sample = torch.clamp(back_transformed_sample, self.lo, self.hi)
             back_transformed_sample = torch.exp(back_transformed_sample)
         elif self.scale_type == 'log_zscore':
             # Back-transform the data to log-space
@@ -418,15 +443,18 @@ class PrcpLogBackTransform(object):
                 raise ValueError("Global mean and standard deviation must not be None for 'log_zscore' back-transform.")
             log_sample = (sample * (sigma + 1e-8)) + mu
             # Inverse log-transform the data
-            back_transformed_sample = torch.exp(log_sample)
+            back_transformed_sample = torch.clamp(log_sample, self.lo, self.hi)
+            back_transformed_sample = torch.exp(back_transformed_sample)
         elif self.scale_type == 'log_minus1_1':
             # Back-transform the data to log-space
             if self.glob_max_log is None or self.glob_min_log is None:
                 raise ValueError("glob_max_log and glob_min_log must not be None for 'log_minus1_1' back-transform.")
             log_sample = 0.5 * (sample + 1) * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
             # Inverse log-transform the data
+            log_sample = torch.clamp(log_sample, self.lo, self.hi)
             back_transformed_sample = torch.exp(log_sample)
         elif self.scale_type == 'log':
+            sample = torch.clamp(sample, self.lo, self.hi)
             back_transformed_sample = torch.exp(sample)
         else:
             raise ValueError("Invalid scale type. Please choose from ['log_01', 'log_zscore', 'log_minus1_1', 'log'].")
@@ -451,7 +479,10 @@ def build_back_transforms(hr_var,
                                 glob_std_log=hr_scaling_params["glob_std_log"],
                                 glob_min_log=hr_scaling_params["glob_min_log"],
                                 glob_max_log=hr_scaling_params["glob_max_log"],
-                                buffer_frac=hr_scaling_params["buffer_frac"])
+                                buffer_frac=hr_scaling_params["buffer_frac"],
+                                clamp_log_min=hr_scaling_params.get("clamp_log_min", None),
+                                clamp_log_max=hr_scaling_params.get("clamp_log_max", None),
+                                )
     elif hr_scaling_method == "zscore":
         inv = ZScoreBackTransform(hr_scaling_params["glob_mean"],
                                   hr_scaling_params["glob_std"])
@@ -475,7 +506,10 @@ def build_back_transforms(hr_var,
                                            glob_std_log=prm["glob_std_log"],
                                            glob_min_log=prm["glob_min_log"],
                                            glob_max_log=prm["glob_max_log"],
-                                           buffer_frac=prm["buffer_frac"])
+                                           buffer_frac=prm["buffer_frac"],
+                                           clamp_log_min=prm.get("clamp_log_min", None),
+                                           clamp_log_max=prm.get("clamp_log_max", None),
+                                           )
         elif mth == "zscore":
             bt[key] = ZScoreBackTransform(prm["glob_mean"], prm["glob_std"])
         elif mth == "01":
@@ -641,7 +675,9 @@ def get_backtransforms_from_stats(variable: str,
                                 glob_std_log=stats["log_std"],
                                 glob_min_log=stats["log_min"],
                                 glob_max_log=stats["log_max"],
-                                buffer_frac=buffer_frac
+                                buffer_frac=buffer_frac,
+                                clamp_log_min=stats["log_min"], # Optionally clamp to the observed log-min and log-max
+                                clamp_log_max=stats["log_max"], # Optionally clamp to the observed log-min and log-max
                                 )
     else:
         raise ValueError(f"Unknown transform type: {transform_type}")

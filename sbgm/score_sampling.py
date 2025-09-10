@@ -180,6 +180,11 @@ def pc_sampler(score_model,
       if cfg.get('classifier_free_guidance', {}).get('enabled', False):
         # If classifier-free guidance is enabled, use the guided score function.
         scale = cfg['classifier_free_guidance'].get('guidance_scale', 2.0)
+        # Clamp to max guidance scale if specified
+        max_scale = cfg['classifier_free_guidance'].get('guidance_scale_max', None)
+        if max_scale is not None and scale > max_scale:
+          scale = max_scale
+
         score = guided_score_fn(score_model,
                                 x,
                                 batch_time_step,
@@ -293,3 +298,10 @@ def ode_sampler(score_model,
   x = torch.tensor(res.y[:, -1], device=device).reshape(shape)
 
   return x
+
+
+
+def edm_sigma_schedule(n_steps, sigma_min=0.002, sigma_max=80, rho=7.0, device='cuda'):
+  i = torch.linspace(0, 1, n_steps, device=device)
+  sigmas = (sigma_max**(1 / rho) + i * (sigma_min**(1 / rho) - sigma_max**(1 / rho)))**rho
+  return sigmas

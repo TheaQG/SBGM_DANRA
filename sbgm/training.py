@@ -7,12 +7,12 @@ import tqdm
 import logging 
 
 import torch.nn as nn
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 
 from torch.cuda.amp import autocast, GradScaler
 
 from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
-from sbgm.utils import *
+from sbgm.utils import extract_samples, plot_samples_and_generated, report_precip_extremes
 from sbgm.data_modules import *
 from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler
@@ -148,6 +148,42 @@ class TrainingPipeline_general:
             os.makedirs(self.path_figures)
             logger.info(f"→ Figures directory created at {self.path_figures}")
 
+        # === Monitoring: extreme precipitation values in generated samples ===
+        monitor_cfg = cfg.get('monitoring', {})
+        monitor_prcp = monitor_cfg.get('extreme_prcp', {})
+        self.extreme_enabled = bool(monitor_prcp.get('enabled', True))
+        self.extreme_threshold_mm = float(monitor_prcp.get('threshold_mm', 500.0)) # Threshold in mm for extreme precipitation
+        self.extreme_every_step = int(monitor_prcp.get('every_steps', 50)) # Monitor every n steps
+        self.extreme_backtransform = bool(monitor_prcp.get('back_transform', True)) # Backtransform samples before checking extremes
+        self.extreme_log_first_n = int(monitor_prcp.get('log_first_n', 5)) # Log the first n extreme values in detail
+        self.extreme_in_validation = bool(monitor_prcp.get('check_in_validation', True)) # Check extreme values in validation set as well
+        self.extreme_clamp_in_gen = bool(monitor_prcp.get('clamp_in_generation', True)) # Clamp extreme values in generated samples to threshold
+
+        try:
+            full_domain_dims_str_hr = f"{self.full_domain_dims_hr[0]}x{self.full_domain_dims_hr[1]}" if self.full_domain_dims_hr is not None else "full_domain"
+            full_domain_dims_str_lr = f"{self.full_domain_dims_lr[0]}x{self.full_domain_dims_lr[1]}" if self.full_domain_dims_lr is not None else "full_domain"
+            crop_region_hr_str = '_'.join(map(str, self.crop_region_hr)) if self.crop_region_hr is not None else "no_crop"
+            crop_region_lr_str = '_'.join(map(str, self.crop_region_lr)) if self.crop_region_lr is not None else "no_crop"
+
+            self.back_transforms_train = build_back_transforms_from_stats(
+                hr_var=self.hr_var,
+                hr_model=cfg['highres']['model'],
+                domain_str_hr=full_domain_dims_str_hr,
+                crop_region_str_hr=crop_region_hr_str,
+                hr_scaling_method=self.hr_scaling_method,
+                hr_buffer_frac=cfg['highres']['buffer_frac'] if 'buffer_frac' in cfg['highres'] else 0.0,
+                lr_vars=self.lr_vars,
+                lr_model=cfg['lowres']['model'],
+                lr_scaling_methods=self.lr_scaling_methods,
+                domain_str_lr=full_domain_dims_str_lr,
+                crop_region_str_lr=crop_region_lr_str,
+                lr_buffer_frac=cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
+                split="all", # For now "all", but NOTE: needs to be "train" in future
+                stats_dir_root=cfg['paths']['stats_load_dir']
+            )
+        except Exception as e:
+            logger.warning(f"[monitor] Could not build back transforms for sentinel; will skip back_transform in training. Error: {e}")
+            self.back_transforms_train = None
 
     def xavier_init_weights(self, m):
         '''
@@ -318,6 +354,50 @@ class TrainingPipeline_general:
                         lsm_cond = lsm,
                         topo_cond = topo,
                         sdf_cond = sdf)
+            
+            # === Extreme-prcp sentinel on ground-truth HR (optional; lightweight) ===
+            if self.extreme_enabled and (idx % self.extreme_every_step == 0):
+                try:
+                    # x is in model space; optionally back-transform to physical mm/day
+                    x_for_check = x.detach()
+                    if self.extreme_backtransform and self.back_transforms_train is not None:
+                        # Expect a callable for HR back-transform under key 'hr'
+                        bt = self.back_transforms_train.get('hr', None)
+                        if bt is not None:
+                            if callable(bt):
+                                x_bt = bt(x_for_check.detach().cpu())
+                            else:
+                                logger.warning(f"[monitor] Back-transform object for HR is not callable and has no 'transform' method.")
+                                x_bt = x_for_check.detach().cpu()
+                        else:
+                            x_bt = x_for_check.detach().cpu()
+                    else:
+                        x_bt = x_for_check.detach().cpu()
+                    # Run helper (accepts torch or numpy)
+                    # Ensure x_bt is a torch.Tensor before passing to report_precip_extremes
+                    if not isinstance(x_bt, torch.Tensor):
+                        x_bt = torch.tensor(x_bt)
+                    check = report_precip_extremes(x_bt=x_bt, name="ground_truth_hr", cap_mm_day=self.extreme_threshold_mm)
+                    # "check" is boolean: True if any extreme values found
+                    has_extreme = check.get('has_extreme', False)
+                    n_extreme = check.get('n_extreme', 0)
+                    extreme_values = check.get('extreme_values', [])
+                    has_below_zero = check.get('has_below_zero', False)
+                    n_below_zero = check.get('n_below_zero', 0)
+                    below_zero_values = check.get('below_zero_values', [])
+
+                    if has_extreme and self.extreme_log_first_n > 0:
+                        # Extract some stats if provided
+                        mx = max(extreme_values) if isinstance(extreme_values, list) else None
+                        cnt = len(extreme_values) if isinstance(extreme_values, list) else None
+                        logger.warning(f"[monitor][train] Extreme precipitation detected at step {idx}:")
+                        logger.warning(f"               max={mx:.1f} mm/day, count={cnt}, threshold={self.extreme_threshold_mm} mm/day")
+                        self.extreme_log_first_n -= 1  # Decrement counter to log fewer next times
+
+                except Exception as e:
+                    logger.warning(f"[monitor] Could not check for extreme precipitation in training step {idx}. Error: {e}")
+
+
             # logger.info(f"▸ Batch loss computed: {batch_loss.item():.4f}")
             # Add anomaly detection for loss
             with torch.autograd.detect_anomaly(True):
@@ -477,6 +557,42 @@ class TrainingPipeline_general:
                                          topo_cond=topo,
                                          sdf_cond=sdf)
 
+
+            # === Extreme-prcp sentinel on ground-truth HR in validation (optional; lightweight) ===
+            if self.extreme_enabled and self.extreme_in_validation and (idx % self.extreme_every_step == 0):
+                try:
+                    # x is in model space; optionally back-transform to physical mm/day
+                    x_for_check = x.detach()
+                    if self.extreme_backtransform and self.back_transforms_train is not None:
+                        # Expect a callable for HR back-transform under key 'hr'
+                        hr_back_transform = self.back_transforms_train.get('hr')
+                        if hr_back_transform is not None:
+                            if callable(hr_back_transform):
+                                x_for_check = hr_back_transform(x_for_check)
+                            else:
+                                logger.warning(f"[monitor] Back-transform object for HR is not callable and has no 'transform' method.")
+                    # Run helper (accepts torch or numpy)
+                    # Ensure x_for_check is a torch.Tensor before passing to report_precip_extremes
+                    if not isinstance(x_for_check, torch.Tensor):
+                        x_for_check = torch.tensor(x_for_check)
+                    check = report_precip_extremes(x_bt=x_for_check.detach().cpu(), name="ground_truth_hr", cap_mm_day=self.extreme_threshold_mm)
+                    # "check" is boolean: True if any extreme values found
+                    has_extreme = check.get('has_extreme', False)
+                    n_extreme = check.get('n_extreme', 0)
+                    extreme_values = check.get('extreme_values', [])
+                    has_below_zero = check.get('has_below_zero', False)
+                    n_below_zero = check.get('n_below_zero', 0)
+                    below_zero_values = check.get('below_zero_values', [])
+                    if has_extreme and self.extreme_log_first_n > 0:
+                        # Extract some stats if provided
+                        mx = max(extreme_values) if isinstance(extreme_values, list) else None
+                        cnt = len(extreme_values) if isinstance(extreme_values, list) else None
+                        logger.warning(f"[monitor][val] Extreme precipitation detected at step {idx}:")
+                        logger.warning(f"               max={mx:.1f} mm/day, count={cnt}, threshold={self.extreme_threshold_mm} mm/day")
+                        self.extreme_log_first_n -= 1  # Decrement counter to log fewer next times
+                except Exception as e:
+                    logger.warning(f"[monitor] Could not check for extreme precipitation in validation step {idx}. Error: {e}")
+
             # Add batch loss to total loss
             loss += batch_loss.item()
             # Update the bar
@@ -578,6 +694,66 @@ class TrainingPipeline_general:
                 topo_cond = topo_gen,
             )
             generated_samples = generated_samples.squeeze().detach().cpu()
+
+
+
+            # === Back-transform generated samples for sentinel (and optional clamp) ===
+            try:
+                # Reuse back-transforms built earlier
+                if isinstance(generated_samples, torch.Tensor):
+                    gen_for_check = generated_samples
+                else:
+                    gen_for_check = torch.as_tensor(generated_samples)
+
+                gen_bt = None
+
+                if cfg.get("monitoring", {}).get("extreme_prcp", {}).get("back_transform", True):
+                    bt = back_transforms.get('hr', None)
+                    if bt is not None:
+                        if callable(bt):
+                            gen_bt = bt(gen_for_check)
+                        else:
+                            logger.warning(f"[monitor] Back-transform object for HR is not callable and has no 'transform' method.")
+                    else:
+                        gen_bt = gen_for_check
+                else:
+                    gen_bt = gen_for_check
+
+                # Run sentinel
+                mon_cfg = cfg.get('monitoring', {}).get('extreme_prcp', {})
+                thr = float(mon_cfg.get('threshold_mm', self.extreme_threshold_mm))
+                # Ensure gen_bt is a torch.Tensor before calling detach
+                if gen_bt is None:
+                    gen_bt = torch.zeros_like(generated_samples)
+                if not isinstance(gen_bt, torch.Tensor):
+                    gen_bt = torch.as_tensor(gen_bt)
+                chk = report_precip_extremes(gen_bt.detach().cpu(), name="generated_hr", cap_mm_day=thr)
+                has_extreme = chk.get('has_extreme', False)
+                n_extreme = chk.get('n_extreme', 0)
+                extreme_values = chk.get('extreme_values', [])
+                has_below_zero = chk.get('has_below_zero', False)
+                n_below_zero = chk.get('n_below_zero', 0)
+                below_zero_values = chk.get('below_zero_values', [])
+
+                if has_extreme:
+                    mx = max(extreme_values) if isinstance(extreme_values, list) else None
+                    cnt = len(extreme_values) if isinstance(extreme_values, list) else None
+                    logger.warning(f"[monitor][gen] Extreme precipitation detected in generated samples:")
+                    logger.warning(f"               max={mx:.1f} mm/day, count={cnt}, threshold={thr} mm/day")
+
+                    # Clamp extreme values in generated samples if configured
+                    if mon_cfg.get('clamp_in_generation', self.extreme_clamp_in_gen):
+                        # Clamp in gen_bt space first
+                        clamp_max = float(mon_cfg.get('clamp_max_mm', thr))
+                        if not isinstance(gen_bt, torch.Tensor):
+                            gen_bt = torch.as_tensor(gen_bt)
+                        gen_bt = torch.clamp(gen_bt, min=0.0, max=clamp_max)
+                        logger.warning(f"[monitor][gen] Clamped generated samples to max {clamp_max} mm/day.")
+                        # Replace array that will be plotted with clamped values
+                        generated_samples = gen_bt
+            except Exception as e:
+                logger.warning(f"[monitor] Could not check for extreme precipitation in generated samples. Error: {e}")
+
 
 
             # Plot generated and original samples

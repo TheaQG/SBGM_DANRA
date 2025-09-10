@@ -1639,6 +1639,37 @@ def load_config(config_path):
 
     return cfg
 
+def report_precip_extremes(x_bt: torch.Tensor, name: str, cap_mm_day: float = 500.0, logger=print):
+    """
+        Reports extremes in a back-transformed precipitation tensor.
+        Values below 0 are counted as negative, values above cap_mm_day are counted as extreme.
+    """
+    flat = x_bt.flatten(1)
+    p999 = torch.quantile(flat, 0.999, dim=1)
+    mx = torch.max(flat, dim=1).values
+    n_ex = 0
+    vals_ex = []
+    n_b0 = 0
+    vals_b0 = []
+    for i, (p, m) in enumerate(zip(p999.tolist(), mx.tolist())):
+        if m > max(5.0 * p, cap_mm_day):
+            logger(f"{name} sample {i} has extreme precipitation: max={m:.1f} mm/day > max(5xp99.9={p:.1f} mm/day)")
+            n_ex += 1
+            vals_ex.append(m)
+        if m < 0:
+            logger(f"{name} sample {i} has negative precipitation: max={m:.1f} mm/day < 0")
+            n_b0 += 1
+            vals_b0.append(m)
+    if n_b0 > 0 and n_ex > 0:
+        return {'has_extreme': True, 'n_extreme': n_ex, 'extreme_values': vals_ex,
+                'has_below_zero': True, 'n_below_zero': n_b0, 'below_zero_values': vals_b0}
+    if n_ex > 0:
+        return {'has_extreme': True, 'n_extreme': n_ex, 'extreme_values': vals_ex}
+    if n_b0 > 0:
+        return {'has_below_zero': True, 'has_below_zero': True, 'n_below_zero': n_b0, 'below_zero_values': vals_b0}
+
+    return {'has_extreme': False}
+
 
 # def load_config(yaml_file):
 #     """

@@ -1,8 +1,8 @@
 # sbgm/config/default_config.yaml
 
 experiment:
-  name: sbgm_full
-  config_name: sbgm_full
+  name: sbgm_debug
+  config_name: sbgm_debug
   # Date of the experiment, taken from the environment variable or set to current date
   date: 14_08_2025 #${env:EXP_DATE} # Date for the experiment, 
 
@@ -24,7 +24,7 @@ highres:
   data_size: [128, 128] # Size of the data to process
   scaling_method: log_zscore # Method for scaling the data
   full_domain_dims: [589, 789]
-  buffer_frac: 0.2
+  buffer_frac: 0.05
   cutout_domains: [170, 350, 340, 520] # [x1, x2, y1, y2], coordinates for cutout
 
 # highres:
@@ -48,7 +48,7 @@ lowres:
   full_domain_dims: [589, 789]
   condition_variables: ["temp", "prcp"] # Variables for conditioning
   scaling_methods: ["zscore", "log_zscore"] # Scaling methods for low-res data
-  buffer_frac: 0.2
+  buffer_frac: 0.05
   data_size: [128, 128] # Size of the low-res data
   resize_factor: 1 # Factor to resize low-res data (used for testing at lower resolutions)
   cutout_domains: [170, 350, 340, 520] # [x1, x2, y1, y2], coordinates for cutout
@@ -171,8 +171,27 @@ training:
 
 classifier_free_guidance:
   enabled: true # Whether to use classifier-free guidance
-  drop_prob: 0.1 # Dropout probability for guidance
-  guidance_scale: 7.0 # Scale for guidance
+  drop_prob: 0.2 # Dropout probability for guidance
+  guidance_scale: 1.0 # Scale for guidance 
+  guidance_scale_max: 3.0 # Maximum scale for guidance
+
+edm:
+  enabled: false # Whether to use EDM (Elucidated Diffusion Models)
+  sigma_min: 0.002 # Minimum sigma for EDM
+  sigma_max: 80 # Maximum sigma for EDM
+  rho: 7.0 # Rho parameter for EDM
+
+monitoring:
+  extreme_prcp:
+    enabled: true # Whether to monitor extreme precipitation
+    every_steps: 50 # Frequency of monitoring extreme precipitation
+    back_transform: true # Whether to back transform extreme precipitation values
+    log_first_n: 5 # Log the first n extreme precipitation values
+    check_in_validation: true # Whether to check extreme precipitation in validation set
+    threshold_mm: 500.0 # Threshold for extreme precipitation
+    clamp_in_generation: true # Whether to clamp values during generation
+    clamp_max_mm: 400.0 # Maximum value to clamp to during generation
+
 
 evaluation:
   n_gen_samples: 1 # Number of samples to generate

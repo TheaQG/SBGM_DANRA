@@ -465,7 +465,7 @@ class DecoderBlock(nn.Module):
         if self.use_resize_conv:
             # resize -> conv_up keeps channels the same
             self.upsample = nn.Upsample(scale_factor = self.upsample_scale, mode="bilinear", align_corners=False)
-            self.conv_up = nn.Conv2d(self.input_channels, self.input_channels, kernel_size=3, padding=1, bias=False)
+            self.conv_up = nn.Conv2d(self.input_channels, self.input_channels, kernel_size=3, padding=1, bias=True)
             mid_ch = self.input_channels
         else:
             # deconv path (kept for ablation/toggling purposes)
@@ -581,8 +581,8 @@ class DecoderBlock(nn.Module):
         # === Upsample path (resize-congv or deconv) ===
         if getattr(self, "use_resize_conv", True):
             x = self.upsample(fmap) # bilinear upsample
-            x = n1(x)               # norm on mid_ch
             x = self.conv_up(x)     # 3x3 conv
+            x = n1(x)               # norm on mid_ch
         else:
             x = self.transpose(fmap) # ConvTranspose2d upsample (OLD, kept for ablation/toggling purposes)
             x = n1(x)
@@ -880,7 +880,7 @@ class ScoreNet(nn.Module):
 
 def marginal_prob_std(t: torch.Tensor,
                       sigma: float,
-                      eps: float = 1e-6,
+                      eps: float = 1e-5,
                       ) -> torch.Tensor:
     """
         Safer marginal probability standard deviation function that ensures numerical stability.
@@ -935,7 +935,8 @@ diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
 
 def loss_fn(model,
             x,
-            marginal_prob_std, eps=1e-5,
+            marginal_prob_std,
+            t_eps=1e-3, # to avoid dead gradients near t=0
             device = None,
             y = None,
             cond_img = None,
@@ -953,7 +954,7 @@ def loss_fn(model,
             - eps: A small constant to avoid division by zero
     '''
     # Sample a random time step for each sample in the mini-batch
-    random_t = torch.rand(x.shape[0], device=x.device) * (1. - eps) + eps
+    random_t = torch.rand(x.shape[0], device=x.device) * (1. - t_eps) + t_eps
     # Sample a random noise vector for each sample in the mini-batch
     z = torch.randn_like(x)
     # Compute the std of the perturbation kernel at the random time step
