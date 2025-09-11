@@ -13,7 +13,8 @@ from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
-from sbgm.score_unet import ScoreNet, Encoder, Decoder, marginal_prob_std_fn
+from sbgm.score_unet import ScoreNet, Encoder, Decoder, marginal_prob_std_fn, EDMPrecondUNet, EDMLoss
+from sbgm.score_unet import loss_fn as original_loss_fn
 from sbgm.score_sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
 from sbgm.utils import build_data_path, get_units, get_cmaps, get_model_string
 from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
@@ -613,6 +614,8 @@ def get_model(cfg):
     logger.info(f"Input channels: {input_channels}")
     logger.info(f"Output channels: {output_channels}")
 
+    device = get_device()
+
     # === Model architecture knobs (decoder upsampling/norm/activation) ===
     model_cfg = cfg.get('model', {})
     use_resize_conv = bool(model_cfg.get('use_resize_conv', True))
@@ -658,14 +661,33 @@ def get_model(cfg):
                       gn_groups=decoder_gn_groups,
                       activation=decoder_activation,
                       )
+    
+    edm_cfg = cfg.get('edm', {})
+    edm_enabled = bool(edm_cfg.get('enabled', False))
 
-    score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
-                           encoder=encoder,
-                           decoder=decoder,
-                           debug_pre_sigma_div=False
-                           )
-    
-    
+    if edm_enabled:
+        sigma_data = float(edm_cfg.get('sigma_data', 1.0))
+        predict_residual = bool(edm_cfg.get('predict_residual', False)) # NOTE: Start with False, when EDM is stable, try True
+        score_model = EDMPrecondUNet(encoder=encoder,
+                                     decoder=decoder,
+                                     sigma_data=sigma_data,
+                                     predict_residual=predict_residual).to(device)
+        
+        loss_fn = EDMLoss(P_mean=edm_cfg.get('P_mean', -1.2),
+                          P_std=edm_cfg.get('P_std', 1.2)
+                          )
+    else:
+        score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
+                            encoder=encoder,
+                            decoder=decoder,
+                            debug_pre_sigma_div=False
+                            )
+
+        loss_fn = original_loss_fn(score_model,)
+
+    if hasattr(score_model, "debug_pre_sigma_div"):
+        score_model.debug_pre_sigma_div = False
+
     return score_model, checkpoint_dir, checkpoint_name
 
 

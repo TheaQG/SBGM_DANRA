@@ -21,6 +21,123 @@ import functools
 logger = logging.getLogger(__name__)
 
 
+class SigmaEmbed(nn.Module):
+    """
+        \sigma-embedding -> R^time_dim for FiLM like conditioning.
+    """
+    def __init__(self, time_dim: int):
+        super().__init__()
+        self.time_dim = time_dim
+        self.net = nn.Sequential(
+            nn.Linear(1, time_dim),
+            nn.SiLU(),
+            nn.Linear(time_dim, time_dim)
+        )
+    def forward(self, c_noise: torch.Tensor) -> torch.Tensor:
+        # c_noise: [B, 1]
+        return self.net(c_noise)
+
+class EDMPrecondUNet(nn.Module):
+    """
+        Wraps Encoder/Decoder with EDM preconditioning.
+        Predicts x0 directly (no division by sigma) and combines skip/out as in Karras et al. (2022).
+    """
+    def __init__(self,
+                 encoder: nn.Module,
+                 decoder: nn.Module,
+                 sigma_data: float = 1.0,
+                 predict_residual: bool = True,
+                 ):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.sigma_data = sigma_data
+        self.predict_residual = predict_residual
+
+        # time_embedding size is already defined in encoder
+        time_dim = getattr(encoder, "time_embedding", 128)
+        self.sigma_emb = SigmaEmbed(time_dim)
+
+    def _precond(self, sigma: torch.Tensor):
+        """ Compute preconditioning coefficients. (as in Karras et al. 2022) """
+        # sigma: [B]
+        s2 = sigma**2
+        sd2 = self.sigma_data**2
+        c_in    = 1.0 / torch.sqrt(s2 + sd2)
+        c_skip  = sd2 / (s2 + sd2)
+        c_out   = sigma * sd2 / torch.sqrt(s2 + sd2) 
+        # c_noise = 0.25 * log(sigma^2) = 0.25 * 2 * log(sigma)
+        c_noise = (sigma.log() * 0.5).unsqueeze(-1)  # [B, 1]   
+        return c_in, c_skip, c_out, c_noise
+    
+    def forward(self,
+                x_t: torch.Tensor,
+                sigma: torch.Tensor,
+                *,
+                cond_img: torch.Tensor | None = None,
+                lsm_cond: torch.Tensor | None = None,
+                topo_cond: torch.Tensor | None = None,
+                y: torch.Tensor | None = None,
+                lr_ups: torch.Tensor | None = None # <- needed if predict_residual = True
+                ) -> torch.Tensor:
+        B = x_t.shape[0]
+        c_in, c_skip, c_out, c_noise = self._precond(sigma)
+
+        # Scale input 
+        x_in = c_in.view(B, 1, 1, 1) * x_t  # [B, C, H, W]
+
+        # Build sigma-embedding -> time-dim vector that blocks expect (sigma instead of time)
+        t_emb = self.sigma_emb(c_noise)  # [B, time_dim]    
+
+        # Reuse encoder/decoder, they already take t-emb
+        enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
+
+        out = self.decoder(*enc_fmaps, t_emb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+        if self.predict_residual:
+            if lr_ups is None:
+                raise ValueError("lr_ups must be provided when predict_residual is True.")
+            x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out # As in Karras et al. (2022)
+        else:
+            x0_hat = c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out
+    
+        return x0_hat
+    
+
+class EDMLoss(nn.Module):
+    """
+        Karras EDM loss (simple form): sample sigma from ~ logN(P_mean, P_std),
+        perturb x0 -> x_t, predict x0_hat with preconditioning, MSE on x0
+    """
+    def __init__(self, P_mean: float = 0.0, P_std: float = 1.2):
+        super().__init__()
+        self.P_mean = P_mean
+        self.P_std = P_std
+        
+    def sample_sigma(self, B: int, device: torch.device):
+        return (torch.randn(B, device=device) * self.P_std + self.P_mean).exp()
+    
+    def forward(self,
+                edm_model: EDMPrecondUNet,
+                x0: torch.Tensor,
+                *,
+                cond_img: torch.Tensor | None = None,
+                lsm_cond: torch.Tensor | None = None,
+                topo_cond: torch.Tensor | None = None,
+                y: torch.Tensor | None = None,
+                lr_ups: torch.Tensor | None = None
+                ):
+        B = x0.shape[0]
+        device = x0.device
+        sigma = self.sample_sigma(B, device)  # [B]
+        n = torch.randn_like(x0)  # [B, C, H, W]
+        x_t = x0 + sigma.view(B, 1, 1, 1) * n  # [B, C, H, W]
+        x0_hat = edm_model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
+
+        return ((x0_hat - x0)**2).mean()
+
+
+
+
 class SinusoidalEmbedding(nn.Module):
     '''
         Gaussian random features for encoding the time steps.
@@ -297,10 +414,15 @@ class Encoder(ResNet):
         if y is not None:
             y = y.to(dev)
         
-        # Embed the time positions
-        t = t.unsqueeze(-1).type(torch.float)
-        # t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
-        t = self.sinusoidal_embedding(t.view(-1)) # Use the sinusoidal embedding instead of the positional encoding (to align with Decoder)
+
+        # For time-embedding: allow pre-embedded t (for EDM compatibility):
+        if t.dim() == 2 and t.shape[-1] == self.time_embedding:
+            t = t.to(dev)
+        else:
+            # Embed the time positions
+            t = t.unsqueeze(-1).type(torch.float)
+            # t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
+            t = self.sinusoidal_embedding(t.view(-1)) # Use the sinusoidal embedding instead of the positional encoding (to align with Decoder)
     
         #t = self.sinusoidal_embedding(t)
         # Add the label embedding to the time embedding
@@ -983,5 +1105,4 @@ def loss_fn(model,
     # Compute the loss
     loss = torch.mean(torch.sum(sdf_weights * (score * std[:, None, None, None] + z)**2, dim=(1, 2, 3)))
     return loss
-
 
