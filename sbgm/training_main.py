@@ -10,7 +10,7 @@ from sbgm.training_utils import get_units, get_cmaps, get_model_string, get_mode
 from sbgm.utils import plot_sample
 from sbgm.training_utils import setup_logger
 from sbgm.training import TrainingPipeline_general
-from sbgm.losses import marginal_prob_std_fn, loss_fn, diffusion_coeff_fn
+from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
 
 def train_main(cfg):
     """

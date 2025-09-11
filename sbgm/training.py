@@ -15,7 +15,7 @@ from sbgm.special_transforms import build_back_transforms, build_back_transforms
 from sbgm.utils import extract_samples, plot_samples_and_generated, report_precip_extremes
 from sbgm.data_modules import *
 # from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
-from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler
+from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
 from sbgm.training_utils import get_model_string, get_cmaps, get_units, get_loss_fn
 from sbgm.monitoring import edm_cosine_metric
 
@@ -188,6 +188,31 @@ class TrainingPipeline_general:
             logger.warning(f"[monitor] Could not build back transforms for sentinel; will skip back_transform in training. Error: {e}")
             self.back_transforms_train = None
 
+
+        # === EDM flags (used for residual baseline handling) ===
+        self.edm_enabled = bool((cfg.get('edm', {}).get('enabled', False)))
+        self.edm_predict_residual = bool((cfg.get('edm', {}).get('predict_residual', False)))
+
+    def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
+        """
+            Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
+            Returns [B, 1, H, W] or raises if unavailable when predict_residual is True.
+        """
+        if cond_images is None:
+            raise ValueError("cond_images is None, cannot extract LR baseline for residual prediction.")
+        
+        cond_vars = self.cfg['lowres']['condition_variables']
+        target_var = self.hr_var
+        if target_var not in cond_vars:
+            raise ValueError(f"Target variable '{target_var}' not found in condition variables {cond_vars}, cannot extract LR baseline for residual prediction.")
+        
+        idx = cond_vars.index(target_var)
+        if cond_images.shape[1] <= idx:
+            raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx} for variable '{target_var}'.")
+        lr_ups = cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
+        return lr_ups
+
+
     def xavier_init_weights(self, m):
         '''
             Xavier weight initialization.
@@ -324,6 +349,11 @@ class TrainingPipeline_general:
 
             # Zero gradients
             self.optimizer.zero_grad()
+
+            # === EDM: build lr_ups_baseline if needed ===
+            lr_ups_baseline = None
+            if self.edm_enabled and self.edm_predict_residual:
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
             
             # # Use mixed precision training if needed
             # if self.scaler:
@@ -355,22 +385,24 @@ class TrainingPipeline_general:
                     # Pass the score model and samples+conditions to the loss_fn
                     batch_loss = self.loss_fn(self.model,
                                                x,
-                                               self.marginal_prob_std_fn,
                                                y=seasons,
                                                cond_img=cond_images,
                                                lsm_cond=lsm,
                                                topo_cond=topo,
-                                               sdf_cond=sdf)
+                                               sdf_cond=sdf,
+                                               lr_ups=lr_ups_baseline
+                                               )
             else:
                 # No mixed precision, just pass the score model and samples+conditions to the loss_fn
                 batch_loss = self.loss_fn(self.model,
                                            x,
-                                           self.marginal_prob_std_fn,
                                            y=seasons,
                                            cond_img=cond_images,
                                            lsm_cond=lsm,
                                            topo_cond=topo,
-                                           sdf_cond=sdf)
+                                           sdf_cond=sdf,
+                                           lr_ups=lr_ups_baseline
+                                       )
 
 
             # === Cosine monitoring (lightweight) ===
@@ -380,7 +412,7 @@ class TrainingPipeline_general:
             edm_on = self.cfg.get('edm', {}).get('enabled', False)
 
             if edm_on and log_every > 0 and (global_step % log_every == 0):
-                cos = edm_cosine_metric(self.model, x, self.marginal_prob_std_fn, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo)
+                cos = edm_cosine_metric(self.loss_fn, self.model, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo)
                 if cos is not None:
                     pbar.set_postfix(loss=loss_sum / (idx + 1), edm_cosine=cos)
                     if verbose:
@@ -506,8 +538,11 @@ class TrainingPipeline_general:
             # Append validation loss to list
             val_losses.append(val_loss)
 
+            # Capture improvement before updating best loss
+            improved = val_loss < best_loss
+
             # If validation loss is lower than best loss, save the model
-            if val_loss < best_loss:
+            if improved:
                 best_loss = val_loss
                 # Save the model
                 self.save_model(dirname=self.checkpoint_dir, filename=self.checkpoint_name)
@@ -533,9 +568,21 @@ class TrainingPipeline_general:
 
             # Generate and save samples, if create_figs is True
             if cfg['visualization']['create_figs'] and cfg['data_handling']['n_gen_samples'] > 0:
-                self.generate_and_plot_samples(gen_dataloader,
-                                               cfg=cfg,
-                                               epoch=epoch)
+                # Only generate and plot if loss improved or every n epochs if configured
+                gen_every_n_epochs = int(cfg['visualization'].get('gen_and_plot_every_n_epochs', 1) or 1)
+
+                if gen_every_n_epochs < 1:
+                    gen_every_n_epochs = 1  # Ensure at least every 
+                    
+                on_schedule = (epoch % gen_every_n_epochs == 0)
+                if improved or on_schedule:
+                    if on_schedule:
+                        logger.info(f"→ Generating and plotting samples at epoch {epoch} (every {gen_every_n_epochs} epochs)...")
+                    if improved:
+                        logger.info(f"→ Generating and plotting samples at epoch {epoch} (new best model)...")
+                    self.generate_and_plot_samples(gen_dataloader,
+                                                   cfg=cfg,
+                                                   epoch=epoch)
 
 
         return train_loss, val_loss
@@ -573,7 +620,6 @@ class TrainingPipeline_general:
                         # Pass the score model and samples+conditions to the loss_fn
                         batch_loss = self.loss_fn(self.model,
                                              x,
-                                             self.marginal_prob_std_fn,
                                              y=seasons,
                                              cond_img=cond_images,
                                              lsm_cond=lsm,
@@ -583,7 +629,6 @@ class TrainingPipeline_general:
                     # No mixed precision, just pass the score model and samples+conditions to the loss_fn
                     batch_loss = self.loss_fn(self.model,
                                          x,
-                                         self.marginal_prob_std_fn,
                                          y=seasons,
                                          cond_img=cond_images,
                                          lsm_cond=lsm,
@@ -654,14 +699,23 @@ class TrainingPipeline_general:
         self.model.eval()
 
         # Set up sampler 
-        if cfg['sampler']['sampler_type'] == 'pc_sampler':
-            sampler = pc_sampler 
-        elif cfg['sampler']['sampler_type'] == 'Euler_Maruyama_sampler':
-            sampler = Euler_Maruyama_sampler
-        elif cfg['sampler']['sampler_type'] == 'ode_sampler':
-            sampler = ode_sampler
+        edm_on = bool((cfg.get('edm', {}).get('enabled', False)))
+        if edm_on:
+            sampler_edm = edm_sampler
+            sampler = None
+            logger.info("→ Sampling using EDM sampler...")
+            
         else:
-            raise ValueError(f"Sampler type {cfg['sampler']['sampler_type']} not recognized. Please choose from 'pc_sampler', 'Euler_Maruyama_sampler', or 'ode_sampler'.")
+            sampler_edm = None
+            if cfg['sampler']['sampler_type'] == 'pc_sampler':
+                sampler = pc_sampler 
+            elif cfg['sampler']['sampler_type'] == 'Euler_Maruyama_sampler':
+                sampler = Euler_Maruyama_sampler
+            elif cfg['sampler']['sampler_type'] == 'ode_sampler':
+                sampler = ode_sampler
+            else:
+                raise ValueError(f"Sampler type {cfg['sampler']['sampler_type']} not recognized. Please choose from 'pc_sampler', 'Euler_Maruyama_sampler', or 'ode_sampler'.")
+        
         
         # # Set up back transforms for plotting'
         # back_trans = build_back_transforms(
@@ -706,6 +760,11 @@ class TrainingPipeline_general:
             # Extract samples
             x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
 
+            # Setup lr_ups_baseline if needed
+            lr_ups_baseline = None
+            if edm_on and self.edm_predict_residual:
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images_gen)  # [B, 1, H, W]
+
             # Check shapes of x_gen, cond_images_gen, lsm_gen, topo_gen
             # logger.info(f"\nShape of x_gen: {x_gen.shape}")
             # logger.info(f"Shape of seasons_gen: {seasons_gen.shape}")
@@ -713,19 +772,43 @@ class TrainingPipeline_general:
             # logger.info(f"Shape of lsm_gen: {lsm_gen.shape if lsm_gen is not None else 'None'}")
             # logger.info(f"Shape of topo_gen: {topo_gen.shape if topo_gen is not None else 'None'}")
 
-            generated_samples = sampler(
-                score_model = self.model,
-                marginal_prob_std = self.marginal_prob_std_fn,
-                diffusion_coeff = self.diffusion_coeff_fn,
-                batch_size= cfg['data_handling']['n_gen_samples'],
-                num_steps = cfg['sampler']['n_timesteps'],
-                device = self.device,
-                img_size = cfg['highres']['data_size'][0],
-                y = seasons_gen,
-                cond_img= cond_images_gen,
-                lsm_cond = lsm_gen,
-                topo_cond = topo_gen,
-            )
+            if edm_on and sampler_edm is not None:
+                edm_cfg = cfg.get('edm', {}) or {}
+                generated_samples = sampler_edm(score_model=self.model,
+                                            batch_size=cfg['data_handling']['n_gen_samples'],
+                                            num_steps=edm_cfg.get('sampling_steps', 18),
+                                            device=self.device,
+                                            img_size=cfg['highres']['data_size'][0],
+                                            y=seasons_gen,
+                                            cond_img=cond_images_gen,
+                                            lsm_cond=lsm_gen,
+                                            topo_cond=topo_gen,
+                                            sigma_min=float(edm_cfg.get('sigma_min', 0.002)),
+                                            sigma_max=float(edm_cfg.get('sigma_max', 80)),
+                                            rho=float(edm_cfg.get('rho', 7.0)),
+                                            S_churn=float(edm_cfg.get('S_churn', 0.0)),
+                                            S_min=float(edm_cfg.get('S_min', 0.0)),
+                                            S_max=float(edm_cfg.get('S_max', float('inf'))),
+                                            S_noise=float(edm_cfg.get('S_noise', 1.0)),
+                                            lr_ups=lr_ups_baseline
+                )
+            elif sampler is not None:
+                generated_samples = sampler(
+                    score_model=self.model,
+                    marginal_prob_std=self.marginal_prob_std_fn,
+                    diffusion_coeff=self.diffusion_coeff_fn,
+                    batch_size=cfg['data_handling']['n_gen_samples'],
+                    num_steps=cfg['sampler']['n_timesteps'],
+                    device=self.device,
+                    img_size=cfg['highres']['data_size'][0],
+                    y=seasons_gen,
+                    cond_img=cond_images_gen,
+                    lsm_cond=lsm_gen,
+                    topo_cond=topo_gen,
+                )
+            else:
+                raise ValueError("No valid sampler found. Please check the configuration.")
+
             generated_samples = generated_samples.squeeze().detach().cpu()
 
 

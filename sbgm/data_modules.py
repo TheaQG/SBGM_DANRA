@@ -353,22 +353,15 @@ def _extract_2d_from_zarr_entry(zgroup: zarr.Group, file_key: str, var_name: str
     for k in candidates:
         if k in entry:
             arr = entry[k][()] # Load the array
-            if not isinstance(arr, np.ndarray):
-                arr = np.asarray(arr)
             return _first_hw_slice(arr) # Return as (H, W)
         
     # Fallback: try any array-like members under the entry
-    # Only try to access keys if entry is a zarr.Group
-    if isinstance(entry, zarr.Group):
-        for k in entry.keys():
-            try:
-                arr = entry[k][()]
-                if isinstance(arr, np.ndarray):
-                    return _first_hw_slice(arr)
-                else:
-                    continue  # Skip non-numpy array types
-            except Exception:
-                continue
+    for k in entry.keys():
+        try:
+            arr = entry[k][()]
+            return _first_hw_slice(arr)
+        except Exception:
+            continue
     raise KeyError(f"Could not find a suitable data array in zarr entry '{file_key}' for variable '{var_name}'. Tried keys: {candidates} and all members.")
 
 # all_keys = list_all_keys(self.lr_cond_zarr_dict[cond])
@@ -740,7 +733,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             - Applies cutouts and the appropriate transforms
         '''
 
-        # If caching is used, check if item is in cache
         if self.cache_size > 0 and (self.split != 'train' or not self.cutouts):
             cached = self.cache.get(idx, None)
             if cached is not None:

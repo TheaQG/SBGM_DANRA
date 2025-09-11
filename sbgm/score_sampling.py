@@ -1,6 +1,7 @@
 import torch
 import tqdm
 import logging
+import math
 
 import numpy as np
 
@@ -305,3 +306,114 @@ def edm_sigma_schedule(n_steps, sigma_min=0.002, sigma_max=80, rho=7.0, device='
   i = torch.linspace(0, 1, n_steps, device=device)
   sigmas = (sigma_max**(1 / rho) + i * (sigma_min**(1 / rho) - sigma_max**(1 / rho)))**rho
   return sigmas
+
+# === EDM sampler (Karras et al., 2022) ===
+@torch.no_grad()
+def edm_sampler(score_model,
+                *,
+                batch_size: int,
+                num_steps: int,
+                device: torch.device | str,
+                img_size: int,
+                y=None,
+                cond_img=None,
+                lsm_cond=None,
+                topo_cond=None,
+                # EDM schedule defaults (can be overridden via cfg)
+                sigma_min: float = 0.002,
+                sigma_max: float = 80,
+                rho: float = 7.0,
+                S_churn: float = 0.0,
+                S_min: float = 0.0,
+                S_max: float = float('inf'),
+                S_noise: float = 1.0,
+                lr_ups: torch.Tensor | None = None,
+                ):
+  """
+      Karras EDM sampler with Heun updates.
+      Expects score_model(x_t, sigma, cond_img=..., lsm_cond=..., topo_cond=..., y=..., lr_ups=...) -> x0_hat.
+      Returns a tensor shaped like the model outputs (i.e. a sample batch, shape (B, C, H, W)).
+  """
+  device = torch.device(device)
+
+  # Build Karras sigme (noise) schedule (decreasing)
+  def get_sigmas_K(n_steps, s_min, s_max, rho_):
+    i = torch.arange(n_steps, device=device, dtype=torch.float32) # 0, ..., n_steps-1
+    ramp = i / max(n_steps - 1, 1) # in [0, 1]
+    min_inv = s_min ** (1 / rho_) # Karras min
+    max_inv = s_max ** (1 / rho_) # Karras max
+    sig = (max_inv + ramp * (min_inv - max_inv)) ** rho_ # Karras sigma
+    return sig
+  
+  sigmas = get_sigmas_K(num_steps, float(sigma_min), float(sigma_max), float(rho))
+  sigmas = torch.cat([sigmas, sigmas.new_zeros(1)]) # add sigma=0 for final step
+
+  # Infer spatial shape
+  shape_hint = None
+  for tns in (cond_img, lsm_cond, topo_cond):
+      if tns is not None:
+          shape_hint = tns
+          break
+  if shape_hint is not None:
+      _, _, H, W = shape_hint.shape
+  else:
+      H = W = int(img_size)
+
+  # Infer channels from model if possible
+  C_out = getattr(getattr(score_model, 'decoder', None), 'out_channels', None)
+  if C_out is None:
+    # Fallback: assume single-channel output
+    C_out = 1
+
+  B = int(batch_size)
+  # Initial sample: Gaussian noise with sigma_max stddev
+  x = torch.randn(B, C_out, H, W, device=device) * float(sigma_max)
+
+  if lr_ups is not None and (lr_ups.shape[0] != x.shape[0] or lr_ups.shape[2:] != x.shape[2:]):
+      raise ValueError(f"lr_ups shape {lr_ups.shape} does not match the expected batch size {x.shape[0]} and spatial shape {x.shape[2:]}")
+
+  for i in range(num_steps):
+    sigma = sigmas[i]
+    sigma_next = sigmas[i + 1]
+
+    x_in = x
+    # Churn (stochasticity injection at high sigmas)
+    if (S_min <= sigma <= S_max) and (S_churn > 0):
+      gamma = min(S_churn / num_steps, math.sqrt(2.0) - 1.0) # Stochasticity factor
+      eps = torch.randn_like(x) * S_noise # Noise scaled by S_noise
+      sigma_hat = sigma * (1 + gamma) # Increased sigma with stochasticity injection
+      x_in = x + eps * torch.sqrt(sigma_hat**2 - sigma**2) # Perturb x_in to x_hat
+    else:
+      sigma_hat = sigma # No stochasticity injection
+
+    sigma_hat_vec = torch.full((B,), float(sigma_hat), device=device, dtype=x.dtype) 
+    denoised = score_model(x_in,
+                           sigma_hat_vec,
+                           cond_img=cond_img,
+                           lsm_cond=lsm_cond,
+                           topo_cond=topo_cond,
+                           y=y,
+                           lr_ups=lr_ups)
+    
+    d = (x_in - denoised) / sigma_hat # Score-based derivative
+
+    # Euler step 
+    x_euler = x_in + (sigma_next - sigma_hat) * d
+    if i == num_steps - 1:
+      x = x_euler
+      break
+
+    # Heun correction (2nd order Runge-Kutta)
+    sigma_next_vec = torch.full((B,), float(sigma_next), device=device, dtype=x.dtype)
+    denoised_next = score_model(x_euler,
+                                sigma_next_vec,
+                                cond_img=cond_img,
+                                lsm_cond=lsm_cond,
+                                topo_cond=topo_cond,
+                                y=y,
+                                lr_ups=lr_ups)
+    d_next = (x_euler - denoised_next) / sigma_next
+
+    x = x_in + (sigma_next - sigma_hat) * 0.5 * (d + d_next)
+  
+  return x

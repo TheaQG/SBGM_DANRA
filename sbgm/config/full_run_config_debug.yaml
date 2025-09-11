@@ -1,8 +1,8 @@
 # sbgm/config/default_config.yaml
 
 experiment:
-  name: sbgm_debug_oldConv_eps
-  config_name: sbgm_debug_oldConv_eps
+  name: sbgm_debug_EDMLoss
+  config_name: sbgm_debug_EDMLoss
   # Date of the experiment, taken from the environment variable or set to current date
   date: 14_08_2025 #${env:EXP_DATE} # Date for the experiment, 
 
@@ -113,6 +113,7 @@ stationary_conditions:
 visualization:
   transform_back_bf_plot: true # Whether to transform back before plotting
   create_figs: true # Whether to create figures during visualization
+  gen_and_plot_every_n_epochs: 1 # Frequency (in epochs) to generate samples during training
   save_figs: true # Whether to save figures 
   plot_losses: true # Whether to plot losses
   plot_initial_sample: true # Whether to plot first samples
@@ -135,7 +136,7 @@ training:
   device: cuda # Device to use for training (e.g., 'cuda' or 'cpu')
   use_mixed_precision: false # Whether to use mixed precision training
   verbose: true # Whether to print verbose output during training
-  batch_size: 16 # Batch size for training
+  batch_size: 5 # Batch size for training
   learning_rate: 0.0005 # Learning rate for training
   min_lr: 0.000001 # Minimum learning rate
   lr_scheduler: ReduceLROnPlateau # Learning rate scheduler to use
@@ -156,10 +157,9 @@ training:
   load_ema: false # Whether to load EMA weights
   ema_decay: 0.9999 # Decay rate for EMA
   weight_decay: 0.000001 # Weight decay for regularization
-  epochs: 1500 # Number of epochs for training
+  epochs: 5 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
   sdf_weighted_loss: true # Whether to use SDF weighted loss
-
   optimizer: adam # Optimizer to use for training
   load_checkpoint: false # Whether to load a checkpoint
   early_stopping: true # Whether to use early stopping
@@ -179,7 +179,7 @@ classifier_free_guidance:
   guidance_scale_max: 3.0 # Maximum scale for guidance
 
 edm:
-  enabled: false # Whether to use EDM (Elucidated Diffusion Models)
+  enabled: true # Whether to use EDM (Elucidated Diffusion Models)
   P_mean: -1.2 # Mean P for EDM
   P_std: 1.2 # Standard deviation of P for EDM
   sigma_data: 1.0 # Data is assumed N(0,1) after normalization
@@ -190,6 +190,8 @@ edm:
   S_min: 0.0 # Minimum S for EDM
   S_max: 1e9 # Maximum S for EDM
   S_noise: 1.0 # Noise parameter for EDM
+  sampling_steps: 18 # Number of sampling steps for EDM
+  predict_residual: true # Whether to predict residual in EDM
 
 ve_dsm: # Default parameters for VE-DSM loss
   t_eps: 1e-3 # Small epsilon for VE-DSM

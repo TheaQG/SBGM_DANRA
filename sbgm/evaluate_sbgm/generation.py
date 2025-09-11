@@ -17,7 +17,7 @@ import logging
 import numpy as np
 from matplotlib import pyplot as plt
 
-from sbgm.score_sampling import pc_sampler
+from sbgm.score_sampling import pc_sampler, edm_sampler
 from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
 from sbgm.utils import plot_samples_and_generated, extract_samples, get_model_string, get_first_sample_dict
 
@@ -44,7 +44,7 @@ class SampleGenerator:
         self.dataloader = dataloader
         self.back_transforms = back_transforms
         self.device = device
-        self.model.eval
+        self.model.eval()
 
         self.model_name_str = get_model_string(cfg)
         self.output_dir = os.path.join(cfg.paths.sample_dir, 'generation', self.model_name_str)
@@ -54,23 +54,56 @@ class SampleGenerator:
         os.makedirs(self.sample_path, exist_ok=True)
 
     def _run_sampler(self, batch_size, y, cond_img, lsm_cond, topo_cond):
-        gen_sample = pc_sampler(
-            score_model=self.model,
-            marginal_prob_std=marginal_prob_std_fn,
-            diffusion_coeff=diffusion_coeff_fn,
-            batch_size=batch_size,
-            num_steps=self.cfg.sampler.n_timesteps,
-            device=self.device,
-            img_size=self.cfg.highres.data_size[0],
-            y=y,
-            cond_img=cond_img,
-            lsm_cond=lsm_cond,
-            topo_cond=topo_cond,
-            )
-        # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
-        gen_sample = gen_sample.squeeze().detach().cpu()
-        # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
+        """
+            Run the correct sampler depending on whether EDM is enabled.
+        """
+        use_edm = bool(getattr(self.cfg, 'edm', {}).get('enabled', False))
 
+        if use_edm:
+            edm_cfg = getattr(self.cfg, 'edm', {})
+            logger.info("[Sampler] Using EDM sampler...")
+            gen_sample = edm_sampler(score_model=self.model,
+                                     batch_size=batch_size,
+                                     num_steps=self.cfg.sampler.n_timesteps,
+                                     device=self.device,
+                                     img_size=self.cfg.highres.data_size[0],
+                                     # conditioning
+                                     y=y,
+                                     cond_img=cond_img,
+                                     lsm_cond=lsm_cond,
+                                     topo_cond=topo_cond,
+                                     # EDM schedule and churn params w safe defaults
+                                     sigma_min=float(edm_cfg.get('sigma_min', 0.002)),
+                                     sigma_max=float(edm_cfg.get('sigma_max', 80.0)),
+                                     rho=float(edm_cfg.get('rho', 7.0)),
+                                     S_churn=float(edm_cfg.get('S_churn', 0.0)),
+                                     S_min=float(edm_cfg.get('S_min', 0.0)),
+                                     S_max=float(edm_cfg.get('S_max', 99999.0)),
+                                     S_noise=float(edm_cfg.get('S_noise', 1.0)),
+                                     lr_ups=None
+                                     )
+        else:
+            logger.info("[Sampler] Using VE-DSM predictor-corrector sampler...")
+
+            gen_sample = pc_sampler(
+                score_model=self.model,
+                marginal_prob_std=marginal_prob_std_fn,
+                diffusion_coeff=diffusion_coeff_fn,
+                batch_size=batch_size,
+                num_steps=self.cfg.sampler.n_timesteps,
+                device=self.device,
+                img_size=self.cfg.highres.data_size[0],
+                y=y,
+                cond_img=cond_img,
+                lsm_cond=lsm_cond,
+                topo_cond=topo_cond,
+                )
+            
+        # # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
+        gen_sample = gen_sample.squeeze().detach().cpu()
+        # # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
+
+        # Normalize output shape to [B, H, W]
         if gen_sample.ndim == 4:
             gen_sample = gen_sample.squeeze(1) # remove channel dim only !!! IF REWRITING TO MULTI CHANNEL OUTPUT THIS NEEDS TO GO !!!
         elif gen_sample.ndim == 3:
