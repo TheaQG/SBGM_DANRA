@@ -13,8 +13,8 @@ from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
-from sbgm.score_unet import ScoreNet, Encoder, Decoder, marginal_prob_std_fn, EDMPrecondUNet, EDMLoss
-from sbgm.score_unet import loss_fn as original_loss_fn
+from sbgm.score_unet import ScoreNet, Encoder, Decoder, EDMPrecondUNet, marginal_prob_std_fn, diffusion_coeff_fn
+from sbgm.losses import EDMLoss, DSMLoss
 from sbgm.score_sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
 from sbgm.utils import build_data_path, get_units, get_cmaps, get_model_string
 from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
@@ -22,6 +22,54 @@ from sbgm.special_transforms import build_back_transforms, build_back_transforms
 
 # # Set up logging
 logger = logging.getLogger(__name__)
+
+def _get(cfg, path, default=None):
+    """
+        Safe nested get: path like 'a.b.c'
+    """
+    node = cfg
+    for k in path.split('.'):
+        if not isinstance(node, dict) or k not in node:
+            return default
+        node = node[k]
+    return node
+
+def get_loss_fn(cfg, marginal_prob_std_fn=None):
+    edm_cfg = cfg.get('edm', {})
+
+    if bool(edm_cfg.get('enabled', False)):
+        # === EDM branch ===
+        P_mean          = float(edm_cfg.get('P_mean', -1.2)) # NVLabs defaults
+        P_std           = float(edm_cfg.get('P_std', 1.2))
+        sigma_data      = float(edm_cfg.get('sigma_data', 1.0)) # MUST match model preconditioning
+
+        use_sdf         = bool(_get(cfg, 'stationary_conditions.geographic_conditions.sample_w_sdf', False))
+        max_land_w      = float(_get(cfg, 'stationary_conditions.geographic_conditions.max_land_weight', 1.0))
+        min_sea_w       = float(_get(cfg, 'stationary_conditions.geographic_conditions.min_sea_weight', 0.5))
+
+
+        return EDMLoss(
+                P_mean=P_mean,
+                P_std=P_std,
+                use_sdf_weight=use_sdf,
+                max_land_weight=max_land_w,
+                min_sea_weight=min_sea_w)
+
+    # === DSM default branch ===
+    ve_cfg = cfg.get('ve_dsm', {})
+    t_eps = float(ve_cfg.get('t_eps', 1e-3))
+    if marginal_prob_std_fn is None:
+        raise ValueError("marginal_prob_std_fn must be provided for VE-DSM loss.")
+    
+    use_sdf = bool(_get(cfg, 'stationary_conditions.geographic_conditions.sample_w_sdf', True))
+    max_land_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.max_land_weight', 1.0))
+    min_sea_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.min_sea_weight', 0.5))
+    return DSMLoss(
+                marginal_prob_std_fn=marginal_prob_std_fn,
+                t_eps=t_eps,
+                use_sdf_weight=use_sdf,
+                max_land_weight=max_land_w,
+                min_sea_weight=min_sea_w)
 
 def get_dataloader(cfg, verbose=True):
     '''
@@ -673,9 +721,6 @@ def get_model(cfg):
                                      sigma_data=sigma_data,
                                      predict_residual=predict_residual).to(device)
         
-        loss_fn = EDMLoss(P_mean=edm_cfg.get('P_mean', -1.2),
-                          P_std=edm_cfg.get('P_std', 1.2)
-                          )
     else:
         score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
                             encoder=encoder,
@@ -683,10 +728,8 @@ def get_model(cfg):
                             debug_pre_sigma_div=False
                             )
 
-        loss_fn = original_loss_fn(score_model,)
-
     if hasattr(score_model, "debug_pre_sigma_div"):
-        score_model.debug_pre_sigma_div = False
+        object.__setattr__(score_model, "debug_pre_sigma_div", False)
 
     return score_model, checkpoint_dir, checkpoint_name
 

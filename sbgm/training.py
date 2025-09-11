@@ -14,9 +14,10 @@ from torch.cuda.amp import autocast, GradScaler
 from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
 from sbgm.utils import extract_samples, plot_samples_and_generated, report_precip_extremes
 from sbgm.data_modules import *
-from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
+# from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler
-from sbgm.training_utils import get_model_string, get_cmaps, get_units
+from sbgm.training_utils import get_model_string, get_cmaps, get_units, get_loss_fn
+from sbgm.monitoring import edm_cosine_metric
 
 # Speed up conv algo selection on fixed input sizes
 if torch.cuda.is_available():
@@ -40,7 +41,6 @@ class TrainingPipeline_general:
 
     def __init__(self,
                  model,
-                 loss_fn,
                  marginal_prob_std_fn,
                  diffusion_coeff_fn,
                  optimizer,
@@ -60,16 +60,21 @@ class TrainingPipeline_general:
                 sdf_weighted_loss: Boolean to use SDF weighted loss.
                 with_ema: Boolean to use Exponential Moving Average (EMA) for the model.
         '''
+        # Store the full configuration for later use
+        self.cfg = cfg
+
+        self.writer = None  # Placeholder for TensorBoard writer, if needed
 
         # Set class variables
         self.model = model
         # Set debug_pre_sigma_div from cfg if exists, else default to True
         self.model.debug_pre_sigma_div = cfg['training'].get('debug_pre_sigma_div', True)
 
-        self.loss_fn = loss_fn
         self.marginal_prob_std_fn = marginal_prob_std_fn
         self.diffusion_coeff_fn = diffusion_coeff_fn
         self.optimizer = optimizer
+        # self.loss_fn = loss_fn
+        self.loss_fn = get_loss_fn(self.cfg, marginal_prob_std_fn=getattr(self, 'marginal_prob_std_fn', None))
 
         self.lr_scheduler = lr_scheduler
 
@@ -89,8 +94,6 @@ class TrainingPipeline_general:
         self.custom_weight_initializer = cfg['training']['custom_weight_initializer']
         self.sdf_weighted_loss = cfg['training']['sdf_weighted_loss']
         self.with_ema = cfg['training']['with_ema']
-        # Store the full configuration for later use
-        self.cfg = cfg
 
         # Set device
         if device is None:
@@ -346,17 +349,47 @@ class TrainingPipeline_general:
             for name, tensor in zip(['x', 'seasons', 'cond_images', 'lsm', 'topo'], [x, seasons, cond_images, lsm, topo]):
                 if tensor is not None:
                     assert tensor.device == x.device, f"{name} is on device {tensor.device}, expected {x.device}"
-            batch_loss = loss_fn(self.model,
-                        x,
-                        self.marginal_prob_std_fn,
-                        y = seasons,
-                        cond_img = cond_images,
-                        lsm_cond = lsm,
-                        topo_cond = topo,
-                        sdf_cond = sdf)
             
+            if hasattr(self, 'scaler') and self.scaler:
+                with autocast():
+                    # Pass the score model and samples+conditions to the loss_fn
+                    batch_loss = self.loss_fn(self.model,
+                                               x,
+                                               self.marginal_prob_std_fn,
+                                               y=seasons,
+                                               cond_img=cond_images,
+                                               lsm_cond=lsm,
+                                               topo_cond=topo,
+                                               sdf_cond=sdf)
+            else:
+                # No mixed precision, just pass the score model and samples+conditions to the loss_fn
+                batch_loss = self.loss_fn(self.model,
+                                           x,
+                                           self.marginal_prob_std_fn,
+                                           y=seasons,
+                                           cond_img=cond_images,
+                                           lsm_cond=lsm,
+                                           topo_cond=topo,
+                                           sdf_cond=sdf)
+
+
+            # === Cosine monitoring (lightweight) ===
+            monitor_cfg = self.cfg.get('monitoring', {})
+            log_every = monitor_cfg.get('edm_metrics_every', 50)
+            global_step = (current_epoch - 1) * len(dataloader) + idx
+            edm_on = self.cfg.get('edm', {}).get('enabled', False)
+
+            if edm_on and log_every > 0 and (global_step % log_every == 0):
+                cos = edm_cosine_metric(self.model, x, self.marginal_prob_std_fn, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo)
+                if cos is not None:
+                    pbar.set_postfix(loss=loss_sum / (idx + 1), edm_cosine=cos)
+                    if verbose:
+                        logger.info(f"→ [monitor][train] Step {idx}: EDM cosine metric: {cos:.4f}")
+                    if self.writer is not None:
+                        self.writer.add_scalar('monitoring/edm_cosine_metric_train', cos, (current_epoch - 1) * len(dataloader) + idx)
+
             # === Extreme-prcp sentinel on ground-truth HR (optional; lightweight) ===
-            if self.extreme_enabled and (idx % self.extreme_every_step == 0):
+            if self.extreme_enabled and (global_step % self.extreme_every_step == 0):
                 try:
                     # x is in model space; optionally back-transform to physical mm/day
                     x_for_check = x.detach()
@@ -400,9 +433,9 @@ class TrainingPipeline_general:
 
             # logger.info(f"▸ Batch loss computed: {batch_loss.item():.4f}")
             # Add anomaly detection for loss
-            with torch.autograd.detect_anomaly(True):
-                # Backward pass
-                batch_loss.backward()
+            # with torch.autograd.detect_anomaly():
+            # Backward pass
+            batch_loss.backward()
             # Update weights
             self.optimizer.step()
 
@@ -538,7 +571,7 @@ class TrainingPipeline_general:
                 if hasattr(self, 'scaler') and self.scaler:
                     with autocast():
                         # Pass the score model and samples+conditions to the loss_fn
-                        batch_loss = loss_fn(self.model,
+                        batch_loss = self.loss_fn(self.model,
                                              x,
                                              self.marginal_prob_std_fn,
                                              y=seasons,
@@ -548,7 +581,7 @@ class TrainingPipeline_general:
                                              sdf_cond=sdf)
                 else:
                     # No mixed precision, just pass the score model and samples+conditions to the loss_fn
-                    batch_loss = loss_fn(self.model,
+                    batch_loss = self.loss_fn(self.model,
                                          x,
                                          self.marginal_prob_std_fn,
                                          y=seasons,

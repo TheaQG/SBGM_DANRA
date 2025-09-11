@@ -102,6 +102,8 @@ stationary_conditions:
     topo_max: 12 # Maximum value for topography visualization
     norm_min: -1 # Minimum normalization value for topography
     norm_max: 1 # Maximum normalization value for topography
+    max_land_weight: 1.0 # Maximum weight for land in SDF
+    max_ocean_weight: 0.5 # Maximum weight for ocean in SDF
   seasonal_conditions:
     sample_w_cond_season: true # Whether to sample with seasonal conditions
     n_seasons: 4 # Number of seasons in the data
@@ -157,6 +159,7 @@ training:
   epochs: 1500 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
   sdf_weighted_loss: true # Whether to use SDF weighted loss
+
   optimizer: adam # Optimizer to use for training
   load_checkpoint: false # Whether to load a checkpoint
   early_stopping: true # Whether to use early stopping
@@ -188,8 +191,13 @@ edm:
   S_max: 1e9 # Maximum S for EDM
   S_noise: 1.0 # Noise parameter for EDM
 
+ve_dsm: # Default parameters for VE-DSM loss
+  t_eps: 1e-3 # Small epsilon for VE-DSM
+
 monitoring:
-  edm_metrics: {enabled: true, every_steps: 50} # Whether to compute EDM metrics during training
+  edm_metrics_enabled: true # Whether to enable EDM metrics monitoring
+  edm_metrics_every: 50 # Frequency (in steps) to compute EDM metrics
+  edm_cosine_metric: true # Whether to compute the cosine similarity metric
 
 evaluation:
   n_gen_samples: 1 # Number of samples to generate
