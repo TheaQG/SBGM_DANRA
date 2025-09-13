@@ -16,18 +16,6 @@ from typing import Optional, List, Dict
 logger = logging.getLogger(__name__)
 
 
-# def get_transformations(cfg):
-#     """
-#     Get the transformation functions based on the configuration.
-#     """
-#     transformations = []
-#     if cfg.get("scale"):
-#         transformations.append(Scale(**cfg["scale"]))
-#     if cfg.get("zscore"):
-#         transformations.append(ZScoreTransform(**cfg["zscore"]))
-#     return transformations
-
-
 # Make a function to compute transformations from stats dict
 def transform_from_stats(data, 
                             transform_type: str,
@@ -298,8 +286,6 @@ class PrcpLogTransform(object):
         # Log-transform the sample
         log_sample = torch.log(sample + self.eps) # Add a small epsilon to avoid log(0)
 
-        # logger.debug(f"Min log in sample: {torch.min(log_sample)}")
-        # logger.debug(f"Max log in sample: {torch.max(log_sample)}")
         # Scale the log-transformed data to [0,1]ß
         if self.scale_type == 'log_01':
             if (self.glob_min_log is None) or (self.glob_max_log is None):
@@ -339,22 +325,7 @@ class PrcpLogTransform(object):
             raise ValueError("Invalid scale type. Please choose 'log_01' or 'log_zscore' or 'log'.")
 
         return log_sample
-    
 
-# class PrcpLogBackTransform:
-#     def __init__(self, mean_log, std_log, clamp_log_min=None, clamp_log_max=None):
-#         self.mu  = float(mean_log)
-#         self.sig = float(std_log)
-#         self.clamp_log_min = clamp_log_min
-#         self.clamp_log_max = clamp_log_max
-
-#     def __call__(self, z: torch.Tensor) -> torch.Tensor:
-#         logx = z * self.sig + self.mu
-#         if self.clamp_log_min is not None or self.clamp_log_max is not None:
-#             lo = -float("inf") if self.clamp_log_min is None else float(self.clamp_log_min)
-#             hi =  float("inf") if self.clamp_log_max is None else float(self.clamp_log_max)
-#             logx = torch.clamp(logx, lo, hi)
-#         return torch.exp(logx)
     
 # Back transform the log-transformed data, with min and max values provided
 class PrcpLogBackTransform(object):

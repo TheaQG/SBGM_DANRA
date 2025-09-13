@@ -11,12 +11,15 @@ import matplotlib.pyplot as plt
 
 from torch.cuda.amp import autocast, GradScaler
 
-from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
-from sbgm.utils import extract_samples, plot_samples_and_generated, report_precip_extremes
+from sbgm.special_transforms import build_back_transforms_from_stats
+from sbgm.utils import extract_samples
+from sbgm.plotting_utils import get_cmaps
+from sbgm.plotting_utils import plot_samples_and_generated
+from sbgm.monitoring import report_precip_extremes
 from sbgm.data_modules import *
 # from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
-from sbgm.training_utils import get_model_string, get_cmaps, get_units, get_loss_fn
+from sbgm.training_utils import get_model_string, get_units, get_loss_fn
 from sbgm.monitoring import edm_cosine_metric
 
 # Speed up conv algo selection on fixed input sizes
@@ -314,7 +317,7 @@ class TrainingPipeline_general:
             # logger.info(f"▸ Shape of cond_images: {cond_images.shape if cond_images is not None else 'None'}")
             # logger.info(f"▸ Shape of lsm: {lsm.shape if lsm is not None else 'None'}")
             # logger.info(f"▸ Shape of topo: {topo.shape if topo is not None else 'None'}")
-
+            # NOTE: IMPLEMENT CFG HERE AGAIN
             # # Apply Classifier Free Guidance conditioning dropout if enabled
             # cfg_guidance = getattr(self, "cfg", {}).get('classifier_free_guidance', None)
             # if cfg_guidance and cfg_guidance.get('enabled', False) and cond_images is not None:
@@ -354,7 +357,7 @@ class TrainingPipeline_general:
             lr_ups_baseline = None
             if self.edm_enabled and self.edm_predict_residual:
                 lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
-            
+            # NOTE: Introduce mixed precision training
             # # Use mixed precision training if needed
             # if self.scaler:
             #     with autocast():
@@ -717,15 +720,6 @@ class TrainingPipeline_general:
                 raise ValueError(f"Sampler type {cfg['sampler']['sampler_type']} not recognized. Please choose from 'pc_sampler', 'Euler_Maruyama_sampler', or 'ode_sampler'.")
         
         
-        # # Set up back transforms for plotting'
-        # back_trans = build_back_transforms(
-        #             hr_var=cfg['highres']['variable'],
-        #             hr_scaling_method=cfg['highres']['scaling_method'],
-        #             hr_scaling_params=cfg['highres']['scaling_params'],
-        #             lr_vars=cfg['lowres']['condition_variables'],
-        #             lr_scaling_methods=cfg['lowres']['scaling_methods'],
-        #             lr_scaling_params=cfg['lowres']['scaling_params'],
-        #         )
         full_domain_dims_str_hr = f"{self.full_domain_dims_hr[0]}x{self.full_domain_dims_hr[1]}" if self.full_domain_dims_hr is not None else "full_domain"
         full_domain_dims_str_lr = f"{self.full_domain_dims_lr[0]}x{self.full_domain_dims_lr[1]}" if self.full_domain_dims_lr is not None else "full_domain"
         crop_region_hr_str = '_'.join(map(str, self.crop_region_hr)) if self.crop_region_hr is not None else "no_crop"

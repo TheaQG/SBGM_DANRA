@@ -1,5 +1,4 @@
 import os
-import yaml
 import torch
 import logging
 from datetime import datetime

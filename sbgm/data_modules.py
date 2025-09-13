@@ -14,7 +14,7 @@ import logging
 import numpy as np
 import torch.nn.functional as F
 
-from typing import Optional, List, Tuple
+from typing import Optional
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -353,13 +353,13 @@ def _extract_2d_from_zarr_entry(zgroup: zarr.Group, file_key: str, var_name: str
     for k in candidates:
         if k in entry:
             arr = entry[k][()] # Load the array
-            return _first_hw_slice(arr) # Return as (H, W)
+            return _first_hw_slice(arr) # type: ignore # Return as (H, W)
         
     # Fallback: try any array-like members under the entry
-    for k in entry.keys():
+    for k in entry.keys(): # type: ignore
         try:
             arr = entry[k][()]
-            return _first_hw_slice(arr)
+            return _first_hw_slice(arr) # type: ignore
         except Exception:
             continue
     raise KeyError(f"Could not find a suitable data array in zarr entry '{file_key}' for variable '{var_name}'. Tried keys: {candidates} and all members.")
@@ -596,31 +596,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 ))
                 self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
 
-            ############### OLD CODE - BEFORE USING get_transforms_from_stats ###############
-            # for cond, method, params in zip(self.lr_conditions, self.lr_scaling_methods, self.lr_scaling_params):
-            #     # Base transform: to tensor and resize
-            #     transform_list = [
-            #         SafeToTensor(),
-            #         ResizeTensor(self.lr_size_reduced)
-            #     ]
-            #     # Use per-variable buffer_frac
-            #     buff = params.get('buffer_frac', 0.5)
-            #     if method == 'zscore':
-            #         # ADD BUFFER FRACTION TO ZSCORE TRANSFORM
-            #         transform_list.append(ZScoreTransform(params['glob_mean'], params['glob_std']))
-            #     elif method in ['log', 'log_01', 'log_minus1_1', 'log_zscore']:
-            #         transform_list.append(PrcpLogTransform(eps=1e-10,
-            #                                                scale_type=method,
-            #                                                glob_mean_log=params['glob_mean_log'],
-            #                                                glob_std_log=params['glob_std_log'],
-            #                                                glob_min_log=params['glob_min_log'],
-            #                                                glob_max_log=params['glob_max_log'],
-            #                                                buffer_frac=buff))
-            #     elif method == '01':
-            #         transform_list.append(Scale(0, 1, params['glob_min'], params['glob_max']))
-            #     self.lr_transforms_dict[cond] = transforms.Compose(transform_list)
-
-
             # 2. Set HR target transform
             hr_transform_list = [
                 SafeToTensor(),
@@ -638,20 +613,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 stats_file_path=stats_load_dir,
             ))
             self.hr_transform = transforms.Compose(hr_transform_list)
-            ############### OLD CODE - BEFORE USING get_transforms_from_stats ###############
-            # if self.hr_scaling_method == 'zscore':
-            #     hr_transform_list.append(ZScoreTransform(self.hr_scaling_params['glob_mean'], self.hr_scaling_params['glob_std']))
-            # elif self.hr_scaling_method in ['log', 'log_01', 'log_minus1_1', 'log_zscore']:
-            #     hr_transform_list.append(PrcpLogTransform(eps=1e-10,
-            #                                               scale_type=self.hr_scaling_method,
-            #                                               glob_mean_log=self.hr_scaling_params['glob_mean_log'],
-            #                                               glob_std_log=self.hr_scaling_params['glob_std_log'],
-            #                                               glob_min_log=self.hr_scaling_params['glob_min_log'],
-            #                                               glob_max_log=self.hr_scaling_params['glob_max_log'],
-            #                                               buffer_frac=hr_buff))
-            # elif self.hr_scaling_method == '01':
-            #     hr_transform_list.append(Scale(0, 1, self.hr_scaling_params['glob_min'], self.hr_scaling_params['glob_max']))
-            # self.hr_transform = transforms.Compose(hr_transform_list)
         
             # 3. Set geo variable transforms (if any)
             if self.geo_variables is not None:
@@ -771,32 +732,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             lr_file_name = self.lr_file_map[cond][date]
             # Load LR condition data from its own zarr group
             try:
-                ################### OLD WAY - BEFORE CREATING _extract_2d_from_zarr_entry() AND correct_variable_units() ###################
-                # # logger.info(f'Loading LR {cond} data for {lr_file_name}')
-                # # logger.debug(self.lr_cond_zarr_dict[cond].tree())
-                # if cond == "temp":
-                #     try:
-                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['t']
-                #         data = data[()][0,0,:,:] - 273.15
-                #         # logger.debug("Key 't' found")
-                #     except:
-                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
-                #         data = data[()][:,:] - 273.15
-                #         # logger.debug("Key 'data' found")
-                # elif cond == "prcp":
-                #     try:
-                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['tp']
-                #         data = data[()][0,0,:,:] * 1000
-                #         data[data <= 0] = 1e-10
-                #         # logger.debug("Key 'tp' found")
-                #     except:
-                #         data = self.lr_cond_zarr_dict[cond][lr_file_name]['arr_0']
-                #         data = data[()][:,:] * 1000
-                #         data[data <= 0] = 1e-10
-                #         # logger.debug("Key 'arr_0' found")
-                # else:
-                #     # Add custom logic for other LR conditions when needed
-                #     data = self.lr_cond_zarr_dict[cond][lr_file_name]['data'][()]
                 data = _extract_2d_from_zarr_entry(self.lr_cond_zarr_dict[cond], lr_file_name, cond)
                 # Apply unit corrections consistently
                 data = correct_variable_units(cond, self.lr_model, data)
@@ -822,24 +757,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
         # Load HR target variable data
         try:
-            ################### OLD WAY - BEFORE CREATING _extract_2d_from_zarr_entry() AND correct_variable_units() ###################
-            # # logger.info(f'Loading HR {self.hr_variable} data for {hr_file_name}')
-            # # logger.debug(self.zarr_group_img[hr_file_name].tree())
-            # if self.hr_variable == 'temp':
-            #     try:
-            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['t'][()][0,0,:,:], dtype=torch.float32) - 273.15
-            #     except:
-            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32) - 273.15
-            # elif self.hr_variable == 'prcp':
-            #     try:
-            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['tp'][()][0,0,:,:], dtype=torch.float32)
-            #     except:
-            #         hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()][:,:], dtype=torch.float32)
-            #     # Set all non-positive values to a small positive value (multiplied by a random number for robustness)
-            #     hr[hr <= 0] = 1e-10 * np.random.rand()
-            # else:
-            #     # Add custom logic for other HR variables when needed
-            #     hr = torch.tensor(self.zarr_group_img[hr_file_name]['data'][()], dtype=torch.float32)
             hr_np = _extract_2d_from_zarr_entry(self.zarr_group_img, hr_file_name, self.hr_variable)
             # Apply unit corrections consistently
             hr_np = correct_variable_units(self.hr_variable, self.hr_model, hr_np)
@@ -870,7 +787,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             ])
             lsm_hr = geo_transform_lsm_hr(lsm_hr)
             # Re-binarize after resizing, just in case
-            lsm_hr = (lsm_hr > 0.5).to(lsm_hr.dtype)  # Ensure binary mask (0 and 1)
+            lsm_hr = (lsm_hr > 0.5).to(lsm_hr.dtype)  # type: ignore # Ensure binary mask (0 and 1)
             sample_dict['lsm_hr'] = lsm_hr
 
 

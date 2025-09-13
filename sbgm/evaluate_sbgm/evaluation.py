@@ -1,4 +1,3 @@
-
 import torch
 import os
 import logging
@@ -6,9 +5,7 @@ import logging
 import numpy as np
 from matplotlib import pyplot as plt
 
-from sbgm.score_sampling import pc_sampler
-from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
-from sbgm.utils import plot_samples_and_generated, extract_samples, get_model_string, get_first_sample_dict
+from sbgm.utils import get_model_string
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +166,7 @@ class Evaluation:
         if plot_with_cond:
             cond_imgs = self.cond_imgs[:n_samples]
             for i, cond_name in enumerate(self.lr_vars):
-                cond_channel = cond_imgs[:, i, :, :]
+                cond_channel = cond_imgs[:, i, :, :] # type: ignore
                 plot_list.append(cond_channel)
                 plot_titles.append(f'Condition: {cond_name}')
 

@@ -1,10 +1,9 @@
 import os 
 import logging
-import random
 import numpy as np
 import torch
 from datetime import datetime
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from sbgm.training_utils import get_model, get_gen_dataloader
 from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
@@ -106,15 +105,6 @@ def generation_main(cfg):
                         split               = 'all',
                         stats_dir_root      = cfg['paths']['stats_load_dir']
                         )
-                        
-    # back_transforms = build_back_transforms(hr_var=cfg.highres.variable,
-    #                                         hr_scaling_method= cfg.highres.scaling_method,
-    #                                         hr_scaling_params=cfg.highres.scaling_params,
-    #                                         lr_vars=cfg.lowres.condition_variables,
-    #                                         lr_scaling_methods=cfg.lowres.scaling_methods,
-    #                                         lr_scaling_params=cfg.lowres.scaling_params,
-    #                                         )
-    
 
     # --- Initialize SampleGenerator --------------------------------------------------------
     generator = SampleGenerator(cfg, model, gen_dataloader, back_transforms, device)
@@ -141,41 +131,3 @@ def generation_main(cfg):
             logger.info(f"[INFO] Running {cfg.evaluation.n_repeats} repeated generations...")
             generator.generate_repeated()
             logger.info("[INFO] Repeated generation completed.\n")
-
-
-
-
-
-
-
-
-
-
-
-    # # --- 5. Choose generation method ---------------------------------------------
-    # # Is a list of strings
-    # gen_types = cfg.evaluation.gen_type
-
-    # valid_types = {'multiple', 'single', 'repeated'}
-
-    # for gen_type in gen_types:
-    #     if gen_type not in valid_types:
-    #         raise ValueError(f"\nUnknown generation type: {gen_type}\n")
-        
-    #     logger.info(f"Running generation: {gen_type}")
-
-    #     if gen_type == 'multiple':
-    #         logger.info("[INFO] Running multiple generations...")
-    #         run_generation_multiple(cfg, gen_dataloader, model, back_transforms, device)
-    #     elif gen_type == 'single':
-    #         logger.info("[INFO] Running single generation...")
-    #         run_generation_single(cfg, gen_dataloader, model, back_transforms, device)
-    #     elif gen_type == 'repeated':
-    #         logger.info("[INFO] Running repeated generation...")
-    #         run_generation_repeated(cfg, gen_dataloader, model, back_transforms, device)
-    
-
-
-# if __name__ == "__main__":
-#     cfg = hydra.compose(config_name="default_config")
-#     main_generation(cfg)

@@ -1,4 +1,5 @@
-from sbgm.utils import get_units, get_cmaps
+from sbgm.utils import get_units
+from sbgm.plotting_utils import get_cmaps
 
 def correct_variable_units(var_name, model, data):
     

@@ -12,7 +12,6 @@
 import torch
 import logging
 import torch.nn as nn
-import numpy as np
 from torchvision.models.resnet import ResNet, BasicBlock
 from typing import Optional, Iterable
 import functools
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class SigmaEmbed(nn.Module):
     """
-        \sigma-embedding -> R^time_dim for FiLM like conditioning.
+        sigma-embedding -> R^time_dim for FiLM like conditioning.
     """
     def __init__(self, time_dim: int):
         super().__init__()
@@ -599,50 +598,6 @@ class DecoderBlock(nn.Module):
         else:
             self.attention = nn.Identity()
 
-
-
-
-
-
-        ###### OLD CODE ######
-        # # Initialize the attention layer, if compute_attn is True
-        # if self.compute_attn:
-        #     # Initialize the attention layer
-        #     self.attention = ImageSelfAttention(self.output_channels, self.n_heads).to(self.device)
-        # else:
-        #     # Initialize the identity layer as the attention layer
-        #     self.attention = nn.Identity().to(self.device)
-        
-        # # Initialize the sinusoidal time embedding layer with the given time_embedding
-        # self.sinusoidal_embedding = SinusoidalEmbedding(self.time_embedding).to(self.device)
-        
-        # # Initialize the time projection layer, for projecting the time embedding onto the feature maps. SiLU activation function and linear layer.
-        # self.time_projection_layer = nn.Sequential(
-        #         nn.SiLU(),
-        #         nn.Linear(self.time_embedding, self.output_channels)
-        #     ).to(self.device)
-
-        # # Initialize the transposed convolutional layer. 
-        # self.transpose = nn.ConvTranspose2d(
-        #     self.input_channels, self.input_channels, 
-        #     kernel_size=self.upsample_scale, stride=self.upsample_scale).to(self.device)
-        
-        # self.upsample = nn.Upsample(scale_factor = self.upsample_scale, mode="bilinear", align_corners=False).to(self.device)
-        # self.conv_up = nn.Conv2d(self.input_channels, self.input_channels, kernel_size=3, padding=1).to(self.device)
-        
-        # # Define the instance normalization layer, for normalizing the input
-        # self.instance_norm1 = nn.InstanceNorm2d(self.transpose.in_channels).to(self.device)
-
-        # # Define the convolutional layer
-        # self.conv = nn.Conv2d(
-        #     self.transpose.out_channels, self.output_channels, kernel_size=3, stride=1, padding=1).to(self.device)
-        
-        # # Define second instance normalization layer, for normalizing the input
-        # self.instance_norm2 = nn.InstanceNorm2d(self.conv.out_channels).to(self.device)
-        
-        # # Define the activation function
-        # self.activation = activation()
-
     
     def forward(self,
                 fmap:torch.Tensor,
@@ -715,37 +670,6 @@ class DecoderBlock(nn.Module):
         return x
 
 
-        ##### OLD CODE #####
-        # # Prepare the input fmap by applying a transposed convolutional, instance normalization, convolutional, and second instance norm layers
-        # output = self.transpose(fmap)#.to(self.device)
-        # output = self.instance_norm1(output)#.to(self.device)
-        # output = self.conv(output)#.to(self.device)
-        # output = self.instance_norm2(output)#.to(self.device)
-        
-        # # Apply residual connection with previous feature map. If prev_fmap is a tensor and not None, the feature maps must be of the same shape.
-        # if prev_fmap is not None and torch.is_tensor(prev_fmap):
-        #     assert (prev_fmap.shape == output.shape), 'feature maps must be of same shape. Shape of prev_fmap: {}, shape of output: {}'.format(prev_fmap.shape, output.shape)
-        #     # Add the previous feature map to the output
-        #     output = output + prev_fmap.to(self.device)
-            
-        # # Apply timestep embedding if t is a tensor
-        # if torch.is_tensor(t):
-        #     # Embed the time positions
-        #     t = self.sinusoidal_embedding(t).to(self.device)
-        #     # Project the time embedding onto the feature maps
-        #     t_emb = self.time_projection_layer(t).to(self.device)
-        #     # Add the projected time embedding to the output
-        #     output = output + t_emb[:, :, None, None].to(self.device)
-            
-        #     # Calculate the attention for the output
-        #     output = self.attention(output).to(self.device)
-        
-        # # Apply the activation function to the output
-        # output = self.activation(output).to(self.device)
-        # return output
-    
-
-
 
 class Decoder(nn.Module):
     '''
@@ -812,9 +736,9 @@ class Decoder(nn.Module):
             )
         # After creating final layer, make sure no activation or normalization (otherwise mode ljust learns zero mean/unit variance)
         if hasattr(self.final_layer, "norm1"): 
-            self.final_layer.norm1 = nn.Identity()
+            self.final_layer.norm1 = nn.Identity() # type: ignore
         if hasattr(self.final_layer, "norm2"):
-            self.final_layer.norm2 = nn.Identity()
+            self.final_layer.norm2 = nn.Identity() # type: ignore
         self.final_layer.activation = nn.Identity() 
 
 
@@ -985,22 +909,6 @@ def marginal_prob_std(t: torch.Tensor,
     # small floor to avoid dicision blow ups when t ~ 0
     return torch.clamp(std, min=eps)
 
-# def marginal_prob_std(t, sigma, device = None):
-#     '''
-#         Function to compute standard deviation of 
-#         the marginal $p_{0t}(x(t)|x(0))$
-#         Input:
-#             - t: time embedding tensor
-#             - sigma: the sigma parameter in our SDE
-#     '''
-#     if device is None:
-#         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#     else:
-#         device = device
-
-#     t = t.to(device)
-    
-#     return torch.sqrt((sigma**(2 * t) - 1.) / 2. / np.log(sigma))
 
 def diffusion_coeff(t, sigma, device = None):
     '''

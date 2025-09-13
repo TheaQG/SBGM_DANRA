@@ -13,11 +13,10 @@ from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
-from sbgm.score_unet import ScoreNet, Encoder, Decoder, EDMPrecondUNet, marginal_prob_std_fn, diffusion_coeff_fn
+from sbgm.score_unet import ScoreNet, Encoder, Decoder, EDMPrecondUNet, marginal_prob_std_fn
 from sbgm.losses import EDMLoss, DSMLoss
-from sbgm.score_sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
-from sbgm.utils import build_data_path, get_units, get_cmaps, get_model_string
-from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
+from sbgm.utils import build_data_path, get_units, get_model_string
+from sbgm.special_transforms import build_back_transforms_from_stats
 # from sbgm.evaluation.evaluation import evaluate_model
 
 # # Set up logging
@@ -133,28 +132,8 @@ def get_dataloader(cfg, verbose=True):
         lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'train')
         lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'valid')
         lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
-
-    # # Set scaling and matching 
-    # scaling = cfg['transforms']['scaling']
-    # force_matching_scale = cfg['transforms']['force_matching_scale']
-    # show_both_orig_scaled = cfg['visualization']['show_both_orig_scaled']
-    # transform_back_bf_plot = cfg['visualization']['transform_back_bf_plot']
-
-    # # Set up scaling methods
-    # hr_scaling_method = cfg['highres']['scaling_method']
-    # hr_scaling_params = cfg['highres']['scaling_params']
-    # lr_scaling_methods = cfg['lowres']['scaling_methods']
-    # lr_scaling_params = cfg['lowres']['scaling_params']
-
-    # Set up back transformations (for plotting and visual inspection + later evaluation)
-    # back_transforms = build_back_transforms(
-    #     hr_var              = cfg['highres']['variable'],
-    #     hr_scaling_method   = cfg['highres']['scaling_method'],
-    #     hr_scaling_params   = cfg['highres']['scaling_params'],
-    #     lr_vars             = cfg['lowres']['condition_variables'],
-    #     lr_scaling_methods  = cfg['lowres']['scaling_methods'],
-    #     lr_scaling_params   = cfg['lowres']['scaling_params']
-    # )
+    
+    # Set scaling and matching
     full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
@@ -479,27 +458,7 @@ def get_gen_dataloader(cfg, verbose=True):
         lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'valid')
         lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
 
-    # # Set scaling and matching 
-    # scaling = cfg['transforms']['scaling']
-    # force_matching_scale = cfg['transforms']['force_matching_scale']
-    # show_both_orig_scaled = cfg['visualization']['show_both_orig_scaled']
-    # transform_back_bf_plot = cfg['visualization']['transform_back_bf_plot']
-
-    # # Set up scaling methods
-    # hr_scaling_method = cfg['highres']['scaling_method']
-    # hr_scaling_params = cfg['highres']['scaling_params']
-    # lr_scaling_methods = cfg['lowres']['scaling_methods']
-    # lr_scaling_params = cfg['lowres']['scaling_params']
-
-    # Set up back transformations (for plotting and visual inspection + later evaluation)
-    # back_transforms = build_back_transforms(
-    #     hr_var              = cfg['highres']['variable'],
-    #     hr_scaling_method   = cfg['highres']['scaling_method'],
-    #     hr_scaling_params   = cfg['highres']['scaling_params'],
-    #     lr_vars             = cfg['lowres']['condition_variables'],
-    #     lr_scaling_methods  = cfg['lowres']['scaling_methods'],
-    #     lr_scaling_params   = cfg['lowres']['scaling_params']
-    # )
+    # Set scaling and matching
     full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
