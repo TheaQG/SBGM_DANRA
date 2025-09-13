@@ -71,8 +71,8 @@ lowres:
 #   resize_factor: 1 # Factor to resize low-res data (used for testing at lower resolutions)
 
 sampler:
-  sampler_type: pc_sampler # Type of sampler to use
-  n_timesteps: 1500 # Number of timesteps for sampling
+  sampler_type: edm_sampler #pc_sampler # Type of sampler to use
+  n_timesteps: 40 # Number of timesteps for sampling (EDM: suggested 35-50)
   time_embedding: 256 # Dimension of time embedding
   last_fmap_channels: 512 # Channels in the last feature map
   num_heads: 4 # Number of attention heads
@@ -113,7 +113,7 @@ stationary_conditions:
 visualization:
   transform_back_bf_plot: true # Whether to transform back before plotting
   create_figs: true # Whether to create figures during visualization
-  gen_and_plot_every_n_epochs: 1 # Frequency (in epochs) to generate samples during training
+  gen_and_plot_every_n_epochs: 10 # Frequency (in epochs) to generate samples during training
   save_figs: true # Whether to save figures 
   plot_losses: true # Whether to plot losses
   plot_initial_sample: true # Whether to plot first samples
@@ -128,7 +128,7 @@ model:
   use_resize_conv: false # true -> bilinear + 3x3, false -> transposed conv
   decoder_norm: "group" # Type of normalization in the decoder "instance" | "group"
   decoder_gn_groups: 8 # Number of groups for group normalization (if used)
-  decoder_activation: "ReLU" # Activation function in the decoder "ReLU" | "SiLU" | "GELU"
+  decoder_activation: "SiLU" # Activation function in the decoder "ReLU" | "SiLU" | "GELU" (SiLU smoother than ReLU)
 
 
 training:
@@ -136,15 +136,15 @@ training:
   device: cuda # Device to use for training (e.g., 'cuda' or 'cpu')
   use_mixed_precision: false # Whether to use mixed precision training
   verbose: true # Whether to print verbose output during training
-  batch_size: 5 # Batch size for training
-  learning_rate: 0.0005 # Learning rate for training
+  batch_size: 16 # Batch size for training
+  learning_rate: 0.0002 # Learning rate for training
   min_lr: 0.000001 # Minimum learning rate
   lr_scheduler: ReduceLROnPlateau # Learning rate scheduler to use
   lr_scheduler_params: # ReduceLROnPlateau
     factor: 0.5 # Factor by which to reduce the learning rate
-    patience: 10 # Patience for the scheduler
+    patience: 15 # Patience for the scheduler
     threshold: 0.01 # Threshold for the scheduler
-    min_lr: 0.000001 # Minimum learning rate for the scheduler
+    min_lr: 1e-6 # Minimum learning rate for the scheduler
   # lr_scheduler_params: # StepLR
     # step_size: 10 # Step size for the scheduler
     # gamma: 0.1 # Gamma for the scheduler
@@ -153,18 +153,18 @@ training:
     # eta_min: 0.000001 # Minimum learning rate for the scheduler
   weight_init: true # Whether to initialize weights
   custom_weight_initializer: !!null # Custom weight initializer (if any)
-  with_ema: false # Whether to use Exponential Moving Average
+  with_ema: false # Whether to use Exponential Moving Average NOTE: NEEDS TO BE IMPLEMENTED
   load_ema: false # Whether to load EMA weights
   ema_decay: 0.9999 # Decay rate for EMA
   weight_decay: 0.000001 # Weight decay for regularization
-  epochs: 5 # Number of epochs for training
+  epochs: 500 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
   sdf_weighted_loss: true # Whether to use SDF weighted loss
-  optimizer: adam # Optimizer to use for training
+  optimizer: adamw # Optimizer to use for training (adam, adamw, sgd) (adamw for better decay)
   load_checkpoint: false # Whether to load a checkpoint
   early_stopping: true # Whether to use early stopping
   early_stopping_params:
-    patience: 150 # Patience for early stopping
+    patience: 75 # Patience for early stopping
     min_delta: 0.0001 # Minimum delta for early stopping
   train_use_amp: false # Whether to use automatic mixed precision
   train_postfix_every: 10 # Frequency of printing training postfix
@@ -174,7 +174,7 @@ training:
 
 classifier_free_guidance:
   enabled: true # Whether to use classifier-free guidance
-  drop_prob: 0.2 # Dropout probability for guidance
+  drop_prob: 0.3 # Dropout probability for guidance
   guidance_scale: 2.0 # Scale for guidance 
   guidance_scale_max: 3.0 # Maximum scale for guidance
 
@@ -186,12 +186,12 @@ edm:
   sigma_min: 0.002 # Minimum sigma for EDM
   sigma_max: 80 # Maximum sigma for EDM
   rho: 7.0 # Rho parameter for EDM
-  S_churn: 40.0 # Churn parameter for EDM
-  S_min: 0.0 # Minimum S for EDM
-  S_max: 1e9 # Maximum S for EDM
+  # Starting with modest churn, can increase later if samples too smooth
+  S_churn: 2.0 # Churn parameter for EDM
+  S_min: 40.0 # Minimum S for EDM (about 0.5 * sigma_max, typically)
+  S_max: 80.0 # Maximum S for EDM (typically equal to sigma_max)
   S_noise: 1.0 # Noise parameter for EDM
-  sampling_steps: 18 # Number of sampling steps for EDM
-  predict_residual: true # Whether to predict residual in EDM
+  sampling_steps: 40 # Number of sampling steps for EDM (suggested: 35-50)
 
 ve_dsm: # Default parameters for VE-DSM loss
   t_eps: 1e-3 # Small epsilon for VE-DSM
@@ -203,8 +203,8 @@ monitoring:
 
 evaluation:
   n_gen_samples: 1 # Number of samples to generate
-  n_steps: 1500 # Number of generation steps
-  batch_size: 4 # Batch size for generation
+  n_steps: 35 # Number of generation steps
+  batch_size: 8 # Batch size for generation
   device: cpu # Device to use for generation (e.g., 'cuda' or 'cpu')
   seed: 31 # Random seed for generation
   gen_type: ['multiple', 'single', 'repeated'] # Type of generation to perform, 

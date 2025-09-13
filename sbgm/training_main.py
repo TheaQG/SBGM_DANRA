@@ -52,15 +52,15 @@ def train_main(cfg):
     # Load data
     train_dataloader, val_dataloader, gen_dataloader = get_dataloader(cfg)
 
-    # ------------------------------------------------------------------------
-    # Quick data-loader throughput check: ~100 batches warm-up + timed 
-    # ------------------------------------------------------------------------
-    from time import perf_counter
-    start = perf_counter()
-    for i, _ in enumerate(train_dataloader):
-        if i == 100:
-            avg = (perf_counter() - start) / 100
-            logger.info(f"          ▸ Dataloader average fetch time ~{avg:.3f} s / batch\n\n")
+    # # ------------------------------------------------------------------------
+    # # Quick data-loader throughput check: ~100 batches warm-up + timed 
+    # # ------------------------------------------------------------------------
+    # from time import perf_counter
+    # start = perf_counter()
+    # for i, _ in enumerate(train_dataloader):
+    #     if i == 100:
+    #         avg = (perf_counter() - start) / 100
+    #         logger.info(f"          ▸ Dataloader average fetch time ~{avg:.3f} s / batch\n\n")
 
 
 
