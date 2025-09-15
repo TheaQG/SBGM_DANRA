@@ -7,7 +7,6 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 from data_analysis_pipeline.comparison.compare_fields import compute_field_stats
-from typing import Dict, Union
 
 # Setup logging
 logger = logging.getLogger(__name__)

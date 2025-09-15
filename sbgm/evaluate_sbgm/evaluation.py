@@ -57,8 +57,6 @@ class Evaluation:
         self.generated_sample_type = generated_sample_type
         logger.info(f'Type of generated samples: {self.generated_sample_type}\n')
 
-
-        # Load correct .npz !!! NEEDS TO BE FIXED! NEED CORRECT PATH TO DATA !!!
         if self.generated_sample_type == 'repeated':
             load_str = '_repeated_' + str(n_samples) + '.npz'
         elif self.generated_sample_type == 'single':
@@ -369,19 +367,14 @@ class Evaluation:
 
 
 
-    def daily_statistics(self,
-                        plot_stats=False,
-                        save_plots=False,
-                        save_stats=False,
-                        save_path=None
-                        ):
-        '''
-            Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
-        '''
+    # def daily_statistics(self):
+    #     '''
+    #         Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
+    #     '''
 
-        # Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
-        mae_daily = torch.abs(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2))
-        rmse_daily = torch.sqrt(torch.square(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2)))
+    #     # Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
+    #     mae_daily = torch.abs(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2))
+    #     rmse_daily = torch.sqrt(torch.square(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2)))
 
 
                                 
@@ -389,7 +382,6 @@ class Evaluation:
     def spatial_statistics(self,
                            show_figs=False,
                            save_figs=False,
-                           save_stats=False,
                            save_path=None,
                            n_samples=1
                            ):

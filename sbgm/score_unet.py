@@ -934,7 +934,6 @@ def loss_fn(model,
             x,
             marginal_prob_std,
             t_eps=1e-3, # to avoid dead gradients near t=0
-            device = None,
             y = None,
             cond_img = None,
             lsm_cond = None,

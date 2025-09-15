@@ -3,7 +3,7 @@ This script creates a small data batch for testing purposes.
 It takes a number of .npz or .nc files from all variable directories
 and creates a small data batch with a specified number of files.
 The small data batch is then saved under e.g. 'Data_DiffMod/data_DANRA/size_589x789/all_small/'
-which can then be used to generate 'train_small', 'val_small' and 'test_small' datasets.
+which can then be used to generate 'train_small', 'valid_small' and 'test_small' datasets.
 The small data batch is created by taking a random sample of files from the original data batch
 and saving them in a new directory, then converting them to zarr format.
 
@@ -31,7 +31,7 @@ import os
 import shutil
 import random
 import logging
-from data_analysis_pipeline.preprocess.daily_files_to_zarr import convert_npz_to_zarr, convert_nc_to_zarr
+from data_analysis_pipeline.preprocess.daily_files_to_zarr import convert_npz_to_zarr
 from sbgm.utils import build_data_path
 from data_analysis_pipeline.stats_analysis.variable_utils import get_var_name_short
 
@@ -221,7 +221,7 @@ def split_and_copy_to_dirs(model1='DANRA',
             
 
             train_dir = os.path.join(small_data_dir, 'train')
-            val_dir = os.path.join(small_data_dir, 'val')
+            val_dir = os.path.join(small_data_dir, 'valid')
             test_dir = os.path.join(small_data_dir, 'test')
             all_dir = os.path.join(small_data_dir, 'all')
 
@@ -279,7 +279,7 @@ def split_and_copy_to_dirs(model1='DANRA',
                 if not os.path.exists(all_dst):
                     shutil.copyfile(src, all_dst)
             small_data_dirs[model][var]['train'] = train_dir
-            small_data_dirs[model][var]['val'] = val_dir
+            small_data_dirs[model][var]['valid'] = val_dir
             small_data_dirs[model][var]['test'] = test_dir
 
     # logger.info the small data batch directories
@@ -289,7 +289,7 @@ def split_and_copy_to_dirs(model1='DANRA',
         for var in small_data_dirs[model].keys():
             logger.info(f"          Variable: {var}")
             logger.info(f"            Train dir: {small_data_dirs[model][var]['train']}")
-            logger.info(f"            Val dir:   {small_data_dirs[model][var]['val']}")
+            logger.info(f"            Val dir:   {small_data_dirs[model][var]['valid']}")
             logger.info(f"            Test dir:  {small_data_dirs[model][var]['test']}")
 
     # Return the small data batch directories
@@ -315,13 +315,13 @@ def dirs_to_zarr(data_path,
             os.makedirs(small_data_dir_zarr, exist_ok=True)
             # Get the train, val and test directories
             train_dir = small_data_dirs[model][var]['train']
-            val_dir = small_data_dirs[model][var]['val']
+            val_dir = small_data_dirs[model][var]['valid']
             test_dir = small_data_dirs[model][var]['test']
             # Convert the directories to zarr format
             logger.info(f"      Converting {train_dir} to zarr format...")
             convert_npz_to_zarr(train_dir, os.path.join(small_data_dir_zarr, 'train.zarr'), VERBOSE=False)
             logger.info(f"      Converting {val_dir} to zarr format...")
-            convert_npz_to_zarr(val_dir, os.path.join(small_data_dir_zarr, 'val.zarr'), VERBOSE=False)
+            convert_npz_to_zarr(val_dir, os.path.join(small_data_dir_zarr, 'valid.zarr'), VERBOSE=False)
             logger.info(f"      Converting {test_dir} to zarr format...")
             convert_npz_to_zarr(test_dir, os.path.join(small_data_dir_zarr, 'test.zarr'), VERBOSE=False)
 

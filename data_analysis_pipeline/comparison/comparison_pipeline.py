@@ -6,7 +6,7 @@ from data_analysis_pipeline.stats_analysis.data_loading import DataLoader
 from data_analysis_pipeline.comparison.compare_fields import compare_single_day_fields
 from data_analysis_pipeline.comparison.compare_timeseries import compare_over_time
 from data_analysis_pipeline.comparison.compare_distributions import compare_power_spectra, plot_histograms, batch_compare_power_spectra, compute_distribution_stats, compare_distributions, compare_seasonal_distributions
-from sbgm.utils import plot_sample_with_boxplot
+from sbgm.plotting_utils import plot_sample_with_boxplot
 
 # Setup logging
 logger = logging.getLogger(__name__)

@@ -3,13 +3,12 @@ import re
 import zarr
 import logging
 import numpy as np
-from tqdm import tqdm
 from datetime import datetime
 from glob import glob
 from datetime import datetime
 
 from data_analysis_pipeline.stats_analysis.path_utils import build_data_path
-from data_analysis_pipeline.stats_analysis.variable_utils import crop_to_region, get_var_name_short, correct_variable_units
+from sbgm.variable_utils import crop_to_region, get_var_name_short, correct_variable_units
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Setup logging

@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 from sbgm.training_utils import get_model_string, get_model, get_optimizer, get_dataloader, get_scheduler
 from sbgm.plotting_utils import plot_sample
-from sbgm.training_utils import setup_logger
+from sbgm.monitoring import setup_logger
 from sbgm.training import TrainingPipeline_general
 from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
 

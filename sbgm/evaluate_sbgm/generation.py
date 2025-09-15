@@ -100,13 +100,11 @@ class SampleGenerator:
                 topo_cond=topo_cond,
                 )
             
-        # # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
         gen_sample = gen_sample.squeeze().detach().cpu()
-        # # logger.info(f"[DEBUG] Generated sample shape: {gen_sample.shape}")
 
         # Normalize output shape to [B, H, W]
         if gen_sample.ndim == 4:
-            gen_sample = gen_sample.squeeze(1) # remove channel dim only !!! IF REWRITING TO MULTI CHANNEL OUTPUT THIS NEEDS TO GO !!!
+            gen_sample = gen_sample.squeeze(1) # remove channel dim only !!! NOTE IF REWRITING TO MULTI CHANNEL OUTPUT THIS NEEDS TO GO !!!
         elif gen_sample.ndim == 3:
             pass # [B, H, W], all good
         elif gen_sample.ndim == 2:

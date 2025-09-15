@@ -41,6 +41,8 @@ def create_train_valid_test_data_zarr(args):
         print(f'Train fraction: {train_frac}')
         print(f'Valid fraction: {valid_frac}')
         print(f'Test fraction: {test_frac}\n')
+    else:
+        raise ValueError('Data split type not recognized')
 
     # Set the paths to all data
     LR_PATH = data_dir + 'data_ERA5/size_589x789/' + lr_var + '_589x789/'
@@ -236,32 +238,3 @@ def launch_split_from_args():
 
 if __name__ == '__main__':
     launch_split_from_args()
-
-    # data_dir = '/Users/au728490/Documents/PhD_AU/Python_Scripts/Data/Data_DiffMod/'
-    # hr_var = 'temp'
-    # lr_var = 'temp'
-    # data_split_type = 'Time'
-    # train_years = np.arange(1990, 2016).astype(str)
-    # valid_years = np.arange(2016, 2019).astype(str)
-    # test_years = np.arange(2019, 2022).astype(str)
-
-    # data_split_params = {'train_years': train_years,
-    #                      'valid_years': valid_years,
-    #                      'test_years': test_years
-    #                      }
-    # data_split_type = 'Random'
-    # data_split_params = {'train_frac': 0.7,
-    #                      'valid_frac': 0.1,
-    #                      'test_frac': 0.2
-    #                      }
-
-    # create_train_valid_test_data_zarr(data_dir, hr_var, lr_var, data_split_type, data_split_params)
-
-    
-
-
-
-    
-
-
-    

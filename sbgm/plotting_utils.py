@@ -9,113 +9,13 @@ from matplotlib.gridspec import GridSpec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from typing import Optional, Union
 
-from sbgm.utils import get_units, _squeeze_geo_value
+from sbgm.utils import _squeeze_geo_value
+from sbgm.variable_utils import get_units, get_cmaps, get_cmap_for_variable
 
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-
-def get_cmaps(cfg):
-    """
-        Get the colormaps for plotting samples during training.
-        Colormaps are based on the configuration.
-    """
-    cmaps = {"temp": "plasma",
-             "prcp": "inferno",
-             "cape": "viridis",
-             "nwvf": "cividis",
-             "ewvf": "magma",
-             "msl": "coolwarm",
-             "z_pl_250": "coolwarm",
-             "z_pl_500": "coolwarm",
-             "z_pl_850": "coolwarm",
-             "z_pl_1000": "coolwarm",
-             }
-    
-
-    hr_cmap = cmaps[cfg['highres']['variable']]
-    lr_cmaps = {}
-    for key in cfg['lowres']['condition_variables']:
-        if key not in cmaps:
-            raise ValueError(f"Variable '{key}' not found in cmap dictionary.")
-        else:
-            lr_cmaps[key] = cmaps[key]
-
-    return hr_cmap, lr_cmaps
-
-def get_cmap_for_variable(variable: str):
-    """
-    Get the matplotlib colormap name for a specific variable.
-    """
-    cmaps = {"temp": "plasma",
-             "prcp": "inferno",
-             "cape": "viridis",
-             "nwvf": "cividis",
-             "ewvf": "magma",
-             "msl": "coolwarm",
-             "z_pl_250": "coolwarm",
-             "z_pl_500": "coolwarm",
-             "z_pl_850": "coolwarm",
-             "z_pl_1000": "coolwarm",
-             }
-
-    if variable not in cmaps:
-        # If variable not found, return a default colormap
-        logger.warning(f"[get_cmap_for_variable] Variable '{variable}' not found in cmap dictionary. Using default 'viridis'.")
-        return "viridis"
-    return cmaps[variable]
-
-def get_color_for_variable(variable: str, model: str):
-    """
-    Get a specific color for a variable based on the model type.
-    Models can be DANRA or ERA5 - same variables have different colors for the two models.
-    """
-    if model.lower() == "danra":
-        colors = {
-            "temp": "cornflowerblue",
-            "prcp": "darkorange",
-            "cape": "forestgreen",
-            "nwvf": "firebrick",
-            "ewvf": "darkmagenta",
-            "msl": "teal",
-            "z_pl_250": "pink",
-            "z_pl_500": "chocolate",
-            "z_pl_850": "orange", 
-            "z_pl_1000": "royalblue"
-        }
-    elif model.lower() == "era5":
-        colors = {
-            "temp": "mediumturquoise",
-            "prcp": "goldenrod",
-            "cape": "olive",
-            "nwvf": "coral",
-            "ewvf": "mediumpurple",
-            "msl": "skyblue",
-            "z_pl_250": "orchid",
-            "z_pl_500": "coral",
-            "z_pl_850": "tan",
-            "z_pl_1000": "midnightblue"
-        }
-    else:
-        # Default colors if model is unknown
-        colors = {
-            "temp": "cornflowerblue",
-            "prcp": "darkorange",
-            "cape": "forestgreen",
-            "nwvf": "firebrick",
-            "ewvf": "darkmagenta",
-            "msl": "teal",
-            "z_pl_250": "pink",
-            "z_pl_500": "chocolate",
-            "z_pl_850": "orange", 
-            "z_pl_1000": "royalblue"
-        }
-
-    if variable not in colors:
-        raise ValueError(f"[get_color_for_variable] Variable '{variable}' not found in color dictionary for model '{model}'.")
-    
-    return colors[variable]
 
 def plot_sample(sample,
                 cfg,

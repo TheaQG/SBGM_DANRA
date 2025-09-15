@@ -59,8 +59,6 @@ def evaluation_main(cfg):
     logger.info(f'[INFO] Configuration: {OmegaConf.to_yaml(cfg)}') # Print the configuration for debugging
 
 
-
-    # NEEDS TO BE MADE INTO A LOOP FOR POSSIBILITY OF ALL GENERATION TYPES
     for gen_type in cfg.evaluation.get('eval_gen_type', ['multiple']):
         logger.info(f'[INFO] Running evaluation for generated sample type: {gen_type}\n')
 
@@ -103,7 +101,6 @@ def evaluation_main(cfg):
                 eval_runner.spatial_statistics(
                     show_figs=cfg.get('show_figs', False),
                     save_figs=cfg.get('save_figs', True),
-                    save_stats=cfg.get('save_stats', False),
                     n_samples=cfg.get('n_gen_samples', 4)
                 )
             else:
@@ -113,26 +110,4 @@ def evaluation_main(cfg):
         logger.info(f'[INFO] Finished evaluation for generated sample type: {gen_type}\n')
 
     logger.info('[INFO] Evaluation completed for all generated sample types!\n')
-
-
-
-    # evaluation_multiple.spatial_statistics(show_figs=False, save_figs=True, save_stats=False, save_path=None, save_plot_path=args.path_save, n_samples=args.n_gen_samples)    
-    
-
-
-
-    # evaluation_single = Evaluation(args, generated_sample_type='single')
-
-
-    # fig, axs = evaluation_single.plot_example_images(masked=False, plot_with_cond=True, plot_with_lsm=False, show_figs=False,save_figs=True, n_samples=4, same_cbar=False)    
-
-
-    # evaluation_repeated = Evaluation(args, generated_sample_type='repeated')
-
-    # fig, axs = evaluation_repeated.plot_example_images(masked=False, plot_with_cond=True, plot_with_lsm=False, show_figs=False, n_samples=4, save_figs=True)
-
-
-
-# if __name__ == '__main__':
-#     parser
 

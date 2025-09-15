@@ -2,9 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import logging
-from sbgm.utils import get_units, get_cmaps, get_unit_for_variable, get_cmap_for_variable, get_color_for_variable
+from sbgm.variable_utils import get_unit_for_variable, get_cmap_for_variable, get_color_for_variable
 from sbgm.special_transforms import transform_from_stats
-from data_analysis_pipeline.stats_analysis.statistics import compute_statistics, compute_global_stats, load_global_stats
+from data_analysis_pipeline.stats_analysis.statistics import load_global_stats
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -204,6 +204,8 @@ def visualize_statistics(variable,
             logger.info(f"          Loaded global stats: {global_stats}")
         elif stats_dict and "global" in stats_dict:
             global_stats = stats_dict["global"]
+        else:
+            global_stats = None
 
 
         if global_stats is None:

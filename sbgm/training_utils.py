@@ -15,7 +15,8 @@ from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingL
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
 from sbgm.score_unet import ScoreNet, Encoder, Decoder, EDMPrecondUNet, marginal_prob_std_fn
 from sbgm.losses import EDMLoss, DSMLoss
-from sbgm.utils import build_data_path, get_units, get_model_string
+from sbgm.utils import build_data_path, get_model_string
+from sbgm.variable_utils import get_units
 from sbgm.special_transforms import build_back_transforms_from_stats
 # from sbgm.evaluation.evaluation import evaluate_model
 
@@ -775,73 +776,3 @@ def get_device(verbose=True):
     if verbose:
         logger.info(f"Using device: {device}")
     return device
-    
-
-
-def plot_results(train_losses, val_losses, train_scores, val_scores):
-    """
-    Plot the training and validation losses and scores.
-    
-    Args:
-        train_losses (list): List of training losses.
-        val_losses (list): List of validation losses.
-        train_scores (list): List of training scores.
-        val_scores (list): List of validation scores.
-    """
-    epochs = range(1, len(train_losses) + 1)
-
-    plt.figure(figsize=(12, 5))
-
-    # Plot losses
-    plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_losses, label='Train Loss')
-    plt.plot(epochs, val_losses, label='Validation Loss')
-    plt.title('Losses')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
-
-    # Plot scores
-    plt.subplot(1, 2, 2)
-    plt.plot(epochs, train_scores, label='Train Score')
-    plt.plot(epochs, val_scores, label='Validation Score')
-    plt.title('Scores')
-    plt.xlabel('Epochs')
-    plt.ylabel('Score')
-    plt.legend()
-
-    plt.tight_layout()
-    plt.show()
-
-
-def setup_logger(log_dir, name="train_log", log_to_stdout=True):
-    # Set up the path for the log directory
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"{name}_{timestamp}.log")
-
-    # Set up a logger, with level set to INFO which means it will log INFO, WARNING, ERROR, and CRITICAL messages
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    # Remove existing handlers (we remove all handlers to avoid duplicates)
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-
-    # File handler to write logs to a file
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.INFO)
-    # Set the format for the log messages
-    file_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
-    # Apply the formatter to the file handler
-    logger.addHandler(file_handler)
-
-    # Optional: also print to terminal
-    if log_to_stdout:
-        stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.INFO)
-        stream_handler.setFormatter(file_formatter)
-        logger.addHandler(stream_handler)
-
-    logger.info(f"Logging to {log_path}")
-    return logger

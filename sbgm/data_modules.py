@@ -1,6 +1,13 @@
 """
     Script for generating a pytorch dataset for the DANRA data.
     The dataset can be used for training and testing the SBGM_SD model.
+
+    TODO:
+        - Training data statistics instead of global statistics for scaling (lines 569, 602)
+        - Add static sampling (no crop + shift) option (fixed cutout)
+        - Add multiple cutout domains (Northern Germany, Poland, Netherlands etc.)
+        - Add option for Day-Of-Year conditional sampling
+        - Add option for 'Slope' as geo variable
 """
 
 # Import libraries and modules 
@@ -21,7 +28,7 @@ from torchvision.transforms import InterpolationMode
 from scipy.ndimage import distance_transform_edt as distance
 
 from sbgm.special_transforms import Scale, get_transforms_from_stats
-from sbgm.utils import correct_variable_units
+from sbgm.variable_utils import correct_variable_units
 
 # Set logging
 logger = logging.getLogger(__name__)
@@ -364,9 +371,6 @@ def _extract_2d_from_zarr_entry(zgroup: zarr.Group, file_key: str, var_name: str
             continue
     raise KeyError(f"Could not find a suitable data array in zarr entry '{file_key}' for variable '{var_name}'. Tried keys: {candidates} and all members.")
 
-# all_keys = list_all_keys(self.lr_cond_zarr_dict[cond])
-# logger.debug(all_keys)
-
 
 class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
     '''
@@ -430,8 +434,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # LR conditions and scaling parameters
         # (Remove any geo variable from conditions list, if accidentally included)
         self.geo_variables = geo_variables
-        # Check that there are the same number of scaling methods and parameters as conditions
-        if len(lr_conditions) != len(lr_scaling_methods): # or len(lr_conditions) != len(lr_scaling_params):
+        # Check that there are the same number of scaling methods as conditions
+        if len(lr_conditions) != len(lr_scaling_methods):
             raise ValueError('Number of conditions and scaling methods must be the same')
 
         # Go through the conditions, and if condition is in geo_variables, remoce from list, and remove scaling methods and params associated with it
@@ -442,11 +446,11 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     idx = lr_conditions.index(geo_var)
                     lr_conditions.pop(idx)
                     lr_scaling_methods.pop(idx)
-                    # lr_scaling_params.pop(idx)
+                    
         self.lr_conditions = lr_conditions
         self.lr_model = lr_model
         self.lr_scaling_methods = lr_scaling_methods
-        # self.lr_scaling_params = lr_scaling_params
+        
         # If any conditions exist, set with_conditions to True
         self.with_conditions = len(self.lr_conditions) > 0
 
@@ -496,7 +500,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.hr_variable = hr_variable
         self.hr_model = hr_model
         self.hr_scaling_method = hr_scaling_method
-        # self.hr_scaling_params = hr_scaling_params
         
         # Save geo variables full-domain arrays
         self.lsm_full_domain = lsm_full_domain
@@ -517,13 +520,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.n_classes = n_classes
         self.n_samples_w_cutouts = self.n_samples if n_samples_w_cutouts is None else n_samples_w_cutouts
         
-        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!! #
-        #                               #
-        # PRINT INFORMATION ABOUT SCALING
-        #                               #
-        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!! #
-
-
         # Build file maps based on the date in the file name      
         # Open main (HR) zarr group, and get HR file keys (pure filenames)
         self.zarr_group_img = zarr.open_group(hr_variable_dir_zarr, mode='r')
@@ -574,7 +570,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             crop_region_hr_str = '_'.join(map(str, crop_region_hr)) # if (cfg is not None and self.cutouts and self.cutout_domains is not None) else "full"
             crop_region_lr = cfg['lowres']['cutout_domains'] if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
             crop_region_lr_str = '_'.join(map(str, crop_region_lr)) # if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
-            split = 'all' # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first
+            split = 'all' # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first  NOTE: Need to add 'train' when training stats computed
             stats_load_dir = cfg['paths']['stats_load_dir'] if cfg is not None else './stats'
 
             for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
@@ -607,7 +603,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 model=self.hr_model,
                 domain_str=domain_str_hr,
                 crop_region_str=crop_region_hr_str,
-                split='all', # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first
+                split='all', # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first NOTE: Need to add 'train' when training stats computed
                 transform_type=self.hr_scaling_method,
                 buffer_frac=hr_buff,
                 stats_file_path=stats_load_dir,
@@ -654,9 +650,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     ResizeTensor(self.lr_size_reduced)
                 ])
                 self.geo_transform_lsm = self.geo_transform_topo
-
-
-
 
     def __len__(self):
         '''
@@ -722,8 +715,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             hr_point = None
             lr_point = None
 
-        # logger.debug(f'HR point: {hr_point}')
-        # logger.debug(f'LR point: {lr_point}')
         # Look up HR file using the common date
         hr_file_name = self.hr_file_map[date]
 
@@ -741,7 +732,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             
             # Crop LR data using lr_point if cutouts are enabled and lr_point is not None
             if self.cutouts and data is not None and lr_point is not None:
-                # lr_point is in format [x1, x2, y1, y2] - note: for slicing, use [y1:y2, x1:x2]
+                # lr_point is in format [x1, x2, y1, y2] - for slicing, use [y1:y2, x1:x2]
                 data = data[lr_point[0]:lr_point[1], lr_point[2]:lr_point[3]]
             # logger.debug(f"Data shape for {cond}: {data.shape if data is not None else None}")
                 

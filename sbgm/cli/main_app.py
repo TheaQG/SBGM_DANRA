@@ -16,16 +16,53 @@
 """
 import argparse
 import os
-import sys
+import hashlib
+import datetime
+import json
 import logging
+
+from omegaconf import OmegaConf
 
 from sbgm.cli import launch_sbgm, launch_generation, launch_evaluation
 from data_analysis_pipeline.cli import launch_split_creation
 from sbgm.utils import get_model_string, load_config
 
-# Set up logging
-logger = logging.getLogger(__name__)
 
+
+def setup_logger(save_dir, run_name):
+    os.makedirs(save_dir, exist_ok=True)
+    log_path = os.path.join(save_dir, f"{run_name}.log")
+    fmt = "%(asctime)s | %(levelname)s | %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt, handlers=[
+        logging.FileHandler(log_path, mode='w'),
+        logging.StreamHandler()
+    ])
+    return log_path
+
+def write_run_manifest(save_dir, cfg, data_tag=""):
+    yml = OmegaConf.to_yaml(cfg)
+    cfg_hash = hashlib.md5(yml.encode()).hexdigest()[:8]
+    # try:
+    #     git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    # except Exception:
+    #     git_commit = "N/A"
+    
+    manifest = {
+        "timestamp": datetime.datetime.utcnow().isoformat()+"Z",
+        "cfg_hash": cfg_hash,
+        # "git_commit": git_commit,
+        "paths":dict(cfg.paths),
+        "data_tag": data_tag,
+        "experiment": dict(cfg.experiment)
+    }
+    with open(os.path.join(save_dir, "RUN.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+    with open(os.path.join(save_dir, "RUN.md"), "w") as f:
+        f.write(f"# Run manifest\n\n```\n{json.dumps(manifest, indent=2)}\n```\n\n")
+
+    return manifest
+
+logger = logging.getLogger(__name__)
 
 def check_model_exists(cfg):
     model_name = get_model_string(cfg)

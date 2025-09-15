@@ -12,7 +12,7 @@ import numpy as np
 from numpy.fft import fft2, fftshift
 from collections import defaultdict
 from typing import Optional
-from sbgm.utils import get_unit_for_variable, get_color_for_variable
+from sbgm.variable_utils import get_unit_for_variable, get_color_for_variable
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -435,8 +435,8 @@ def compare_seasonal_distributions(
 
     # Concatenate all seasonal arrays
     for season in season_bins_model1:
-        season_bins_model1[season] = np.concatenate(season_bins_model1[season]) if season_bins_model1[season] else np.array([])
-        season_bins_model2[season] = np.concatenate(season_bins_model2[season]) if season_bins_model2[season] else np.array([])
+        season_bins_model1[season] = np.concatenate(season_bins_model1[season]) if season_bins_model1[season] else np.array([]) # type: ignore
+        season_bins_model2[season] = np.concatenate(season_bins_model2[season]) if season_bins_model2[season] else np.array([]) # type: ignore
 
     # === Plot 1: 1x2 panels, each model, seasonal histograms ===
     fig1, axs1 = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True, sharey=True)
@@ -445,10 +445,10 @@ def compare_seasonal_distributions(
     log_plot = variable in ['prcp']
 
     for season, color in colors.items():
-        print(f"Plotting season: {season}, \n\t\tsample size model1: {season_bins_model1[season].size}, model2: {season_bins_model2[season].size}")
-        if season_bins_model1[season].size > 0:
+        print(f"Plotting season: {season}, \n\t\tsample size model1: {season_bins_model1[season].size}, model2: {season_bins_model2[season].size}") # Debug print # type: ignore
+        if season_bins_model1[season].size > 0: # type: ignore
             axs1[0].hist(season_bins_model1[season], bins=bins, alpha=0.5, label=season, density=True, color=color, log=log_plot)
-        if season_bins_model2[season].size > 0:
+        if season_bins_model2[season].size > 0: # type: ignore
             axs1[1].hist(season_bins_model2[season], bins=bins, alpha=0.5, label=season, density=True, color=color, log=log_plot)
 
     axs1[0].set_title(f'{model1}')
@@ -464,9 +464,9 @@ def compare_seasonal_distributions(
     fig2, axs2 = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True, sharey=True)
     axs2 = axs2.flatten()
     for i, season in enumerate(['Winter', 'Spring', 'Summer', 'Autumn']):
-        if season_bins_model1[season].size > 0:
+        if season_bins_model1[season].size > 0: # type: ignore
             axs2[i].hist(season_bins_model1[season], bins=bins, alpha=0.5, label=model1, density=True, color=colors[season], log=log_plot)
-        if season_bins_model2[season].size > 0:
+        if season_bins_model2[season].size > 0: # type: ignore
             axs2[i].hist(season_bins_model2[season], bins=bins, alpha=0.5, label=model2, density=True, color=colors2[season], log=log_plot)
         axs2[i].set_title(f'{season}')
         axs2[i].legend()

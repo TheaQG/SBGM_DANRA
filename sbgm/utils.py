@@ -20,19 +20,22 @@
     - str2list_of_strings: Convert string to list of strings
     - str2dict: Convert string to dictionary
 
+    
+    TODO:
+        - Update extract_samples to also incorporate 'slope'
 '''
 
-import argparse
 import torch 
 import zarr
 import os
-import json
 import logging
 
 import netCDF4 as nc
-import torch.nn as nn
 import numpy as np
-from omegaconf import OmegaConf
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from typing import Optional, Union
 # --------------------------------------------------------------------------------
 # Helper: return numpy array with mask-channel removed, if shape == (2, H, W)
 # --------------------------------------------------------------------------------
@@ -49,37 +52,6 @@ def _squeeze_geo_value(arr, key):
 
 # Set up logging
 logger = logging.getLogger(__name__)
-
-def model_summary(model):
-    '''
-        Simple function to print the model summary
-    '''
-
-    logger.info("model_summary")
-    logger.info("Layer_name" + "\t"*7 + "Number of Parameters")
-    logger.info("="*100)
-    
-    model_parameters = [layer for layer in model.parameters() if layer.requires_grad]
-    layer_name = [child for child in model.children()]
-    j = 0
-    total_params = 0
-    logger.info("\t"*10)
-    for i in layer_name:
-        param = 0
-        try:
-            bias = (i.bias is not None)
-        except:
-            bias = False  
-        if not bias:
-            param =model_parameters[j].numel()+model_parameters[j+1].numel()
-            j = j+2
-        else:
-            param =model_parameters[j].numel()
-            j = j+1
-        logger.info(str(i) + "\t"*3 + str(param))
-        total_params+=param
-    logger.info("="*100)
-    logger.info(f"Total Params:{total_params}")     
 
 
 def get_model_string(cfg):
@@ -124,66 +96,6 @@ def get_model_string(cfg):
 
     return save_str
 
-class SimpleLoss(nn.Module):
-    def __init__(self):
-        super(SimpleLoss, self).__init__()
-        self.mse = nn.MSELoss()#nn.L1Loss()#$
-
-    def forward(self, predicted, target):
-        return self.mse(predicted, target)
-
-class HybridLoss(nn.Module):
-    def __init__(self, alpha=0.5, T=10):
-        super(HybridLoss, self).__init__()
-        self.alpha = alpha
-        self.T = T
-        self.mse = nn.MSELoss()
-
-    def forward(self, predictions, targets):
-        loss = self.mse(predictions[-1], targets[0])
-        
-        for t in range(1, self.T):
-            loss += self.alpha * self.mse(predictions[t-1], targets[t])
-        
-        return loss
-
-class SDFWeightedMSELoss(nn.Module):
-    '''
-        Custom loss function for SDFs.
-
-    '''
-    def __init__(self, max_land_weight=1.0, min_sea_weight=0.5, device=None):
-        super().__init__()
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = device
-
-        self.to(self.device)
-
-        self.max_land_weight = max_land_weight
-        self.min_sea_weight = min_sea_weight
-#        self.mse = nn.MSELoss(reduction='none')
-
-    def forward(self, input, target, sdf):
-        # Convert SDF to weights, using a sigmoid function (or similar)
-        # Scaling can be adjusted to control sharpness of transition
-        weights = torch.sigmoid(sdf) * (self.max_land_weight - self.min_sea_weight) + self.min_sea_weight
-
-        # Calculate the squared error
-        input = input.to(self.device)
-        target = target.to(self.device)
-        squared_error = (input - target)**2
-
-        squared_error = squared_error.to(self.device)
-        weights = weights.to(self.device)
-
-        # Apply the weights
-        weighted_squared_error = weights * squared_error
-
-        # Return mean of weighted squared error
-        return weighted_squared_error.mean()
-    
 
 def convert_npz_to_zarr(npz_directory, zarr_file, VERBOSE=False):
     '''
@@ -510,72 +422,6 @@ def get_first_sample_dict(samples: dict) -> dict:
     return single_sample
 
 
-def str2bool(v):
-    '''
-        Function to convert string to boolean.
-        Used for argparse.
-    '''
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1', 'True'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0', 'False'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-
-def str2list(v):
-    """
-    Convert a string to a list.
-
-    If the string is in JSON list format (begins with '[' and ends with ']'),
-    this function uses json.loads to parse it. Otherwise, it splits the string
-    on commas and tries to convert each element to an integer, then float,
-    and if neither conversion applies, leaves it as a string.
-    
-    Examples:
-      - '[1,2,3]' --> [1, 2, 3]
-      - '1,2,3'   --> [1, 2, 3]
-      - '["a", "b", "c"]' --> ["a", "b", "c"]
-      - '1.1,2.2,3.3' --> [1.1, 2.2, 3.3]
-    """
-    v = v.strip()
-    if v.startswith('[') and v.endswith(']'):
-        try:
-            return json.loads(v)
-        except Exception:
-            # If JSON loading fails, fallback to splitting
-            pass
-
-    # If input is None, return None
-    if v is None:
-        return None
-
-    # Fallback: split on commas and try to convert each element.
-    items = [x.strip() for x in v.split(',')]
-    result = []
-    for x in items:
-        try:
-            result.append(int(x))
-        except ValueError:
-            try:
-                result.append(float(x))
-            except ValueError:
-                result.append(x)
-    return result    
-
-def str2list_of_strings(v):
-    # Split the input string by commas, strip any extra whitespace around the strings
-    return [s.strip() for s in v.split(',')]
-
-import ast
-def str2dict(v):
-    try:
-        # Try to safely evaluate the string as a Python literal
-        return ast.literal_eval(v)
-    except (ValueError, SyntaxError):
-        raise argparse.ArgumentTypeError("Invalid dictionary format.")
-
 
 def build_data_path(base_path, model, var, full_domain_dims, split, zarr_file=True):
     """
@@ -592,84 +438,9 @@ def build_data_path(base_path, model, var, full_domain_dims, split, zarr_file=Tr
 
 
 
-def get_units(cfg):
-    """
-        Get the specifications for plotting samples during training.
-        Colors, labels, and other parameters are based on the configuration.
-    """
-
-    
-    units = {"temp": r"$^\circ$C",
-             "prcp": "mm",
-             "cape": "J/kg",
-             "nwvf": "m/s",
-             "ewvf": "m/s",
-             "msl": "hPa",
-             "z_pl_250": "m",
-             "z_pl_500": "m",
-             "z_pl_850": "m",
-             "z_pl_1000": "m",
-             }
 
 
-    hr_unit = units[cfg['highres']['variable']]
-    lr_units = []
-    for key in cfg['lowres']['condition_variables']:
-        if key not in units:
-            raise ValueError(f"Variable '{key}' not found in units dictionary.")
-        else:
-            lr_units.append(units[key])
 
-    return hr_unit, lr_units
-
-def get_unit_for_variable(variable: str):
-    """
-    Get the unit string for a specific variable.
-    """
-    units = {
-        "temp": r"$^\circ$C",
-        "prcp": "mm",
-        "cape": "J/kg",
-        "nwvf": "m/s",
-        "ewvf": "m/s",
-        "msl": "hPa",
-        "z_pl_250": "m",
-        "z_pl_500": "m",
-        "z_pl_850": "m",
-        "z_pl_1000": "m",
-    }
-
-    if variable not in units:
-        raise ValueError(f"[get_unit_for_variable] Variable '{variable}' not found in units dictionary.")
-    return units[variable]
-
-def correct_variable_units(var_name, model, data):
-    
-    """
-    Apply basic unit corrections to known variables.
-    E.g., convert temperature from K to C, precipitation from m to mm.
-    """
-    if var_name in ["temp", "t2m"]:
-        data = data - 273.15
-    elif var_name in ["prcp", "tp"] and model in ["DANRA"]:
-        # Make sure no negative values (set <0 to 1e-10)
-        data[data < 0] = 1e-10
-    elif var_name in ["prcp"] and model in ["ERA5"]:
-        data = data * 1000  # from m to mm
-        # Make sure no negative values after conversion (set <0 to 1e-10)
-        data[data < 0] = 1e-10
-    elif var_name in ["cape"] and model in ["ERA5"]:
-        data = data / 1000  # from J/kg to kJ/kg
-        # Also ensure no negative CAPE values
-        data[data < 0] = 1e-10
-    elif var_name in ["msl"] and model in ["ERA5"]:
-        data = data / 100  # from Pa to hPa
-    elif var_name in ["pev"] and model in ["ERA5"]:
-        data = data / 1000  # from Pa to hPa
-    elif var_name in ["z_pl_1000", "z_pl_250", "z_pl_500", "z_pl_850"] and model in ["ERA5"]:
-        data = data / 9.81  # from geopotential to geopotential height in meters
-        
-    return data
 
 def crop_to_region(data, crop_region):
     """
@@ -678,34 +449,9 @@ def crop_to_region(data, crop_region):
     [x_start, x_end, y_start, y_end] = crop_region
     return data[x_start:x_end, y_start:y_end]
 
-def get_var_name_short(varname, model, domain_size=[589, 789]):
-    """
-    Optionally standardize variable naming (e.g., aliasing or shortening).
-    """
-    domain_size_str = f"{domain_size[0]}x{domain_size[1]}"
 
-    if model == 'DANRA':
-        aliases = {
-            "temp": "t2m_ave",
-            "prcp": "tp_tot"
-        }
-    elif model == 'ERA5':
-        aliases = {
-            "cape": f"cape_{domain_size_str}",
-            "ewvf": f"wvf_east_{domain_size_str}",
-            "msl": f"msl_{domain_size_str}",
-            "nwvf": f"wvf_north_{domain_size_str}",
-            "pev": f"pev_{domain_size_str}",
-            "prcp": f"tp_{domain_size_str}",
-            "temp": f"t2m_{domain_size_str}",
-            "z_pl_1000": f"z_pl_1000_hPa_{domain_size_str}",
-            "z_pl_250": f"z_pl_250_hPa_{domain_size_str}",
-            "z_pl_500": f"z_pl_500_hPa_{domain_size_str}",
-            "z_pl_850": f"z_pl_850_hPa_{domain_size_str}"
-        }
-    else:
-        aliases = {}
-    return aliases.get(varname, varname)
+
+from omegaconf import OmegaConf
 
 def load_config(config_path):
     """
@@ -722,3 +468,43 @@ def load_config(config_path):
     cfg = OmegaConf.create(cfg)
 
     return cfg
+
+def report_precip_extremes(x_bt: torch.Tensor, name: str, cap_mm_day: float = 500.0, logger=print):
+    """
+        Reports extremes in a back-transformed precipitation tensor.
+        Values below 0 are counted as negative, values above cap_mm_day are counted as extreme.
+    """
+    flat = x_bt.flatten(1)
+    p999 = torch.quantile(flat, 0.999, dim=1)
+    mx = torch.max(flat, dim=1).values
+    n_ex = 0
+    vals_ex = []
+    n_b0 = 0
+    vals_b0 = []
+    for i, (p, m) in enumerate(zip(p999.tolist(), mx.tolist())):
+        if m > max(5.0 * p, cap_mm_day):
+            logger(f"{name} sample {i} has extreme precipitation: max={m:.1f} mm/day > max(5xp99.9={p:.1f} mm/day)")
+            n_ex += 1
+            vals_ex.append(m)
+        if m < 0:
+            logger(f"{name} sample {i} has negative precipitation: max={m:.1f} mm/day < 0")
+            n_b0 += 1
+            vals_b0.append(m)
+    if n_b0 > 0 and n_ex > 0:
+        return {'has_extreme': True, 'n_extreme': n_ex, 'extreme_values': vals_ex,
+                'has_below_zero': True, 'n_below_zero': n_b0, 'below_zero_values': vals_b0}
+    if n_ex > 0:
+        return {'has_extreme': True, 'n_extreme': n_ex, 'extreme_values': vals_ex}
+    if n_b0 > 0:
+        return {'has_below_zero': True, 'has_below_zero': True, 'n_below_zero': n_b0, 'below_zero_values': vals_b0}
+
+    return {'has_extreme': False}
+
+
+# def load_config(yaml_file):
+#     """
+#         Loads a YAML configuration file and returns a dictionary
+#     """
+#     with open(yaml_file, 'r') as f:
+#         config = yaml.safe_load(f)
+#         return config

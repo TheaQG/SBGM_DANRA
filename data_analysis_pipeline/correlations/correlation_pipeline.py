@@ -146,12 +146,12 @@ def run_data_correlations(cfg):
                 logger.info(f"          Using transformation '{lr_transform_method}' for LR variable")
                 # Apply normalization to each cutout
                 for date in shared_dates:
-                    hr_dict[date] = transform_from_stats(data=hr_dict[date], transform_type=hr_transform_method, cfg=cfg, stats=hr_stats_dict)
+                    hr_dict[date] = transform_from_stats(data=hr_dict[date], transform_type=hr_transform_method, cfg=cfg, stats=hr_stats_dict) # type: ignore
                     
                     if not isinstance(hr_dict[date], np.ndarray):
                         hr_dict[date] = np.array(hr_dict[date])
         
-                    lr_dict[date] = transform_from_stats(data=lr_dict[date], transform_type=lr_transform_method, cfg=cfg, stats=lr_stats_dict)
+                    lr_dict[date] = transform_from_stats(data=lr_dict[date], transform_type=lr_transform_method, cfg=cfg, stats=lr_stats_dict) # type: ignore
                     if not isinstance(lr_dict[date], np.ndarray):
                         lr_dict[date] = np.array(lr_dict[date])
 
