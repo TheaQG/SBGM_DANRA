@@ -4,9 +4,7 @@ import torch.nn as nn
 import zarr
 import logging
 
-import matplotlib.pyplot as plt
 import numpy as np
-from datetime import datetime
 
 from torch.utils.data import DataLoader
 from torch.optim import Adam, SGD, AdamW

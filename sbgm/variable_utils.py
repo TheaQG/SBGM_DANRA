@@ -5,6 +5,7 @@ cropping to regions, and retrieving plotting specifications.
 
 import logging
 
+# Setup logging
 logger = logging.getLogger(__name__)
 
 def get_units(cfg):

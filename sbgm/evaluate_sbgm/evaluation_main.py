@@ -1,3 +1,9 @@
+"""
+    TODO:
+        - Make sure that evaluation figures saved in SBGM_SD/models_and_samples/
+"""
+
+
 import os
 import torch
 import logging
@@ -8,37 +14,8 @@ from omegaconf import OmegaConf
 from sbgm.utils import get_model_string
 from sbgm.evaluate_sbgm.evaluation import Evaluation
 
-def setup_logger(log_dir, name="train_log", log_to_stdout=True):
-    # Set up the path for the log directory
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"{name}_{timestamp}.log")
-
-    # Set up a logger, with level set to INFO which means it will log INFO, WARNING, ERROR, and CRITICAL messages
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    # Remove existing handlers (we remove all handlers to avoid duplicates)
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-
-    # File handler to write logs to a file
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.INFO)
-    # Set the format for the log messages
-    file_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
-    # Apply the formatter to the file handler
-    logger.addHandler(file_handler)
-
-    # Optional: also print to terminal
-    if log_to_stdout:
-        stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.INFO)
-        stream_handler.setFormatter(file_formatter)
-        logger.addHandler(stream_handler)
-
-    logger.info(f"Logging to {log_path}")
-    return logger
+logger = logging.getLogger(__name__)
+logging.captureWarnings(True)
 
 
 def evaluation_main(cfg):
@@ -53,10 +30,8 @@ def evaluation_main(cfg):
     # Setup logging
     model_name_str = get_model_string(cfg)
     gen_dir = os.path.join(cfg["paths"]["sample_dir"], 'generation', model_name_str)
-    log_gen_dir = os.path.join(gen_dir, 'logs')
-    
-    logger = setup_logger(log_gen_dir)
-    logger.info(f'[INFO] Configuration: {OmegaConf.to_yaml(cfg)}') # Print the configuration for debugging
+
+    # logger.info(f'[INFO] Configuration: {OmegaConf.to_yaml(cfg)}') # Print the configuration for debugging
 
 
     for gen_type in cfg.evaluation.get('eval_gen_type', ['multiple']):

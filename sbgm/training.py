@@ -1,7 +1,13 @@
+"""
+    TODO:
+        - Implement CFG again
+        - Implement EMA 
+        - Implement mixed precision training 
+"""
+
 import os
 import torch
 import copy
-import math
 import pickle
 import tqdm
 import logging 
@@ -16,8 +22,6 @@ from sbgm.utils import extract_samples
 from sbgm.plotting_utils import get_cmaps
 from sbgm.plotting_utils import plot_samples_and_generated
 from sbgm.monitoring import report_precip_extremes
-from sbgm.data_modules import *
-# from sbgm.score_unet import loss_fn, marginal_prob_std_fn, diffusion_coeff_fn
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
 from sbgm.training_utils import get_model_string, get_units, get_loss_fn
 from sbgm.monitoring import edm_cosine_metric
@@ -911,7 +915,7 @@ class TrainingPipeline_general:
                 show_plot: Boolean to show the plot.
         '''
         # Plot the losses
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(8, 6))
         ax.plot(train_losses, label='Training Loss', color='blue')
         if val_losses is not None:
             ax.plot(val_losses, label='Validation Loss', color='orange')

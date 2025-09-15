@@ -1,15 +1,18 @@
 # sbgm/training_main.py
 import os
 import torch
+import logging
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from sbgm.training_utils import get_model_string, get_model, get_optimizer, get_dataloader, get_scheduler
 from sbgm.plotting_utils import plot_sample
-from sbgm.monitoring import setup_logger
 from sbgm.training import TrainingPipeline_general
 from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 def train_main(cfg):
     """
@@ -18,9 +21,6 @@ def train_main(cfg):
     Args:
         cfg (dict): Configuration dictionary containing all necessary parameters.
     """
-    # Setup logging
-    log_dir = os.path.join(cfg["paths"]["checkpoint_dir"], 'logs')
-    logger = setup_logger(log_dir)
 
     logger.info("\n\n=== Starting SBGM_SD Training Pipeline ===")
     logger.info(f"          Experiment name: {cfg['experiment']['name']}")
