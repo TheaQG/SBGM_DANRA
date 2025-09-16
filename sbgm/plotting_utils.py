@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from typing import Optional, Union
+from typing import Optional, Union, List, Dict
 
 from sbgm.utils import _squeeze_geo_value
 from sbgm.variable_utils import get_units, get_cmaps, get_cmap_for_variable
@@ -638,12 +638,19 @@ def plot_samples_and_generated(
             return x.detach().cpu().numpy()
         return np.asarray(x)
 
-    def maybe_inverse(k, arr):
-        logger.info(f"Applying inverse transformation for key: {k}")
+    def maybe_inverse(k, arr, verbose=False):
         if transform_back_bf_plot and back_transforms and k in back_transforms:
-            logger.info(f"Found inverse transformation for key: {k}")
+            if verbose:
+                logger.info(f"Applying inverse transformation for key: {k}")
+                logger.info(f"Found inverse transformation for key: {k}")
             return back_transforms[k](arr)
-        logger.info(f"No inverse transformation found for key: {k}")
+        if verbose:
+            if not transform_back_bf_plot:
+                logger.info("transform_back_bf_plot is False, skipping inverse transform.")
+            elif back_transforms is None:
+                logger.info("No back_transforms provided, skipping inverse transform.")
+            elif k not in back_transforms:
+                logger.info(f"No inverse transformation found for key: {k}")
         return arr
     # logger.info(f'Samples: {samples}')
     # logger.info(f'Generated: {generated}')
@@ -744,6 +751,7 @@ def plot_samples_and_generated(
             img = _squeeze_geo_value(img, key)
             img = maybe_inverse(key, img)
 
+
             # mask ocean for HR & generated columns
             if not show_ocean and key in {gen_key, hr_key, f"{hr_key}_original"}:
                 if "lsm_hr" in sample and sample["lsm_hr"] is not None:
@@ -809,3 +817,323 @@ def plot_samples_and_generated(
 
     fig.tight_layout()
     return fig, axs
+
+
+# ===============================
+# Metrics plotting helpers
+# ===============================
+
+def _ensure_dir(path:str):
+    os.makedirs(path, exist_ok=True)
+
+def _safe_savefig(fig, save_dir: str, filename: str, dpi=300):
+    _ensure_dir(save_dir)
+    full = os.path.join(save_dir, filename)
+    fig.savefig(full, dpi=dpi, bbox_inches='tight')
+    logger.info(f"[plot] Saved figure to {full}")
+
+def plot_live_training_metrics(
+        steps: List[int],
+        edm_cosine: List[float],
+        hr_lr_corr: List[float],
+        *,
+        save_dir: str,
+        filename: str = "live_metrics.png",
+        show: bool = False,
+        title: str | None = None,
+):
+    """
+        Line plots for lightweight in-loop metrics collected over steps.
+    """
+    title = title or "Live Training Metrics"
+    fig, ax = plt.subplots(figsize=(8, 5))
+    steps_np = np.asarray(steps, dtype=float)
+    if len(steps_np) == 0:
+        logger.warning("No steps provided for live training metrics plot.")
+        return
+    
+    def _maybe_plot(y, label): 
+        y = np.asarray(y, dtype=float)
+        ok = np.isfinite(y)
+        if ok.any():
+            ax.plot(steps_np[ok], y[ok], label=label, lw=2)
+
+    _maybe_plot(edm_cosine, "EDM Cosine Similarity")
+    _maybe_plot(hr_lr_corr, "HR-LR Correlation")
+
+    ax.set_xlabel("Global step")
+    ax.set_ylabel("Metric value")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    ax.set_title(title)
+    fig.tight_layout()
+    _safe_savefig(fig, save_dir, filename)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+# ------------------------------
+# FSS at multiple spatial scales
+# ------------------------------
+def plot_fss_epoch(
+    fss: Dict[str, float],
+    *,
+    save_dir: str,
+    filename: str = "fss_epoch.png",
+    title: str = "FSS at scales",
+    show: bool = False,
+):
+    """
+    Bar plot for a single-epoch FSS dictionary, e.g. {'5km': 0.7, '10km': 0.8, ...}
+    """
+    if not fss:
+        logger.warning("[plot] plot_fss_epoch: empty dict; skipping.")
+        return
+    # Sort by numeric km if possible
+    def _km_key(k):
+        try:
+            return float(k.replace("km", ""))
+        except Exception:
+            return float("inf")
+    keys = sorted(fss.keys(), key=_km_key)
+    vals = [fss[k] for k in keys]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(keys, vals)
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("FSS")
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.2)
+    fig.tight_layout()
+    _safe_savefig(fig, save_dir, filename)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+def plot_fss_history(
+    fss_hist: List[Dict[str, float]],
+    *,
+    save_dir: str,
+    filename: str = "fss_history.png",
+    title: str = "FSS over epochs",
+    show: bool = False,
+):
+    """
+    Line plot over epochs. Each scale gets its own line.
+    fss_hist: list of dicts per epoch, e.g. [{'5km':..,'10km':..}, {...}, ...]
+    """
+    if not fss_hist:
+        logger.warning("[plot] plot_fss_history: empty history; skipping.")
+        return
+    # Collect all scales
+    scales = sorted({k for d in fss_hist for k in d.keys()},
+                    key=lambda k: float(k.replace("km", "")) if "km" in k else float("inf"))
+    epochs = np.arange(1, len(fss_hist) + 1)
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    for s in scales:
+        y = [d.get(s, np.nan) for d in fss_hist]
+        y = np.asarray(y, dtype=float)
+        ok = np.isfinite(y)
+        if ok.any():
+            ax.plot(epochs[ok], y[ok], label=s, lw=2)
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("FSS")
+    ax.set_ylim(0, 1)
+    ax.grid(True, alpha=0.3)
+    ax.legend(title="Scale")
+    ax.set_title(title)
+    fig.tight_layout()
+    _safe_savefig(fig, save_dir, filename)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+# ------------------------------
+# PSD slope (β) comparisons
+# ------------------------------
+def plot_psd_slope_epoch(
+    psd: Dict[str, float],
+    *,
+    save_dir: str,
+    filename: str = "psd_slope_epoch.png",
+    title: str = "PSD slope (log–log)",
+    show: bool = False,
+):
+    """
+    Bar plot comparing gen vs HR slopes (if available) with delta text.
+    Expected keys: 'psd_slope_gen', optionally 'psd_slope_hr' and 'psd_slope_delta'
+    """
+    gen = psd.get("psd_slope_gen", np.nan)
+    hr = psd.get("psd_slope_hr", np.nan)
+    has_hr = np.isfinite(hr)
+
+    fig, ax = plt.subplots(figsize=(5.5, 4))
+    labels = ["Gen"] + (["HR"] if has_hr else [])
+    vals = [gen] + ([hr] if has_hr else [])
+    ax.bar(labels, vals, color=["#4c72b0", "#55a868"][:len(labels)])
+    ax.set_ylabel("Slope β")
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.2)
+
+    # annotate delta if both present
+    if has_hr and np.isfinite(gen):
+        delta = psd.get("psd_slope_delta", float(hr - gen))
+        ax.text(0.5, max(vals) + 0.02, f"Δ (HR–Gen) ≈ {delta:.3f}",
+                ha="center", va="bottom", transform=ax.get_xaxis_transform())
+
+    fig.tight_layout()
+    _safe_savefig(fig, save_dir, filename)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+def plot_psd_slope_history(
+    psd_hist: List[Dict[str, float]],
+    *,
+    save_dir: str,
+    filename: str = "psd_slope_history.png",
+    title: str = "PSD slope over epochs",
+    show: bool = False,
+):
+    """
+    Line plots of β_gen and β_hr over epochs (if HR available), plus Δ on a secondary axis.
+    """
+    if not psd_hist:
+        logger.warning("[plot] plot_psd_slope_history: empty history; skipping.")
+        return
+
+    epochs = np.arange(1, len(psd_hist) + 1, dtype=float)
+    gen = np.array([d.get("psd_slope_gen", np.nan) for d in psd_hist], dtype=float)
+    hr  = np.array([d.get("psd_slope_hr", np.nan) for d in psd_hist], dtype=float)
+    delta = np.array([d.get("psd_slope_delta", np.nan) for d in psd_hist], dtype=float)
+
+    fig, ax1 = plt.subplots(figsize=(7.5, 4.5))
+    ln1 = ax1.plot(epochs, gen, label="β_gen", lw=2)
+    ln2 = []
+    if np.isfinite(hr).any():
+        ln2 = ax1.plot(epochs, hr, label="β_hr", lw=2)
+
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Slope β")
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title(title)
+
+    ax2 = None
+    if np.isfinite(delta).any():
+        ax2 = ax1.twinx()
+        ln3 = ax2.plot(epochs, delta, "--", label="Δ(HR–Gen)", lw=2)
+        ax2.set_ylabel("Δ β")
+        lines = ln1 + ln2 + ln3
+    else:
+        lines = ln1 + ln2
+
+    labs = [l.get_label() for l in lines]
+    ax1.legend(lines, labs, loc="best")
+
+    fig.tight_layout()
+    _safe_savefig(fig, save_dir, filename)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+# -----------------------------------------
+# Quantiles & wet-day frequency comparisons
+# -----------------------------------------
+def plot_quantiles_wetday_epoch(
+    q: Dict[str, float],
+    *,
+    save_dir: str,
+    filename: str = "quantiles_wetday_epoch.png",
+    title: str = "Quantiles and wet-day frequency",
+    show: bool = False,
+):
+    """
+    Grouped bar chart for Q95, Q99, wet-day freq (gen vs HR if available).
+    Expected keys: 'gen_q95','gen_q99','gen_wet_freq' and optionally 'hr_*'
+    """
+    keys = [("q95", "gen_q95", "hr_q95"),
+            ("q99", "gen_q99", "hr_q99"),
+            ("wetfreq", "gen_wet_freq", "hr_wet_freq")]
+    labels = []
+    gen_vals, hr_vals = [], []
+    for lab, gk, hk in keys:
+        labels.append(lab.upper())
+        gen_vals.append(q.get(gk, np.nan))
+        hr_vals.append(q.get(hk, np.nan))
+
+    x = np.arange(len(labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.bar(x - width/2, gen_vals, width, label="Gen")
+    if np.isfinite(hr_vals).any():
+        ax.bar(x + width/2, hr_vals, width, label="HR")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Value")
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.2)
+    ax.legend()
+    fig.tight_layout()
+    _safe_savefig(fig, save_dir, filename)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+def plot_quantiles_wetday_history(
+    q_hist: List[Dict[str, float]],
+    *,
+    save_dir: str,
+    filename: str = "quantiles_wetday_history.png",
+    title: str = "Q95/Q99/Wet-day over epochs",
+    show: bool = False,
+):
+    """
+    Line plots for Q95/Q99/wet-day across epochs (gen and HR where available).
+    """
+    if not q_hist:
+        logger.warning("[plot] plot_quantiles_wetday_history: empty history; skipping.")
+        return
+
+    epochs = np.arange(1, len(q_hist) + 1, dtype=float)
+
+    def _series(gk, hk):
+        g = np.array([d.get(gk, np.nan) for d in q_hist], dtype=float)
+        h = np.array([d.get(hk, np.nan) for d in q_hist], dtype=float)
+        return g, h
+
+    series = [
+        ("Q95", "gen_q95", "hr_q95"),
+        ("Q99", "gen_q99", "hr_q99"),
+        ("Wet-day freq", "gen_wet_freq", "hr_wet_freq"),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.6), sharex=True)
+    for ax, (name, gk, hk) in zip(axes, series):
+        g, h = _series(gk, hk)
+        okg = np.isfinite(g)
+        if okg.any():
+            ax.plot(epochs[okg], g[okg], label="Gen", lw=2)
+        okh = np.isfinite(h)
+        if okh.any():
+            ax.plot(epochs[okh], h[okh], label="HR", lw=2)
+        ax.set_title(name)
+        ax.grid(True, alpha=0.3)
+        if name == "Wet-day freq":
+            ax.set_ylim(0, 1)
+
+    axes[0].set_xlabel("Epoch")
+    axes[1].set_xlabel("Epoch")
+    axes[2].set_xlabel("Epoch")
+    axes[0].set_ylabel("Value")
+    axes[0].legend(loc="best")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    _safe_savefig(fig, save_dir, filename)
+    if show:
+        plt.show()
+    plt.close(fig)

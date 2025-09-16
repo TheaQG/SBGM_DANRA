@@ -153,7 +153,7 @@ def get_dataloader(cfg, verbose=True):
                         crop_region_str_lr  = crop_region_lr_str,
                         lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                         lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                        split               = 'all',
+                        split               = cfg['transforms']['scaling_split'] if 'scaling_split' in cfg['transforms'] else 'train',
                         stats_dir_root      = cfg['paths']['stats_load_dir']
                         )
 
@@ -478,7 +478,7 @@ def get_gen_dataloader(cfg, verbose=True):
                         crop_region_str_lr  = crop_region_lr_str,
                         lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                         lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                        split               = 'all',
+                        split               = cfg['transforms']['scaling_split'] if 'scaling_split' in cfg['transforms'] else 'train',
                         stats_dir_root      = cfg['paths']['stats_load_dir']
                         )
 

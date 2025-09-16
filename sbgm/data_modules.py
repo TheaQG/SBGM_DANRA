@@ -507,7 +507,10 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
         # Save classifier-free guidance parameters
         self.cfg = cfg
-        self.split = split 
+        self.split = split
+
+        # Save what split statistics to use for scaling (train, valid, test or all). ALMOST ALWAYS USE 'train' TO AVOID DATA LEAKAGE 
+        self.scaling_split = cfg['transforms']['scaling_split'] if cfg is not None else 'train'
 
         # Save other parameters
         self.shuffle = shuffle
@@ -570,7 +573,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             crop_region_hr_str = '_'.join(map(str, crop_region_hr)) # if (cfg is not None and self.cutouts and self.cutout_domains is not None) else "full"
             crop_region_lr = cfg['lowres']['cutout_domains'] if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
             crop_region_lr_str = '_'.join(map(str, crop_region_lr)) # if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
-            split = 'all' # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first  NOTE: Need to add 'train' when training stats computed
+            scaling_split = self.scaling_split
             stats_load_dir = cfg['paths']['stats_load_dir'] if cfg is not None else './stats'
 
             for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
@@ -585,7 +588,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     model=self.lr_model,
                     domain_str=domain_str_lr,
                     crop_region_str=crop_region_lr_str,
-                    split=split,
+                    scaling_split=scaling_split,
                     transform_type=trans_type,
                     buffer_frac=cfg['lowres'].get('buffer_frac', 0.5) if cfg is not None else 0.5,
                     stats_file_path=stats_load_dir,
@@ -603,7 +606,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 model=self.hr_model,
                 domain_str=domain_str_hr,
                 crop_region_str=crop_region_hr_str,
-                split='all', # Need to use 'all' for global stats. If not computed yet, used needs to run statistics script first NOTE: Need to add 'train' when training stats computed
+                scaling_split=scaling_split,
                 transform_type=self.hr_scaling_method,
                 buffer_frac=hr_buff,
                 stats_file_path=stats_load_dir,

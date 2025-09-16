@@ -42,6 +42,9 @@ def run_comparison_pipeline(cfg):
     show = comparison_cfg.get("show", False)
     save_figures = comparison_cfg.get("save_figures", True)
     save_path = comparison_cfg.get("save_path", "./figures")
+    if split is not None:
+        # Append split to save path if not "all"
+        save_path = os.path.join(save_path, split) if split != "all" else save_path
     print_results = comparison_cfg.get("print_results", True)
     max_days = comparison_cfg.get("max_days", None)  # Limit number of days to process (for testing)
 

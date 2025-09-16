@@ -3,6 +3,7 @@
         - Implement CFG again
         - Implement EMA 
         - Implement mixed precision training 
+        - Make precipitation evaluations only when precipitation is the target variable
 """
 
 import os
@@ -19,12 +20,26 @@ from torch.cuda.amp import autocast, GradScaler
 
 from sbgm.special_transforms import build_back_transforms_from_stats
 from sbgm.utils import extract_samples
-from sbgm.plotting_utils import get_cmaps
-from sbgm.plotting_utils import plot_samples_and_generated
-from sbgm.monitoring import report_precip_extremes
+from sbgm.plotting_utils import (
+    get_cmaps,
+    plot_samples_and_generated,
+    plot_live_training_metrics,
+    plot_fss_epoch,
+    plot_fss_history,
+    plot_psd_slope_epoch,
+    plot_psd_slope_history,
+    plot_quantiles_wetday_epoch,
+    plot_quantiles_wetday_history,
+    )
+from sbgm.monitoring import (
+    report_precip_extremes,
+    edm_cosine_metric,
+    compute_fss_at_scales,
+    compute_psd_slope,
+    compute_q95_q99_and_wet_day,
+    )
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
 from sbgm.training_utils import get_model_string, get_units, get_loss_fn
-from sbgm.monitoring import edm_cosine_metric
 
 # Speed up conv algo selection on fixed input sizes
 if torch.cuda.is_available():
@@ -86,17 +101,24 @@ class TrainingPipeline_general:
         self.lr_scheduler = lr_scheduler
 
         self.scaling = cfg['transforms']['scaling']
+
         self.hr_var = cfg['highres']['variable']
         self.hr_scaling_method = cfg['highres']['scaling_method']
         self.full_domain_dims_hr = cfg['highres']['full_domain_dims']
         self.crop_region_hr = cfg['highres']['cutout_domains']
-        # self.hr_scaling_params = cfg['highres']['scaling_params']
+
         self.lr_vars = cfg['lowres']['condition_variables']
         self.lr_scaling_methods = cfg['lowres']['scaling_methods']
         self.full_domain_dims_lr = cfg['lowres']['full_domain_dims']
         self.crop_region_lr = cfg['lowres']['cutout_domains']
-        # self.lr_scaling_params = cfg['lowres']['scaling_params']
         
+        # inject into dicts
+        self.bt_gen_key = "generated"
+
+        # --------------------------------------------------- assemble key order
+        self.bt_hr_key = f"{self.hr_var}_hr"
+        self.bt_lr_keys = [f"{var}_lr" for var in self.lr_vars]
+
         self.weight_init = cfg['training']['weight_init']
         self.custom_weight_initializer = cfg['training']['custom_weight_initializer']
         self.sdf_weighted_loss = cfg['training']['sdf_weighted_loss']
@@ -127,7 +149,6 @@ class TrainingPipeline_general:
                 param.detach_()
 
         # Set up checkpoint directory, name and path
-        # ======== !!!!!!!!!!!!! CHANGE CHECKPOINT_NAME TO BE FULL get_model_string !!!!!!!!!!!!! ==========
         self.checkpoint_dir = cfg['paths']['checkpoint_dir']
         self.checkpoint_name = get_model_string(cfg) + '.pth.tar' 
         self.checkpoint_path = os.path.join(self.checkpoint_dir, self.checkpoint_name)
@@ -146,6 +167,8 @@ class TrainingPipeline_general:
         self.path_samples = cfg['paths']['path_save'] + '/samples/' + self.model_string
         self.path_losses = cfg['paths']['path_save'] + '/losses'
         self.path_figures = self.path_samples + '/Figures'
+        # Metrics path
+        self.path_metrics = os.path.join(self.path_figures, 'metrics')
 
         # Create the directories if they do not exist
         if not os.path.exists(self.path_samples):
@@ -157,6 +180,9 @@ class TrainingPipeline_general:
         if not os.path.exists(self.path_figures):
             os.makedirs(self.path_figures)
             logger.info(f"→ Figures directory created at {self.path_figures}")
+        if not os.path.exists(self.path_metrics):
+            os.makedirs(self.path_metrics)
+            logger.info(f"→ Metrics directory created at {self.path_metrics}")
 
         # === Monitoring: extreme precipitation values in generated samples ===
         monitor_cfg = cfg.get('monitoring', {})
@@ -199,6 +225,31 @@ class TrainingPipeline_general:
         # === EDM flags (used for residual baseline handling) ===
         self.edm_enabled = bool((cfg.get('edm', {}).get('enabled', False)))
         self.edm_predict_residual = bool((cfg.get('edm', {}).get('predict_residual', False)))
+
+        # === Live, lightweight monitors (append in loop; plot occasionally) ===
+        moncfg = cfg.get('monitoring', {})
+        self.monitor_plot_every_n_epochs = int(moncfg.get('plot_every_n_epochs', 5))
+        self.live_metrics = {
+            'steps': [],
+            'edm_cosine': [],
+            'hr_lr_corr': []
+        }
+        self.eval_land_only = bool(cfg.get('evaluation', {}).get('eval_land_only', False))
+
+        # Persistent histories of epoch-level monitors
+        self.fss_hist: list[dict] = []
+        self.psd_hist: list[dict] = []
+        self.q_hist: list[dict] = []
+
+        # Monitoring configuration
+        cfg_mon__end_of_epoch = moncfg.get('end_of_epoch', {})
+        self.fss_scales_km = list(cfg_mon__end_of_epoch.get('fss_km', [5, 10, 20])) # Scales in km for FSS
+        self.fss_threshold_mm = float(cfg_mon__end_of_epoch.get('fss_threshold_mm', 1.0)) # Threshold in mm for FSS
+        self.pixel_km = float(cfg_mon__end_of_epoch.get('grid_km_per_px', 2.5)) # Grid spacing in km/px
+        self.wetday_thresh = float(cfg_mon__end_of_epoch.get('wet_day_threshold_mm', 0.1)) # Wet day threshold in mm/day
+        self.psd_compare_to_hr = bool(cfg_mon__end_of_epoch.get('psd_compare_to_hr', True)) # Whether to compare LR/HR PSD slopes
+        self.quantiles_compare_to_hr = bool(cfg_mon__end_of_epoch.get('quantiles_compare_to_hr', True)) # Whether to compare LR/HR quantiles
+
 
     def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
         """
@@ -420,12 +471,37 @@ class TrainingPipeline_general:
 
             if edm_on and log_every > 0 and (global_step % log_every == 0):
                 cos = edm_cosine_metric(self.loss_fn, self.model, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo)
+                self.live_metrics['steps'].append(global_step)
+                self.live_metrics['edm_cosine'].append(float(cos)) # type: ignore
                 if cos is not None:
                     pbar.set_postfix(loss=loss_sum / (idx + 1), edm_cosine=cos)
                     if verbose:
                         logger.info(f"→ [monitor][train] Step {idx}: EDM cosine metric: {cos:.4f}")
                     if self.writer is not None:
                         self.writer.add_scalar('monitoring/edm_cosine_metric_train', cos, (current_epoch - 1) * len(dataloader) + idx)
+
+                # HR <-> LR alignment corr (cheap). Use lr_ups_baseline already built for residual path, else derive it here if needed
+                hr_lr_corr_val = float('nan')
+                try: 
+                    if lr_ups_baseline is None and cond_images is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
+                        lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
+                    if lr_ups_baseline is not None:
+                        # Optional land-only mask
+                        mask = None
+                        if self.eval_land_only and (lsm_hr is not None):
+                            mask = (lsm_hr >= 0.5).float()  # [B, 1, H, W]
+                        from sbgm.monitoring import _masked_corrcoef_per_sample
+                        hr_lr_corr_val = _masked_corrcoef_per_sample(x, lr_ups_baseline.expand_as(x), mask=mask).item()
+                        if verbose:
+                            logger.info(f"[monitor][train] Step {idx}: HR-LR correlation: {hr_lr_corr_val:.4f}")
+                except Exception as e:
+                    logger.warning(f"[monitor][train] Could not compute HR-LR correlation at step {idx}. Error: {e}")
+                    hr_lr_corr_val = float('nan')
+                finally:
+                    self.live_metrics['hr_lr_corr'].append(hr_lr_corr_val)
+                    if self.writer is not None:
+                        self.writer.add_scalar('monitoring/hr_lr_corr_train', hr_lr_corr_val, (current_epoch - 1) * len(dataloader) + idx)
+                    
 
             # === Extreme-prcp sentinel on ground-truth HR (optional; lightweight) ===
             if self.extreme_enabled and (global_step % self.extreme_every_step == 0):
@@ -529,7 +605,7 @@ class TrainingPipeline_general:
             self.epoch = epoch 
             # Print epoch number if verbose
             if verbose:
-                logger.info(f"▸ Starting epoch {epoch}/{epochs}...")
+                logger.info(f"\n\n      ▸ Starting epoch {epoch}/{epochs}...")
 
             # Train on batches
             train_loss = self.train_batches(train_dataloader,
@@ -554,7 +630,7 @@ class TrainingPipeline_general:
                 # Save the model
                 self.save_model(dirname=self.checkpoint_dir, filename=self.checkpoint_name)
                 logger.info(f"→ Best model saved with validation loss: {best_loss:.4f} at epoch {epoch}.")
-                logger.info(f"→ Checkpoint saved to {os.path.join(self.checkpoint_dir, self.checkpoint_name)}\n\n")
+                logger.info(f"→ Checkpoint saved to {os.path.join(self.checkpoint_dir, self.checkpoint_name)}")
 
 
             # Pickle dump the losses
@@ -572,7 +648,13 @@ class TrainingPipeline_general:
                                  save_path=self.path_figures,
                                  save_name=f'losses_plot_{self.model_string}.png',
                                  show_plot=cfg['visualization']['show_figs'])
-
+            # Plot in-loop timeseries occasionally
+            if (self.monitor_plot_every_n_epochs > 0) and (epoch % self.monitor_plot_every_n_epochs == 0):
+                try:
+                    self._plot_live_metrics(self.path_metrics)
+                except Exception as e:
+                    logger.warning(f"[monitor] Could not plot live metrics at epoch {epoch}. Error: {e}")
+            
             # Generate and save samples, if create_figs is True
             if cfg['visualization']['create_figs'] and cfg['data_handling']['n_gen_samples'] > 0:
                 # Only generate and plot if loss improved or every n epochs if configured
@@ -591,6 +673,7 @@ class TrainingPipeline_general:
                                                    cfg=cfg,
                                                    epoch=epoch)
 
+            logger.info(f"→ Epoch {epoch}/{epochs} completed. \n\n")
 
         return train_loss, val_loss
 
@@ -757,18 +840,13 @@ class TrainingPipeline_general:
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
             x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
+            logger.info(f"→ Generating {len(x_gen)} samples at epoch {epoch}, batch {idx}...")
+            logger.info(f"      Only plotting first {min(cfg['visualization'].get('n_plot_samples', 4), cfg['data_handling']['n_gen_samples'])} samples.")
 
             # Setup lr_ups_baseline if needed
             lr_ups_baseline = None
             if edm_on and self.edm_predict_residual:
                 lr_ups_baseline = self._build_lr_ups_baseline(cond_images_gen)  # [B, 1, H, W]
-
-            # Check shapes of x_gen, cond_images_gen, lsm_gen, topo_gen
-            # logger.info(f"\nShape of x_gen: {x_gen.shape}")
-            # logger.info(f"Shape of seasons_gen: {seasons_gen.shape}")
-            # logger.info(f"Shape of cond_images_gen: {cond_images_gen.shape if cond_images_gen is not None else 'None'}")
-            # logger.info(f"Shape of lsm_gen: {lsm_gen.shape if lsm_gen is not None else 'None'}")
-            # logger.info(f"Shape of topo_gen: {topo_gen.shape if topo_gen is not None else 'None'}")
 
             if edm_on and sampler_edm is not None:
                 edm_cfg = cfg.get('edm', {}) or {}
@@ -807,94 +885,132 @@ class TrainingPipeline_general:
             else:
                 raise ValueError("No valid sampler found. Please check the configuration.")
 
-            generated_samples = generated_samples.squeeze().detach().cpu()
+            # Keep sampler output in model space on CPU (preserve batch dim!)
+            gen_model = generated_samples.detach().cpu().float()
 
+            # === Back-transform for metrics (NOT plotting) ===
+            # 1) Get HR and generated in physical space if possible (else use model space)
+            if back_transforms is not None:
+                # Expect a callable for HR back-transform under key self.bt_gen_key
+                bt_gen = back_transforms.get(self.bt_gen_key, None)
+                bt_hr = back_transforms.get(self.bt_hr_key, None)
+                if callable(bt_gen):
+                    logger.info("[monitor] Applying HR back-transform to generated samples.")
+                    gen_phys = bt_gen(gen_model)
+                else:
+                    logger.warning("[monitor] HR back-transform not callable; using model space for generated samples.")
+                    gen_phys = gen_model
 
+                if callable(bt_hr):
+                    logger.info("[monitor] Applying HR back-transform to ground-truth HR samples.")
+                    hr_phys = bt_hr(x_gen)
+                else:
+                    logger.warning("[monitor] HR back-transform not callable; using model space for ground-truth HR samples.")
+                    hr_phys = x_gen
+            else:
+                logger.info("[monitor] No back-transforms available; using model space for generated samples.")
+                gen_phys = gen_model
+                hr_phys = x_gen
 
-            # === Back-transform generated samples for sentinel (and optional clamp) ===
+            # 2) Extreme sentinel and optional clamp on generated samples in physical space
+            # TODO: Clamp gen_model in model space for injection to plotting? Maybe add clamper in sampling instead?
             try:
-                # Reuse back-transforms built earlier
-                if isinstance(generated_samples, torch.Tensor):
-                    gen_for_check = generated_samples
-                else:
-                    gen_for_check = torch.as_tensor(generated_samples)
-
-                gen_bt = None
-
-                if cfg.get("monitoring", {}).get("extreme_prcp", {}).get("back_transform", True):
-                    bt = back_transforms.get('hr', None)
-                    if bt is not None:
-                        if callable(bt):
-                            gen_bt = bt(gen_for_check)
-                        else:
-                            logger.warning(f"[monitor] Back-transform object for HR is not callable and has no 'transform' method.")
-                    else:
-                        gen_bt = gen_for_check
-                else:
-                    gen_bt = gen_for_check
-
-                # Run sentinel
+                # Extreme sentinel (and optional clamp) in PHYSICAL space
                 mon_cfg = cfg.get('monitoring', {}).get('extreme_prcp', {})
                 thr = float(mon_cfg.get('threshold_mm', self.extreme_threshold_mm))
-                # Ensure gen_bt is a torch.Tensor before calling detach
-                if gen_bt is None:
-                    gen_bt = torch.zeros_like(generated_samples)
-                if not isinstance(gen_bt, torch.Tensor):
-                    gen_bt = torch.as_tensor(gen_bt)
-                chk = report_precip_extremes(gen_bt.detach().cpu(), name="generated_hr", cap_mm_day=thr)
-                has_extreme = chk.get('has_extreme', False)
-                n_extreme = chk.get('n_extreme', 0)
-                extreme_values = chk.get('extreme_values', [])
-                has_below_zero = chk.get('has_below_zero', False)
-                n_below_zero = chk.get('n_below_zero', 0)
-                below_zero_values = chk.get('below_zero_values', [])
 
-                if has_extreme:
-                    mx = max(extreme_values) if isinstance(extreme_values, list) else None
+                # Ensure gen_phys is a torch.Tensor before passing to report_precip_extremes
+                if not isinstance(gen_phys, torch.Tensor):
+                    gen_phys = torch.tensor(gen_phys)
+                chk = report_precip_extremes(x_bt=gen_phys, name="generated_hr", cap_mm_day=thr)
+                if chk.get('has_extreme', False):
+                    extreme_values = chk.get('extreme_values', [])
+                    mx = max(extreme_values) if isinstance(extreme_values, list) and extreme_values else None
                     cnt = len(extreme_values) if isinstance(extreme_values, list) else None
-                    logger.warning(f"[monitor][gen] Extreme precipitation detected in generated samples:")
-                    logger.warning(f"               max={mx:.1f} mm/day, count={cnt}, threshold={thr} mm/day")
+                    logger.warning(f"[monitor][gen] Extreme precip: max={mx:.1f} mm/day, count={cnt}, thr={thr} mm/day")
 
-                    # Clamp extreme values in generated samples if configured
                     if mon_cfg.get('clamp_in_generation', self.extreme_clamp_in_gen):
-                        # Clamp in gen_bt space first
                         clamp_max = float(mon_cfg.get('clamp_max_mm', thr))
-                        if not isinstance(gen_bt, torch.Tensor):
-                            gen_bt = torch.as_tensor(gen_bt)
-                        gen_bt = torch.clamp(gen_bt, min=0.0, max=clamp_max)
-                        logger.warning(f"[monitor][gen] Clamped generated samples to max {clamp_max} mm/day.")
-                        # Replace array that will be plotted with clamped values
-                        generated_samples = gen_bt
+                        gen_phys = torch.clamp(gen_phys, min=0.0, max=clamp_max)
+                        logger.warning(f"[monitor][gen] Clamped generated samples to ≤ {clamp_max} mm/day.")
+                        logger.warning(f"[monitor][gen] Note: clamping is not done on plotted samples, only on gen_phys used for metrics. Consider adding clamping in sampling instead if desired.")
             except Exception as e:
-                logger.warning(f"[monitor] Could not check for extreme precipitation in generated samples. Error: {e}")
+                logger.warning(f"[monitor] Could not run extreme sentinel. Error: {e}")
 
+            # === Epoch-level metrics (always use PHYSICAL for fairness) ===
+            try:
+                # Make sure everything is on CPU and detached
+                if not isinstance(gen_phys, torch.Tensor):
+                    gen_phys = torch.tensor(gen_phys)
+                gen_phys = gen_phys.detach().cpu()
+                if not isinstance(hr_phys, torch.Tensor):
+                    hr_phys = torch.tensor(hr_phys)
+                hr_phys = hr_phys.detach().cpu()
+                if lsm_hr_gen is not None:
+                    if not isinstance(lsm_hr_gen, torch.Tensor):
+                        lsm_hr_gen = torch.tensor(lsm_hr_gen)
+                    lsm_hr_gen = lsm_hr_gen.detach().cpu()
 
+                # Optional land-only mask at HR resolution
+                mask = None
+                if self.eval_land_only and (lsm_hr_gen is not None):
+                    mask = (lsm_hr_gen >= 0.5).to(dtype=torch.float32).detach().cpu()
 
-            # Plot generated and original samples
+                # Ensure gen_phys and hr_phys are torch.Tensor
+                if not isinstance(gen_phys, torch.Tensor):
+                    gen_phys = torch.tensor(gen_phys)
+                if not isinstance(hr_phys, torch.Tensor):
+                    hr_phys = torch.tensor(hr_phys)
+
+                # 1) FSS @ scales
+                fss_dict = compute_fss_at_scales(
+                    gen_phys, hr_phys, mask=mask,
+                    fss_km=self.fss_scales_km,
+                    grid_km_per_px=self.pixel_km,
+                    thr_mm=self.fss_threshold_mm
+                )
+                self.fss_hist.append(fss_dict)
+                # Plot only history, not per-epoch
+                plot_fss_history(self.fss_hist, save_dir=self.path_metrics,
+                                filename="fss_history.png",
+                                title="FSS history" + (" (land-only)" if self.eval_land_only else ""))
+                # 2) PSD slope
+                psd_dict = compute_psd_slope(gen_phys, hr_bt=hr_phys if self.psd_compare_to_hr else None, mask=mask)
+                self.psd_hist.append(psd_dict)
+                # Plot only history, not per-epoch
+                plot_psd_slope_history(self.psd_hist, save_dir=self.path_metrics,
+                                    filename="psd_history.png",
+                                    title="PSD slope history" + (" (land-only)" if self.eval_land_only else ""))
+
+                # 3) Q95/Q99 + wet-day
+                q_dict = compute_q95_q99_and_wet_day(gen_phys,
+                                                    hr_bt=hr_phys if self.quantiles_compare_to_hr else None,
+                                                    mask=mask,
+                                                    wet_threshold_mm=self.wetday_thresh)
+                self.q_hist.append(q_dict)
+                # Plot only history, not per-epoch
+                plot_quantiles_wetday_history(self.q_hist, save_dir=self.path_metrics,
+                                            filename="quantiles_history.png",
+                                            title="Quantiles & wet-day history" + (" (land-only)" if self.eval_land_only else ""))
+            except Exception as e:
+                logger.warning(f"[monitor] Could not compute epoch-level metrics at epoch {epoch}. Error: {e}")
+
+            # === Plot samples ===
             if cfg['visualization']['create_figs']:
+                # Use gen_model and samples (both in model space) for plotting and transform in plotting function if needed
                 fig, _ = plot_samples_and_generated(
                     samples=samples,
-                    generated=generated_samples,
+                    generated=gen_model, 
                     cfg=cfg,
                     transform_back_bf_plot=cfg['visualization']['transform_back_bf_plot'],
-                    back_transforms=back_transforms,
+                    back_transforms=back_transforms
                 )
-
                 if cfg['visualization']['save_figs']:
-                    # Save the figure
-                    fig.savefig(os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png'), dpi=300, bbox_inches='tight')
+                    fig.savefig(os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png'),
+                                dpi=300, bbox_inches='tight')
                     logger.info(f"→ Figure saved to {os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png')}")
-
-                if cfg['visualization']['show_figs']:
-                    # Show the figure
-                    plt.show()
-                else:
-                    # Close the figure
-                    plt.close(fig)
-
-                # Stop after the first batch, as we only want to generate samples once per epoch
-                break
-                    
+                plt.close(fig)
+                break  # one batch per epoch                    
 
         # Set model back to training mode
         self.model.train()
@@ -904,7 +1020,8 @@ class TrainingPipeline_general:
                     val_losses=None,
                     save_path=None,
                     save_name='losses_plot.png',
-                    show_plot=False):
+                    show_plot=False,
+                    verbose=True):
         '''
             Plot the training and validation losses.
             Args:
@@ -931,11 +1048,35 @@ class TrainingPipeline_general:
         # Save the plot
         if save_path is not None:
             fig.savefig(os.path.join(save_path, save_name), dpi=300, bbox_inches='tight')
-            logger.info(f"→ Losses plot saved to {os.path.join(save_path, save_name)}")
-        
+            if verbose:
+                logger.info(f"→ Losses plot saved to {os.path.join(save_path, save_name)}")
+
         plt.close(fig)
 
+    def _plot_live_metrics(self, save_dir: str):
+        """
+        Internal method to plot live training metrics if enabled in the configuration.
+        Args:
+            save_dir (str): Directory where the metrics plot will be saved.
+        """
+        if len(self.live_metrics['steps']) == 0:
+            return
 
+        out = os.path.join(self.path_metrics, 'inLoop_metrics_timeseries.png')
 
+        try:
+            plot_live_training_metrics(
+                self.live_metrics['steps'],
+                self.live_metrics['edm_cosine'],
+                self.live_metrics['hr_lr_corr'],
+                save_dir=self.path_metrics,
+                filename='inLoop_metrics_timeseries.png',
+                show=self.cfg['visualization'].get('show_figs', False),
+                title="In-loop training metrics (EDM cosine, HR-LR corr)"
+            )
+            logger.info(f"→ Live metrics plot saved to {out}")
+
+        except Exception as e:
+            logger.error(f"[Monitor] Could not save live metrics plot to {out}. Error: {e}")
 
         

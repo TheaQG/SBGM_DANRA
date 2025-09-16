@@ -16,13 +16,250 @@
 import torch
 import logging
 import os
+import math
 
+import numpy as np
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 from datetime import datetime
 
 from sbgm.losses import EDMLoss
 
 logger = logging.getLogger(__name__)
+
+def _to_tensor(x):
+    return x if isinstance(x, torch.Tensor) else torch.tensor(x)
+
+@torch.no_grad()
+def compute_fss_at_scales(gen_bt: torch.Tensor, hr_bt: torch.Tensor, *, mask:torch.Tensor|None,
+                  grid_km_per_px: float, fss_km: list[float], thr_mm: float, eps: float=1e-8) -> dict[str, float]:
+    """
+        Fractions Skill Score (FSS) for exceedance over threshold thr_mm at different spatial scales (km).
+        gen_bt, hr_bt: [B,1,H,W] back-transformed precipitation tensors in mm/day.
+        mask: [B,1,H,W] land mask (1=land, 0=sea) or None
+    """
+    gen_bt = _to_tensor(gen_bt).float()
+    hr_bt = _to_tensor(hr_bt).float()
+    if mask is not None:
+        mask = mask.bool().expand_as(gen_bt)
+
+    X = (gen_bt > thr_mm).float() # Binary exceedance for generated
+    Y = (hr_bt > thr_mm).float() # Binary exceedance for HR
+
+    out = {}
+    for km in fss_km:
+        rad_px = int(max(1, round(float(km) / float(grid_km_per_px)))) # Radius in pixels (int)
+        k = 2 * rad_px + 1 # Odd kernel size (int)
+        # Box filter via average pooling
+        Xs = F.avg_pool2d(X, kernel_size=k, stride=1, padding=rad_px)
+        Ys = F.avg_pool2d(Y, kernel_size=k, stride=1, padding=rad_px)
+        if mask is not None:
+            m = mask.float()
+            num = ((Xs - Ys) ** 2 * m).sum() / (m.sum() + eps) # Mean squared error over land
+            den = (((Xs ** 2 + Ys ** 2) * m).sum() / (m.sum() + eps)) + eps
+        else:
+            num = ((Xs - Ys) ** 2).mean() # Mean squared error over all pixels
+            den = (Xs ** 2 + Ys ** 2).mean() + eps
+        fss = 1.0 - num / den # Fractions Skill Score
+        out[f'{int(km)}km'] = float(fss)#float(fss.clamp(0.0, 1.0)) # Clamp to [0,1]
+    
+    return out
+
+# === PSD Slope metric
+@torch.no_grad()
+def _radial_psd_slope_single(img: torch.Tensor, *, mask:torch.Tensor|None=None, ignore_low_k_bins: int=1) -> float:
+    """
+        Compute the slope of the radially-averaged 2D power spectrum for a single 2D field.
+        Returns the log-log slope (beta) from a linear fit of log10(P(k)) vs log10(k).
+        The lowest *ignore_low_k_bins* raidal frequency bins are dropped to avoid DC/very-low-k dominance.
+    """
+    # Ensure 2-D (H,W)
+    if img.ndim == 3 and img.shape[0] == 1:
+        img = img[0]
+    elif img.ndim == 4 and img.shape[0] == 1 and img.shape[1] == 1:
+        img = img[0,0]
+    elif img.ndim != 2:
+        img = img.squeeze()
+        if img.ndim != 2:
+            raise ValueError(f"Input image must be 2D, got shape {img.shape}")
+    
+    # Optional mask: zero out masked pixels (keeping shape)
+    if mask is not None:
+        m = mask
+        if m.ndim == 3 and m.shape[0] == 1:
+            m = m[0]
+        elif m.ndim == 4 and m.shape[0] == 1 and m.shape[1] == 1:
+            m = m[0,0]
+        if m.dtype != torch.bool:
+            m = (m > 0.5)
+        img = img * m.float()
+
+    # 2D FFT and power spectrum
+    F = torch.fft.fft2(img.float())
+    P = (F.real ** 2 + F.imag ** 2)  # Power spectrum
+    P = torch.fft.fftshift(P)  # Shift zero freq to center
+
+    H, W = img.shape[-2:] # Height, Width
+    cy, cx = (H - 1) / 2.0, (W - 1) / 2.0  # Center coordinates
+    y = torch.arange(H, device=img.device)
+    x = torch.arange(W, device=img.device)
+    Y, X = torch.meshgrid(y, x, indexing='ij')
+    R = torch.sqrt((X - cx) ** 2 + (Y - cy) ** 2)  # Radial distances
+
+    # Radial bins: 1 px per bin
+    r = R.flatten()
+    p = P.flatten()
+    rmax = int(torch.max(R).item())
+    if rmax < (ignore_low_k_bins + 2):
+        return float('nan')  # Not enough radial bins to compute slope
+    
+    # Bin by integer radius
+    nbins = rmax + 1
+    sums = torch.zeros(nbins, device=img.device)
+    counts = torch.zeros(nbins, device=img.device)
+    idx = r.long().clamp(0, rmax)
+    sums.scatter_add_(0, idx, p) # Sum power in each radial bin
+    ones = torch.ones_like(p, device=img.device)
+    counts.scatter_add_(0, idx, ones) # Count pixels in each radial bin
+
+    with torch.no_grad():
+        valid = counts > 0
+        radii = torch.arange(nbins, device=img.device)[valid]
+        prof = (sums[valid] / counts[valid]).clamp(min=1e-12)  # Average power per bin, avoid log(0)
+
+    # Drop DC and a few low-k bins
+    if radii.numel() <= (ignore_low_k_bins + 1):
+        return float('nan')  # Not enough bins to fit
+    radii = radii[ignore_low_k_bins:]
+    prof = prof[ignore_low_k_bins:]
+
+    # Linear fit in log-log space
+    k = radii.detach().cpu().numpy()
+    Pk = prof.detach().cpu().numpy()
+    if np.any(k <= 0) or np.any(np.isnan(Pk)):
+        return float('nan')
+    
+    xlog = np.log10(k)
+    ylog = np.log10(Pk)
+    # Guard against degenerate cases (e.g. constant image)
+    if not np.all(np.isfinite(xlog)) or not np.all(np.isfinite(ylog)):
+        return float('nan')
+    if xlog.size < 3:
+        return float('nan')
+    beta, _ = np.polyfit(xlog, ylog, 1)  # Slope is beta
+    
+    return float(beta)
+
+
+@torch.no_grad()
+def compute_psd_slope(
+    gen_bt: torch.Tensor,
+    hr_bt: torch.Tensor|None= None,
+    *,
+    mask:torch.Tensor|None=None,
+    ignore_low_k_bins: int=1
+) -> dict[str, float]:
+    """
+        Compute radial PSD slope (log-log slope of P(k) vs k) for generated fields and (optionally) HR reference fields.
+        Inputs are expected to be back-transformed precipitation (mm/day), shaped [B, 1, H, W] or [B, H, W].
+        If *mask* is provided ([B, 1, H, W] or [B, H, W]) only masked pixels are used in the computation.
+        Returns a dict with keys
+        - 'psd_slope_gen': mean PSD slope for generated fields across the batch
+        - 'psd_slope_hr': mean PSD slope for HR fields across the batch (if hr_bt is provided)
+        - 'psd_slope_delta': difference in mean PSD slope (gen - hr) if hr_bt is provided
+    """
+    def _prep(t):
+        t = _to_tensor(t).float()
+        if t.ndim == 3: # [B,H,W] -> [B,1,H,W]
+            t = t[:, None, :, :]
+        return t
+    
+    G = _prep(gen_bt)
+    M = None
+    if mask is not None:
+        M = _prep(mask).bool()
+    Href = _prep(hr_bt) if hr_bt is not None else None
+
+    betas_g = []
+    betas_h = [] if Href is not None else None
+
+    B = G.shape[0]
+    for i in range(B):
+        mi = M[i] if M is not None else None
+        betas_g.append(_radial_psd_slope_single(G[i], mask=mi, ignore_low_k_bins=ignore_low_k_bins))
+        if Href is not None and betas_h is not None:
+            betas_h.append(_radial_psd_slope_single(Href[i], mask=mi, ignore_low_k_bins=ignore_low_k_bins))
+
+    def _clean_mean(arr):
+        arr = np.asarray(arr, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        return float(arr.mean()) if arr.size > 0 else float('nan')
+    
+    out = {'psd_slope_gen': _clean_mean(betas_g)}
+    if betas_h is not None:
+        mhr = _clean_mean(betas_h)
+        out['psd_slope_hr'] = mhr
+        if np.isfinite(out['psd_slope_gen']) and np.isfinite(mhr):
+            out['psd_slope_delta'] = float(mhr - out['psd_slope_gen'])
+
+    return out
+
+
+
+@torch.no_grad()
+def compute_q95_q99_and_wet_day(
+    gen_bt: torch.Tensor,
+    hr_bt: torch.Tensor|None = None,
+    *,
+    mask:torch.Tensor|None=None,
+    wet_threshold_mm: float=1.0) -> dict[str, float]:
+    """
+        Compute Q95, Q99 and wet-day frequency (> wet_threshold_mm) for generated fields and (optionally) HR reference fields.
+        Inputs can be [B,1,H,W] or [B,H,W] or numpy arrays.
+        *mask* is optional and should be broadcastable to [B,1,H,W] or [B,H,W].
+        Returns keys:
+        - 'gen_q95', 'gen_q99', 'gen_wet_freq'
+        - 'hr_q95', 'hr_q99', 'hr_wet_freq' (if hr_bt is provided)
+    """
+    def _prep(t):
+        if t is None:
+            return None
+        t = _to_tensor(t).float()
+        if t.ndim == 3: # [B,H,W] -> [B,1,H,W]
+            t = t[:, None, :, :]
+        return t
+    
+    G = _prep(gen_bt)
+    H = _prep(hr_bt) 
+    M = _prep(mask)
+    if M is not None:
+        M = M.bool()
+
+    def _metrics(t: torch.Tensor | None, m: torch.Tensor | None):
+        if t is None:
+            return float('nan'), float('nan'), float('nan')
+        if m is not None:
+            t = t.masked_fill(~m.expand_as(t), float('nan'))
+        # Flatten over spatial dims and channels
+        flat = t.reshape(t.shape[0], -1)
+        # Remove NaNs
+        flat_np = flat.detach().cpu().numpy()
+        flat_np = flat_np[~np.isnan(flat_np)]
+        if flat_np.size == 0:
+            return float('nan'), float('nan'), float('nan')
+        q95 = float(np.percentile(flat_np, 95))
+        q99 = float(np.percentile(flat_np, 99))
+        wet_freq = float(np.mean(flat_np > wet_threshold_mm))
+        return q95, q99, wet_freq
+    
+    q95g, q99g, wfg = _metrics(G, M)
+    out = {'gen_q95': q95g, 'gen_q99': q99g, 'gen_wet_freq': wfg}
+    if H is not None:
+        q95h, q99h, wfh = _metrics(H, M)
+        out.update({'hr_q95': q95h, 'hr_q99': q99h, 'hr_wet_freq': wfh})
+
+    return out
+
 
 @torch.no_grad() # Disable gradient computation for monitoring
 def edm_cosine_metric(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None):
@@ -92,7 +329,7 @@ def _masked_corrcoef_per_sample(
 
 
 
-def report_precip_extremes(x_bt: torch.Tensor, name: str, cap_mm_day: float = 500.0, logger=print):
+def report_precip_extremes(x_bt: torch.Tensor, name: str, cap_mm_day: float = 500.0):
     """
         Reports extremes in a back-transformed precipitation tensor.
         Values below 0 are counted as negative, values above cap_mm_day are counted as extreme.
@@ -106,11 +343,11 @@ def report_precip_extremes(x_bt: torch.Tensor, name: str, cap_mm_day: float = 50
     vals_b0 = []
     for i, (p, m) in enumerate(zip(p999.tolist(), mx.tolist())):
         if m > max(5.0 * p, cap_mm_day):
-            logger(f"{name} sample {i} has extreme precipitation: max={m:.1f} mm/day > max(5xp99.9={p:.1f} mm/day)")
+            logger.info(f"{name} sample {i} has extreme precipitation: max={m:.1f} mm/day > max(5xp99.9={p:.1f} mm/day)")
             n_ex += 1
             vals_ex.append(m)
         if m < 0:
-            logger(f"{name} sample {i} has negative precipitation: max={m:.1f} mm/day < 0")
+            logger.info(f"{name} sample {i} has negative precipitation: max={m:.1f} mm/day < 0")
             n_b0 += 1
             vals_b0.append(m)
     if n_b0 > 0 and n_ex > 0:

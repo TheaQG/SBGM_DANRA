@@ -125,6 +125,7 @@ def compute_statistics(data,
                        split="all",
                        domain_str="_589x789",
                        crop_region_str="_0_0_180_180",
+                       small_data_batch=False,
                        cfg={},
                        stats_save_path=".",
                        log_stats=False,
@@ -169,7 +170,8 @@ def compute_statistics(data,
         stats_save_path=stats_save_path,
         save=save_glob_stats,
         log_stats=log_stats,
-        pool_pixels=pool_pixels
+        pool_pixels=pool_pixels,
+        small_data_batch=small_data_batch
     )
 
     # === 2. Per-timestep statistics (time-series) ===
@@ -220,6 +222,7 @@ def compute_global_stats(data_dict,
                       crop_region_str,
                       cfg,
                       stats_save_path,
+                      small_data_batch=False,
                       save=False,
                       log_stats=False,
                       pool_pixels=True
@@ -273,7 +276,10 @@ def compute_global_stats(data_dict,
     if save:
         if not os.path.exists(save_dir):
             os.makedirs(save_dir, exist_ok=True)
-        filename = f"global_stats__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}.json"
+        if small_data_batch:
+            filename = f"global_stats__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}__small.json"
+        else:
+            filename = f"global_stats__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}.json"
         filepath = os.path.join(save_dir, filename)
 
     

@@ -6,7 +6,7 @@ comparison:
     {mode: field, comparison_types: ['field_statistics', 'qualitative_visual'], dates: ["20000222", "20101010", "20101030"], combine_into_grid: true, mask: null, n_max: 5}, # Single day field comparison, no mask 
     # {mode: timeseries}
   ]
-  split_type: all            # Data split: 'train', 'valid', 'test', or 'all'
+  split: all                 # Data split: 'train', 'valid', 'test', or 'all'
   save: true                 # Whether to save figures to disk
   show: false                # Whether to display figures interactively
   save_path: ${env:DATA_FIGS_DIR} #${env:EVAL_DIR}/comparison_outputs/prcp

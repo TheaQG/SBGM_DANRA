@@ -1,8 +1,15 @@
+import math
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import logging
 from datetime import datetime
+
+from data_analysis_pipeline.correlations.correlation_methods import (
+    remove_seasonality_ts,
+    aggregate_ts,
+    corrcoef_1d
+    )
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -11,6 +18,165 @@ handler = logging.StreamHandler()
 formatter = logging.Formatter("[%(levelname)s] %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
+
+
+# === SPATIAL: grid of subplots (one figure per HR variable) ===
+def plot_spatial_corr_grid(hr_var, lr_to_rmap, *,
+                           vmin=-1.0, vmax=1.0, cmap='RdBu_r',
+                           ncols=3, figsize_per_subplot=(4,4),
+                           suptitle=None, cbar_shrink=0.95, savepath=None, show=False
+                           ):
+    """
+        lr_to_rmap: dict like {'prcp': r2d, 'temp': r2d, ...}
+        Will arrange subplots in a grid with len(lr_to_rmap) panels.
+    """
+    lr_vars = list(lr_to_rmap.keys())
+    N = len(lr_vars)
+    ncols = min(ncols, N)
+    nrows = math.ceil(N / ncols)
+    fig_w = figsize_per_subplot[0] * ncols
+    fig_h = figsize_per_subplot[1] * nrows
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
+
+    im = None
+    for i, lr in enumerate(lr_vars):
+        rmap = lr_to_rmap[lr]
+        ax = axes[i // ncols, i % ncols]
+        im = ax.imshow(rmap, vmin=vmin, vmax=vmax, cmap=cmap, origin="lower")
+        ax.set_title(f"{hr_var} vs {lr}")
+        ax.set_xticks([]); ax.set_yticks([])
+
+    # Turn off unused axes
+    for j in range(N, nrows * ncols):
+        axes[j // ncols, j % ncols].axis("off")
+
+    # colorbar shared
+    cbar = fig.colorbar(im, ax=axes, shrink=cbar_shrink, location="right")
+    cbar.set_label("Correlation coefficient")
+
+    if suptitle:
+        fig.suptitle(suptitle, y=0.99)
+
+    fig.tight_layout()
+    if savepath:
+        fig.savefig(savepath, dpi=300)
+        logger.info(f"Saved spatial correlation grid plot to {savepath}")
+
+    if show:
+        plt.show()
+    plt.close()
+    
+    return fig
+
+# === TEMPORAL: raw + aggregated with optional seasonality removal ===
+def plot_temporal_pair(hr_var, lr_var, hr_ts, lr_ts, timestamps,
+                       remove_seasonality=None, agg=None, agg_how="mean",
+                       ax=None, colors=None, title=None, save_path=None, show=False):
+    """
+    hr_ts, lr_ts: 1D arrays (time,) – typically spatial means
+    remove_seasonality: None | 'monthly' | 'doy'
+    agg: None | 'weekly' | 'monthly'
+    returns: (r_raw, r_agg, ax)
+    """
+    import matplotlib.dates as mdates
+
+    hr = np.asarray(hr_ts, dtype=float)
+    lr = np.asarray(lr_ts, dtype=float)
+
+    if remove_seasonality:
+        hr = remove_seasonality_ts(hr, timestamps, method=remove_seasonality)
+        lr = remove_seasonality_ts(lr, timestamps, method=remove_seasonality)
+
+    r_raw = corrcoef_1d(hr, lr)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 4))
+
+    # background raw series
+    ax.plot(timestamps, hr, label=f"{hr_var} (raw)", alpha=0.3, marker='o', markersize=1, linewidth=0.6)
+    ax.plot(timestamps, lr, label=f"{lr_var} (raw)", alpha=0.3, marker='x', markersize=1, linewidth=0.6)
+
+    r_agg = np.nan
+    if agg is not None:
+        hr_a, t_a = aggregate_ts(hr, timestamps, freq=agg, how=agg_how)
+        lr_a, _   = aggregate_ts(lr, timestamps, freq=agg, how=agg_how)
+        r_agg = corrcoef_1d(hr_a, lr_a)
+        ax.plot(t_a, hr_a, label=f"{hr_var} ({agg})", linewidth=1.5)
+        ax.plot(t_a, lr_a, label=f"{lr_var} ({agg})", linewidth=1.5)
+
+    # cosmetics
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"{hr_var} / {lr_var}")
+    rtxt = f"r(raw)={r_raw:.2f}" + (f", r({agg})={r_agg:.2f}" if agg else "")
+    ax.set_title(title or f"Temporal correlation ({rtxt})")
+    ax.legend(loc="upper left", ncol=2, fontsize=8)
+    ax.xaxis.set_major_locator(mdates.YearLocator(base=2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.grid(alpha=0.2)
+
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+        logger.info(f"Saved temporal correlation plot to {save_path}")
+
+    if show:
+        plt.show()
+    plt.close()
+    return r_raw, r_agg, ax
+
+
+
+def plot_temporal_grid(hr_var, lr_to_series, timestamps,
+                       remove_seasonality=None, agg=None, agg_how="mean",
+                       ncols=2, figsize_per_subplot=(10, 3), suptitle=None, savepath=None):
+    """
+    lr_to_series: dict {lr_var: (hr_ts, lr_ts)} – both 1D aligned arrays
+    Makes one figure with subplots for each LR var.
+    """
+    lr_vars = list(lr_to_series.keys())
+    N = len(lr_vars)
+    ncols = min(ncols, N)
+    nrows = math.ceil(N / ncols)
+    fig_w = figsize_per_subplot[0] * ncols
+    fig_h = figsize_per_subplot[1] * nrows
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
+
+    for i, lr in enumerate(lr_vars):
+        hr_ts, lr_ts = lr_to_series[lr]
+        ax = axes[i // ncols, i % ncols]
+        r_raw, r_agg, _ = plot_temporal_pair(
+            hr_var, lr, hr_ts, lr_ts, timestamps,
+            remove_seasonality=remove_seasonality, agg=agg, agg_how=agg_how, ax=ax,
+            title=f"{hr_var} vs {lr}  |  r(raw)={r_raw:.2f}" + (f", r({agg})={r_agg:.2f}" if agg else "") # type: ignore
+        )
+
+    for j in range(N, nrows * ncols):
+        axes[j // ncols, j % ncols].axis("off")
+
+    if suptitle:
+        fig.suptitle(suptitle, y=0.99)
+    fig.tight_layout()
+    if savepath:
+        fig.savefig(savepath, dpi=300)
+        logger.info(f"Saved temporal correlation grid plot to {savepath}")
+    return fig
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def plot_temporal_series(hr_series, lr_series, dates, variable1, variable2, model1, model2, save_path=None, show=False):
     """

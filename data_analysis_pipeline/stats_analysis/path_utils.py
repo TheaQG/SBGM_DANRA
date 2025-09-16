@@ -1,6 +1,6 @@
 import os
 
-def build_data_path(base_dir, model_type, variable, domain_size, split=None, zarr=False):
+def build_data_path(base_dir, model_type, variable, domain_size, split=None, use_zarr=False):
     """
     Constructs the full path to the data directory.
 
@@ -21,12 +21,12 @@ def build_data_path(base_dir, model_type, variable, domain_size, split=None, zar
         f"{variable}_{size_str}"
     )
 
-    if split == 'all':
-        path = os.path.join(path, 'all')
-    elif split in ['train', 'val', 'test']:
-        if zarr:
-            path = os.path.join(path, 'zarr_files', split + '.zarr')
-        else:
-            path = os.path.join(path, split)
+    if not use_zarr:
+        # .npz case (e.g. split == 'all')
+        return os.path.join(path, 'all')
+    
+    # zarr case
+    split_dict = {'train': 'train', 'val': 'valid', 'valid': 'valid', 'test': 'test', 'all': 'all'}
+    split_norm = split_dict.get(split, split) if split else 'all'
+    return os.path.join(path, 'zarr_files', f"{split_norm}.zarr")
 
-    return path

@@ -75,7 +75,7 @@ def build_back_transforms_from_stats(hr_var: str,
                                           model=hr_model,
                                           domain_str=domain_str_hr,
                                           crop_region_str=crop_region_str_hr,
-                                          split=split,
+                                          scaling_split=split,
                                           transform_type=hr_scaling_method,
                                           buffer_frac=hr_buffer_frac,
                                           stats_file_path=stats_dir_root
@@ -89,7 +89,7 @@ def build_back_transforms_from_stats(hr_var: str,
                                               model=lr_model,
                                               domain_str=domain_str_lr,
                                               crop_region_str=crop_region_str_lr,
-                                              split=split,
+                                              scaling_split=split,
                                               transform_type=mth,
                                               buffer_frac=lr_buffer_frac,
                                               stats_file_path=stats_dir_root
@@ -100,7 +100,7 @@ def build_back_transforms_from_stats(hr_var: str,
 
 
 
-def load_global_stats(variable, model, domain_str, crop_region_str, split, dir_load):
+def load_global_stats(variable, model, domain_str, crop_region_str, split, dir_load, verbose=False):
     """
         Load previously saved global statistics for a given variable, model, domain, and crop region.
     """
@@ -110,7 +110,8 @@ def load_global_stats(variable, model, domain_str, crop_region_str, split, dir_l
     if not os.path.exists(stats_load_path):
         logger.warning(f"Stats file not found: {stats_load_path}")
         return None
-    logger.info(f"Loading stats from {stats_load_path}")
+    if verbose:
+        logger.info(f"Loading stats from {stats_load_path}")
 
     with open(stats_load_path, "r") as f:
         stats = json.load(f)
@@ -123,26 +124,29 @@ def get_transforms_from_stats(variable: str,
                                 model: str,
                                 domain_str: str,
                                 crop_region_str: str,
-                                split: str,
+                                scaling_split: str,
                                 transform_type: str,
                                 buffer_frac: float,
                                 stats: Optional[dict] = None,
                                 stats_file_path: str = '',
+                                verbose=False
                                 ):
     """
         Build transformations from stats, either given stats or given file path
         Must provide either stats or stats_file_path
     """
     if stats_file_path:
-        print(f"[INFO] Loading stats from {stats_file_path}")
+        if verbose:
+            logger.info(f"Loading stats from {stats_file_path}")
     if stats and stats_file_path:
-        print(f"[WARNING] Both stats and stats_file_path provided, using provided stats.")
+        if verbose:
+            logger.warning(f"Both stats and stats_file_path provided, using provided stats.")
         stats_file_path = ''
 
     if stats is None and stats_file_path:
         if not os.path.exists(stats_file_path):
             raise ValueError(f"Stats file not found: {stats_file_path}")
-        stats = load_global_stats(variable, model, domain_str, crop_region_str, split, stats_file_path)
+        stats = load_global_stats(variable, model, domain_str, crop_region_str, scaling_split, stats_file_path)
     if stats is None:
         raise ValueError(f"Failed to load stats from {stats_file_path}")
 
@@ -167,26 +171,29 @@ def get_backtransforms_from_stats(variable: str,
                                   model: str,
                                   domain_str: str,
                                   crop_region_str: str,
-                                  split: str,
+                                  scaling_split: str,
                                   transform_type: str,
                                   buffer_frac: float,
                                   stats: Optional[dict] = None,
                                   stats_file_path: str = '',
+                                  verbose=False
                                   ):
     """
         Build backtransformations from stats, either given stats or given file path
         Must provide either stats or stats_file_path
     """
     if stats_file_path:
-        print(f"[INFO] Loading stats from {stats_file_path}")
+        if verbose:
+            logger.info(f"Loading stats from {stats_file_path}")
     if stats and stats_file_path:
-        print(f"[WARNING] Both stats and stats_file_path provided, using provided stats.")
+        if verbose:
+            logger.warning(f"Both stats and stats_file_path provided, using provided stats.")
         stats_file_path = ''
 
     if stats is None and stats_file_path:
         if not os.path.exists(stats_file_path):
             raise ValueError(f"Stats file not found: {stats_file_path}")
-        stats = load_global_stats(variable, model, domain_str, crop_region_str, split, stats_file_path)
+        stats = load_global_stats(variable, model, domain_str, crop_region_str, scaling_split, stats_file_path)
     if stats is None:
         raise ValueError(f"Failed to load stats from {stats_file_path}")
 
@@ -508,6 +515,7 @@ class PrcpLogBackTransform(object):
                  buffer_frac=0.5,
                  clamp_log_min=None,
                  clamp_log_max=None,
+                 verbose=False,
                 #  **kwargs # Swallow any unused keys
                  ):
         '''
@@ -529,11 +537,13 @@ class PrcpLogBackTransform(object):
 
         if self.glob_min_log is not None and self.glob_max_log is not None:
             # Optionally, expand the log range by a fraction of the range
-            logger.info(f'Extended log range from [{self.glob_min_log}, {self.glob_max_log}]')
+            if verbose:
+                logger.info(f'Extended log range from [{self.glob_min_log}, {self.glob_max_log}]')
             log_range = self.glob_max_log - self.glob_min_log
             self.glob_min_log = self.glob_min_log - (self.buffer_frac/2) * log_range
             self.glob_max_log = self.glob_max_log + (self.buffer_frac/2) * log_range
-            logger.info(f'to [{self.glob_min_log}, {self.glob_max_log}]\n')
+            if verbose:
+                logger.info(f'to [{self.glob_min_log}, {self.glob_max_log}]\n')
 
         if self.scale_type == 'log_zscore':
             if (self.glob_mean_log is None) or (self.glob_std_log is None):

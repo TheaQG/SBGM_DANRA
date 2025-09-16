@@ -19,7 +19,7 @@ data:
   aggregation_time: monthly
   data_dir: ${env:DATA_DIR}
   n_workers: ${env:SLURM_CPUS_PER_TASK}
-  split: all
+  split: train # 'train', 'val', 'test' or 'all'
   verbose: true # Whether to enable verbose logging during data loading (only for debugging, slows down processing)
 
 highres:
