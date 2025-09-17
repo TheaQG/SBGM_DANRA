@@ -17,7 +17,6 @@ correlation:
     msl: zscore
     z_pl_500: zscore
   print_results: true
-  n_days: 100
   normalize: true
 
 # --- NEW OPTIONS ---
@@ -28,7 +27,9 @@ correlation:
   temporal_ncols: 2
 
   spatial_grid_figure: true              # one figure per HR var with N LR subplots
-  spatial_ncols: 3
+  plot_shared_cbar: true                 # if false, each subplot gets its own cbar (if both true, two plots generated)
+  plot_individual_cbar: true                 # if false, each subplot gets its own cbar (if both true, two plots generated)
+  spatial_ncols: 2
   spatial_remove_seasonality: null       # null | monthly | doy
 
 data:

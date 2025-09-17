@@ -51,13 +51,11 @@ def build_climatology(ts, timestamps, method="monthly"):
     ts = np.asarray(ts)
     groups = defaultdict(list)
 
+    method = (method or "monthly").lower()
+
     if method == "monthly":
-        keys = [_month_id(d.replace(year=2001)) for d in timestamps] # Use a dummy year to group by month
-    # elif method == "weekly":
-    #     keys = [_week_id(d.replace(year=2001)) for d in timestamps] # Use a dummy year to group by week
-    # elif method == "yearly":
-    #     keys = [_year_id(d) for d in timestamps]
-    elif method == "DOY":
+        keys = [d.month for d in timestamps]
+    elif method == "doy":
         # map Feb29 to Feb28 to avoid tiny groups
         keys = [(d.month, 28 if (d.month == 2 and d.day == 29) else d.day) for d in timestamps]
     else:
@@ -71,17 +69,16 @@ def remove_seasonality_ts(ts, timestamps, method="monthly"):
     """
         Subtracts seasonal cycle (monthly or day-of-year) from a 1D time series.
     """
+    method = (method or "monthly").lower()
     ts = np.asarray(ts, dtype=float)
     clim = build_climatology(ts, timestamps, method=method)
 
     if method == "monthly":
-        keys = [_month_id(d.replace(year=2001)) for d in timestamps]
-    # elif method == "weekly":
-    #     keys = [_week_id(d.replace(year=2001)) for d in timestamps]
-    # elif method == "yearly":
-    #     keys = [_year_id(d) for d in timestamps]
-    else: # 'doy'
+        keys = [d.month for d in timestamps]
+    elif method == "doy":
         keys = [(d.month, 28 if (d.month == 2 and d.day == 29) else d.day) for d in timestamps]
+    else:
+        raise ValueError(f"Unknown seasonality method: {method}")
     
     anomalies = np.array([t - clim[k] for t,k in zip(ts, keys)], dtype=float)
     return anomalies
@@ -90,11 +87,12 @@ def remove_seasonality_stack(stack, timestamps, method="monthly"):
     """
         For 3D stacks shaped (time, y, x). Subtract seasonal cycle per-pixel.
     """
+    method = (method or "monthly").lower()
     T, H, W = stack.shape
     out = np.empty_like(stack, dtype=float)
     # build indices once
     if method == "monthly":
-        keys = [_month_id(d.replace(year=2001)) for d in timestamps]
+        keys = [d.month for d in timestamps]
         key_set = sorted(set(keys))
     # elif method == "weekly":
     #     keys = [_week_id(d.replace(year=2001)) for d in timestamps]
@@ -102,9 +100,11 @@ def remove_seasonality_stack(stack, timestamps, method="monthly"):
     # elif method == "yearly":
     #     keys = [_year_id(d) for d in timestamps]
     #     key_set = sorted(set(keys))
-    else: # 'doy'
+    elif method == "doy":
         keys = [(d.month, 28 if (d.month == 2 and d.day == 29) else d.day) for d in timestamps]
         key_set = sorted(set(keys))
+    else:
+        raise ValueError(f"Unknown seasonality method: {method}")
 
     # pre-allocate masks per key for efficiency
     key_to_idx = {k: np.where(np.array(keys) == k)[0] for k in key_set}

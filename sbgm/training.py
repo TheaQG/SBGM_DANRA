@@ -39,7 +39,7 @@ from sbgm.monitoring import (
     compute_q95_q99_and_wet_day,
     )
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
-from sbgm.training_utils import get_model_string, get_units, get_loss_fn
+from sbgm.training_utils import get_model_string, get_units, get_loss_fn, apply_cfg_dropout
 
 # Speed up conv algo selection on fixed input sizes
 if torch.cuda.is_available():
@@ -124,6 +124,9 @@ class TrainingPipeline_general:
         self.sdf_weighted_loss = cfg['training']['sdf_weighted_loss']
         self.with_ema = cfg['training']['with_ema']
 
+        # Classifier free guidance config
+        self.cfg_guidance = self.cfg.get('classifier_free_guidance', {})
+
         # Set device
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -183,6 +186,8 @@ class TrainingPipeline_general:
         if not os.path.exists(self.path_metrics):
             os.makedirs(self.path_metrics)
             logger.info(f"→ Metrics directory created at {self.path_metrics}")
+
+
 
         # === Monitoring: extreme precipitation values in generated samples ===
         monitor_cfg = cfg.get('monitoring', {})
@@ -366,44 +371,49 @@ class TrainingPipeline_general:
             # Extract samples
             x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
-            # # Log the shapes of the extracted samples
-            # logger.info(f"▸ Shape of x: {x.shape}")
-            # logger.info(f"▸ Shape of seasons: {seasons.shape}")
-            # logger.info(f"▸ Shape of cond_images: {cond_images.shape if cond_images is not None else 'None'}")
-            # logger.info(f"▸ Shape of lsm: {lsm.shape if lsm is not None else 'None'}")
-            # logger.info(f"▸ Shape of topo: {topo.shape if topo is not None else 'None'}")
-            # NOTE: IMPLEMENT CFG HERE AGAIN
-            # # Apply Classifier Free Guidance conditioning dropout if enabled
-            # cfg_guidance = getattr(self, "cfg", {}).get('classifier_free_guidance', None)
-            # if cfg_guidance and cfg_guidance.get('enabled', False) and cond_images is not None:
-            #     # logger.info("▸ Applying Classifier Free Guidance conditioning dropout...")
-            #     drop_prob = cfg_guidance.get('drop_prob', 0.1)
-            #     # Make sure the batch size and device keeps consistent
-            #     batch_size = cond_images.size(0)
-            #     device = cond_images.device
 
-            #     # Create a drop mask, that randomly drops drop_prob% of the cond_images in the batch (B,) for scalar condition
-            #     drop_mask = (torch.rand(batch_size, device=device) < drop_prob)
 
-            #     # Expand drop mask for image tensors (B, 1, 1, 1)
-            #     drop_mask_img = drop_mask.view(-1, 1, 1, 1)
+            # # === CFG dropout (training) ===
+            cfg_guidance = self.cfg_guidance
+            cond_images, lsm, topo, seasons = apply_cfg_dropout(
+                cond_images, lsm, topo, seasons, cfg_guidance
+            )
+            # cfg_guidance = self.cfg.get('classifier_free_guidance', {})
+            # if bool(cfg_guidance.get('enabled', False)) and cond_images is not None:
+            #     drop_prob = float(cfg_guidance.get('drop_prob', 0.1))
+            #     drop_prob_geo = float(cfg_guidance.get('drop_prob_geo', drop_prob)) # Optional separate drop prob for static geo
 
-            #     # Nullify image-like conditions
-            #     null_cond = torch.zeros_like(cond_images)
-            #     cond_images = torch.where(drop_mask_img, null_cond, cond_images)
+            #     B = x.size(0)
+            #     device = x.device
+
+            #     # Bernoulli masks per-sample NOTE: Shouldn't geo always be dropped at same time as cond + some more times?
+            #     mask_cond = (torch.rand(B, device=device) < drop_prob)  # For LR conditions and labels
+            #     mask_geo = (mask_cond.clone() if drop_prob_geo == drop_prob else (torch.rand(B, device=device) < drop_prob_geo))  # For static geo conditions
+
+            #     # Expand to image shape
+            #     m_img = mask_cond.view(B, 1, 1, 1)  # For cond_images
+            #     m_geo = mask_geo.view(B, 1, 1, 1)  # For static geo (lsm, topo)
+                
+            #     # Nullify static geo (optionally with different prob)
             #     if lsm is not None:
-            #         null_lsm = torch.zeros_like(lsm)
-            #         lsm = torch.where(drop_mask_img, null_lsm, lsm)
+            #         lsm = torch.where(m_geo, torch.zeros_like(lsm), lsm)
             #     if topo is not None:
-            #         null_topo = torch.zeros_like(topo)
-            #         topo = torch.where(drop_mask_img, null_topo, topo)
+            #         topo = torch.where(m_geo, torch.zeros_like(topo), topo)
 
-            #     # Nullify scalar condition
+            #     # Nullify label season/day by sending to null id (0)
             #     if seasons is not None:
-            #         null_season = torch.zeros_like(seasons)
-            #         seasons = torch.where(drop_mask.squeeze(), null_season, seasons)
+            #         null_id = int(cfg_guidance.get('null_label_id', 0))
+            #         # seasons expected shape [B] (long) or [B, ...] -> map dropped ones to null_id
+            #         if seasons.dtype == torch.long:
+            #             seasons = torch.where(mask_cond, torch.full_like(seasons, null_id), seasons) # NOTE: These are the same
+            #         else:
+            #             seasons = torch.where(mask_cond, torch.full_like(seasons, null_id), seasons)
 
-                # logger.info(f"\n▸ [CFG] Dropped {drop_mask.sum().item()} out of {batch_size} conditions ({drop_prob*100:.1f}%) in the batch.")
+            #     # If training with predict_residual == True, also null the LR baseline channel
+            #     lr_ups_baseline = None
+            #     if self.edm_enabled and self.edm_predict_residual:
+            #         lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
+            #         lr_ups_baseline = torch.where(m_img, torch.zeros_like(lr_ups_baseline), lr_ups_baseline)
 
             # Zero gradients
             self.optimizer.zero_grad()
@@ -590,6 +600,13 @@ class TrainingPipeline_general:
                 SAVE_NAME: Name of the image to save.
                 use_mixed_precision: Boolean to use mixed precision training.
         '''
+
+        # === Classifier-Free Guidance (CFG) parameters ===
+        logger.info(f"→ Classifier-Free Guidance (CFG) enabled: {self.cfg_guidance.get('enabled', False)}")
+        if self.cfg_guidance.get('enabled', False):
+            logger.info(f"   ▸ Dropout probability for LR conditions: {self.cfg_guidance.get('drop_prob', 0.1)}")
+            logger.info(f"   ▸ Dropout probability for static geo: {self.cfg_guidance.get('drop_prob_geo', self.cfg_guidance.get('drop_prob', 0.1))}")
+
 
         train_losses = []
         val_losses = []
@@ -850,6 +867,8 @@ class TrainingPipeline_general:
 
             if edm_on and sampler_edm is not None:
                 edm_cfg = cfg.get('edm', {}) or {}
+                guidance_cfg = cfg.get('classifier_free_guidance', {})
+
                 generated_samples = sampler_edm(score_model=self.model,
                                             batch_size=cfg['data_handling']['n_gen_samples'],
                                             num_steps=edm_cfg.get('sampling_steps', 18),
@@ -866,7 +885,8 @@ class TrainingPipeline_general:
                                             S_min=float(edm_cfg.get('S_min', 0.0)),
                                             S_max=float(edm_cfg.get('S_max', float('inf'))),
                                             S_noise=float(edm_cfg.get('S_noise', 1.0)),
-                                            lr_ups=lr_ups_baseline
+                                            lr_ups=lr_ups_baseline,
+                                            cfg_guidance=guidance_cfg if guidance_cfg.get('enabled', False) else None,
                 )
             elif sampler is not None:
                 generated_samples = sampler(

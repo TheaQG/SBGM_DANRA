@@ -138,8 +138,10 @@ training:
 
 classifier_free_guidance:
   enabled: true # Whether to use classifier-free guidance
-  drop_prob: 0.3 # Dropout probability for guidance
+  drop_prob: 0.1 # Dropout probability for guidance on LR conditions
+  drop_prob_geo: 0.1 # Optional: lower drop for static geo; else omit and use drop_prob
   guidance_scale: 2.0 # Scale for guidance 
+  null_label_id: 0 # Use 0 as "null" in label embedding 
   guidance_scale_max: 3.0 # Maximum scale for guidance
 
 edm:

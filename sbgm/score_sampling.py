@@ -35,12 +35,26 @@ def edm_sampler(score_model,
                 S_max: float = float('inf'),
                 S_noise: float = 1.0,
                 lr_ups: torch.Tensor | None = None,
+                cfg_guidance: dict | None = None,
                 ):
   """
       Karras EDM sampler with Heun updates.
       Expects score_model(x_t, sigma, cond_img=..., lsm_cond=..., topo_cond=..., y=..., lr_ups=...) -> x0_hat.
       Returns a tensor shaped like the model outputs (i.e. a sample batch, shape (B, C, H, W)).
   """
+
+  def _make_null(cond_img, lsm_cond, topo_cond, y, lr_ups):
+    null_img = torch.zeros_like(cond_img) if cond_img is not None else None
+    null_lsm = torch.zeros_like(lsm_cond) if lsm_cond is not None else None
+    null_topo = torch.zeros_like(topo_cond) if topo_cond is not None else None
+    null_y = torch.zeros_like(y) if y is not None else None
+    null_lr = torch.zeros_like(lr_ups) if lr_ups is not None else None
+    return null_img, null_lsm, null_topo, null_y, null_lr
+  
+  cfg_enabled = bool(cfg_guidance is not None and getattr(cfg_guidance, 'get', None) is not None and cfg_guidance.get('enabled', False))
+  cfg_scale = float(cfg_guidance.get('guidance_scale', 0.0)) if cfg_enabled and cfg_guidance is not None else 0.0
+  null_pack = _make_null(cond_img, lsm_cond, topo_cond, y, lr_ups) if cfg_enabled else (None, None, None, None, None)
+
   device = torch.device(device)
 
   # Build Karras sigme (noise) schedule (decreasing)
@@ -94,14 +108,36 @@ def edm_sampler(score_model,
       sigma_hat = sigma # No stochasticity injection
 
     sigma_hat_vec = torch.full((B,), float(sigma_hat), device=device, dtype=x.dtype) 
-    denoised = score_model(x_in,
-                           sigma_hat_vec,
-                           cond_img=cond_img,
-                           lsm_cond=lsm_cond,
-                           topo_cond=topo_cond,
-                           y=y,
-                           lr_ups=lr_ups)
-    
+
+    if cfg_enabled and cfg_scale > 0.0:
+      # Unconditional 
+      x0_uc = score_model(x_in,
+                          sigma_hat_vec,
+                          cond_img=null_pack[0],
+                          lsm_cond=null_pack[1],
+                          topo_cond=null_pack[2],
+                          y=null_pack[3],
+                          lr_ups=null_pack[4])
+      # Conditional
+      x0_c = score_model(x_in,
+                       sigma_hat_vec,
+                       cond_img=cond_img,
+                       lsm_cond=lsm_cond,
+                       topo_cond=topo_cond,
+                       y=y,
+                       lr_ups=lr_ups)
+      # Linear combination
+      denoised = x0_uc + cfg_scale * (x0_c - x0_uc)
+    else:
+      # No classifier-free guidance
+      denoised = score_model(x_in,
+                            sigma_hat_vec,
+                            cond_img=cond_img,
+                            lsm_cond=lsm_cond,
+                            topo_cond=topo_cond,
+                            y=y,
+                            lr_ups=lr_ups)
+      
     d = (x_in - denoised) / sigma_hat # Score-based derivative
 
     # Euler step 

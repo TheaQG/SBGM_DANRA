@@ -90,6 +90,7 @@ def run_data_correlations(cfg):
         
     correlation_types = corr_cfg.get("analysis_types", ["temporal", "spatial"])
     split = data_cfg.get("split", "all")
+    logger.info(f"Data split: {split}")
     method = corr_cfg.get("method", "pearson")
 
     # === Extract config entries ===
@@ -118,7 +119,7 @@ def run_data_correlations(cfg):
     temporal_grid_ncols = int(corr_cfg.get("temporal_ncols", 2))
 
     spatial_grid = corr_cfg.get("spatial_grid_figure", False)
-    spatial_grid_ncols = int(corr_cfg.get("spatial_ncols", 3))
+    spatial_grid_ncols = int(corr_cfg.get("spatial_ncols", 2))
     spatial_remove_seasonality = corr_cfg.get("spatial_remove_seasonality", None)  # None|'monthly'|'doy'
 
 
@@ -293,22 +294,77 @@ def run_data_correlations(cfg):
         # ======= GRID FIGURES after we finish all LR for this HR =======
         if spatial_grid and spatial_maps_by_lr:
             try:
-                fig = plot_spatial_corr_grid(
-                    hr_var=hr_var,
-                    lr_to_rmap=spatial_maps_by_lr,
-                    ncols=spatial_grid_ncols,
-                    suptitle=f"Spatial correlation maps | HR={hr_var}",
-                )
-                if plot_cfg.get("save", True):
-                    fig.savefig(os.path.join(figs_save_dir, f"spatial_corr_grid_{hr_var}_{model_hr}_vs_{model_lr}.png"), dpi=300)
-                if plot_cfg.get("show", False):
-                    plt.show()
-                plt.close(fig)
+                # First, plot with shared colorbar
+                if cfg.get("correlation", {}).get("plot_shared_cbar", True):
+                    fig = plot_spatial_corr_grid(
+                        hr_var=hr_var,
+                        lr_to_rmap=spatial_maps_by_lr,
+                        ncols=spatial_grid_ncols,
+                        per_subplot_cbar=False,
+                        cbar_label="Correlation coefficient",
+                        title_pad=10,
+                        suptitle=f"Spatial correlations | HR={hr_var}",
+                        savepath=os.path.join(figs_save_dir, f"spatial_corr_grid_{hr_var}_{model_hr}_vs_{model_lr}.png") if plot_cfg.get("save", True) else None
+                    )
+                    if plot_cfg.get("show", False):
+                        plt.show()
+                    plt.close(fig)
+
+                # Optionally plot each LR var separately with its own colorbar
+                if cfg.get("correlation", {}).get("plot_individual_cbar", False):
+                    fig = plot_spatial_corr_grid(
+                        hr_var=hr_var,
+                        lr_to_rmap=spatial_maps_by_lr,
+                        ncols=spatial_grid_ncols,
+                        per_subplot_cbar=True,
+                        per_cbar_size="3%",
+                        per_cbar_pad=0.04,
+                        wspace=0.25, hspace=0.35,
+                        cbar_label="Correlation coefficient",
+                        title_pad=8,
+                        suptitle=f"Spatial correlations | HR={hr_var}",
+                        savepath=os.path.join(figs_save_dir, f"spatial_corr_grid_indcbar_{hr_var}_{model_hr}_vs_{model_lr}.png") if plot_cfg.get("save", True) else None
+                    )
+                    if plot_cfg.get("show", False):
+                        plt.show()
+                    plt.close(fig)
+
             except Exception as e:
                 logger.warning(f"plot_spatial_corr_grid failed: {e}. Skipping combined spatial grid.")
 
         if temporal_grid and temporal_series_by_lr:
             try:
+                # Compute common dates across all LR pairs (required by plot_temporal_grid)
+                date_lists = [dates for (_, (_, _, dates)) in temporal_series_by_lr.items()]
+                common_dates = sorted(set.intersection(*map(set, date_lists)))
+                if not common_dates:
+                    raise ValueError("No common dates across LR pairs; cannot use plot_temporal_grid.")
+                # Reindex each series to the common date set
+                lr_to_series = {}
+                for lr_name, (hr_ts, lr_ts, dates) in temporal_series_by_lr.items():
+                    d2i = {d: i for i, d in enumerate(dates)}
+                    hr_aligned = np.asarray([hr_ts[d2i[d]] for d in common_dates], dtype=float)
+                    lr_aligned = np.asarray([lr_ts[d2i[d]] for d in common_dates], dtype=float)
+                    lr_to_series[lr_name] = (hr_aligned, lr_aligned)
+                # Use helper to draw the grid
+                fig = plot_temporal_grid(
+                    hr_var=hr_var,
+                    lr_to_series=lr_to_series,
+                    timestamps=common_dates,
+                    remove_seasonality=temporal_remove_seasonality,
+                    agg=temporal_aggregate,
+                    agg_how=temporal_aggregate_how,
+                    ncols=temporal_grid_ncols,
+                    suptitle=f"Temporal correlations | HR={hr_var}",
+                    savepath=os.path.join(figs_save_dir, f"temporal_corr_grid_{hr_var}_{model_hr}_vs_{model_lr}.png") if plot_cfg.get("save", True) else None
+                )
+                if plot_cfg.get("show", False):
+                    plt.show()
+                plt.close(fig)
+
+            except Exception as e:
+                logger.warning(f"plot_temporal_grid failed: {e}. Falling back to manual subplot loop.")
+                # Manual fallback (supports differing date sets per LR var)
                 N = len(temporal_series_by_lr)
                 ncols = max(1, min(temporal_grid_ncols, N))
                 nrows = math.ceil(N / ncols)
@@ -333,5 +389,3 @@ def run_data_correlations(cfg):
                 if plot_cfg.get("show", False):
                     plt.show()
                 plt.close(fig)
-            except Exception as e:
-                logger.warning(f"Combined temporal grid plotting failed: {e}.")
