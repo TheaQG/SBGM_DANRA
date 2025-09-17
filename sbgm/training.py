@@ -371,7 +371,10 @@ class TrainingPipeline_general:
             # Extract samples
             x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
-
+            # === EDM: build lr_ups_baseline if needed ===
+            lr_ups_baseline = None
+            if self.edm_enabled and self.edm_predict_residual:
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
 
             # # === CFG dropout (training) ===
             cfg_guidance = self.cfg_guidance
@@ -418,10 +421,7 @@ class TrainingPipeline_general:
             # Zero gradients
             self.optimizer.zero_grad()
 
-            # === EDM: build lr_ups_baseline if needed ===
-            lr_ups_baseline = None
-            if self.edm_enabled and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
+
             # NOTE: Introduce mixed precision training
             # # Use mixed precision training if needed
             # if self.scaler:
@@ -480,7 +480,7 @@ class TrainingPipeline_general:
             edm_on = self.cfg.get('edm', {}).get('enabled', False)
 
             if edm_on and log_every > 0 and (global_step % log_every == 0):
-                cos = edm_cosine_metric(self.loss_fn, self.model, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo)
+                cos = edm_cosine_metric(self.loss_fn, self.model, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo, lr_ups=lr_ups_baseline)
                 self.live_metrics['steps'].append(global_step)
                 self.live_metrics['edm_cosine'].append(float(cos)) # type: ignore
                 if cos is not None:
