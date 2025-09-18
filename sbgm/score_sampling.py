@@ -42,18 +42,10 @@ def edm_sampler(score_model,
       Expects score_model(x_t, sigma, cond_img=..., lsm_cond=..., topo_cond=..., y=..., lr_ups=...) -> x0_hat.
       Returns a tensor shaped like the model outputs (i.e. a sample batch, shape (B, C, H, W)).
   """
-
-  def _make_null(cond_img, lsm_cond, topo_cond, y, lr_ups):
-    null_img = torch.zeros_like(cond_img) if cond_img is not None else None
-    null_lsm = torch.zeros_like(lsm_cond) if lsm_cond is not None else None
-    null_topo = torch.zeros_like(topo_cond) if topo_cond is not None else None
-    null_y = torch.zeros_like(y) if y is not None else None
-    null_lr = torch.zeros_like(lr_ups) if lr_ups is not None else None
-    return null_img, null_lsm, null_topo, null_y, null_lr
   
   cfg_enabled = bool(cfg_guidance is not None and getattr(cfg_guidance, 'get', None) is not None and cfg_guidance.get('enabled', False))
-  cfg_scale = float(cfg_guidance.get('guidance_scale', 0.0)) if cfg_enabled and cfg_guidance is not None else 0.0
-  null_pack = _make_null(cond_img, lsm_cond, topo_cond, y, lr_ups) if cfg_enabled else (None, None, None, None, None)
+  base_scale = float(cfg_guidance['guidance_scale'] if isinstance(cfg_guidance, dict) and 'guidance_scale' in cfg_guidance else 0.0) if cfg_enabled else 0.0
+  null_label_id = int(cfg_guidance['null_label_id'] if isinstance(cfg_guidance, dict) and 'null_label_id' in cfg_guidance else 0) if cfg_enabled else 0
 
   device = torch.device(device)
 
@@ -93,6 +85,52 @@ def edm_sampler(score_model,
   if lr_ups is not None and (lr_ups.shape[0] != x.shape[0] or lr_ups.shape[2:] != x.shape[2:]):
       raise ValueError(f"lr_ups shape {lr_ups.shape} does not match the expected batch size {x.shape[0]} and spatial shape {x.shape[2:]}")
 
+  # Prepare unconditional inputs (cached tensors)
+  null_img = torch.zeros_like(cond_img) if (cfg_enabled and cond_img is not None) else None
+  null_lsm = torch.zeros_like(lsm_cond) if (cfg_enabled and lsm_cond is not None) else None
+  null_topo = torch.zeros_like(topo_cond) if (cfg_enabled and topo_cond is not None) else None
+  null_y = torch.full_like(y, null_label_id) if (cfg_enabled and y is not None) else None
+  null_lr_ups = torch.zeros_like(lr_ups) if (cfg_enabled and lr_ups is not None) else None
+  
+  def _denoise_with_cfg(x_in, sigma_vec):
+    if cfg_enabled and base_scale > 0.0:
+      # Optional sigma weighting (weaker guidance a large noise)
+      s = base_scale
+
+      if isinstance(cfg_guidance, dict) and bool(cfg_guidance.get('sigma_weighted', True)):
+        # Use inverse-sigma weighting; clamp to [0, base_scale]
+        sig = float(sigma_vec[0]) if sigma_vec.ndim == 1 else float(sigma_vec)
+        s = base_scale * min(1.0, float(sigma_min) / max(sig, 1e-5))
+      # Unconditional 
+      x0_uc = score_model(x_in,
+                          sigma_vec,
+                          cond_img=null_img,
+                          lsm_cond=null_lsm,
+                          topo_cond=null_topo,
+                          y=null_y,
+                          lr_ups=null_lr_ups)
+      # Conditional
+      x0_c = score_model(x_in,
+                        sigma_vec,
+                        cond_img=cond_img,
+                        lsm_cond=lsm_cond,
+                        topo_cond=topo_cond,
+                        y=y,
+                        lr_ups=lr_ups)
+      # Linear combination
+      denoised = x0_uc + s * (x0_c - x0_uc) # Use s = basescale or s = sigma-weighted scale 
+    else:
+      # No classifier-free guidance
+      denoised = score_model(x_in,
+                            sigma_vec,
+                            cond_img=cond_img,
+                            lsm_cond=lsm_cond,
+                            topo_cond=topo_cond,
+                            y=y,
+                            lr_ups=lr_ups)
+    return denoised
+
+
   for i in range(num_steps):
     sigma = sigmas[i]
     sigma_next = sigmas[i + 1]
@@ -108,36 +146,12 @@ def edm_sampler(score_model,
       sigma_hat = sigma # No stochasticity injection
 
     sigma_hat_vec = torch.full((B,), float(sigma_hat), device=device, dtype=x.dtype) 
+    # (Optional safety) Check lr_ups shape
+    if lr_ups is not None:
+      assert lr_ups.shape[0] == B and lr_ups.shape[2:] == (H, W), f"lr_ups shape {lr_ups.shape} does not match the expected batch size {B} and spatial shape {(H, W)}"
 
-    if cfg_enabled and cfg_scale > 0.0:
-      # Unconditional 
-      x0_uc = score_model(x_in,
-                          sigma_hat_vec,
-                          cond_img=null_pack[0],
-                          lsm_cond=null_pack[1],
-                          topo_cond=null_pack[2],
-                          y=null_pack[3],
-                          lr_ups=null_pack[4])
-      # Conditional
-      x0_c = score_model(x_in,
-                       sigma_hat_vec,
-                       cond_img=cond_img,
-                       lsm_cond=lsm_cond,
-                       topo_cond=topo_cond,
-                       y=y,
-                       lr_ups=lr_ups)
-      # Linear combination
-      denoised = x0_uc + cfg_scale * (x0_c - x0_uc)
-    else:
-      # No classifier-free guidance
-      denoised = score_model(x_in,
-                            sigma_hat_vec,
-                            cond_img=cond_img,
-                            lsm_cond=lsm_cond,
-                            topo_cond=topo_cond,
-                            y=y,
-                            lr_ups=lr_ups)
-      
+    denoised = _denoise_with_cfg(x_in, sigma_hat_vec)
+
     d = (x_in - denoised) / sigma_hat # Score-based derivative
 
     # Euler step 
@@ -148,13 +162,7 @@ def edm_sampler(score_model,
 
     # Heun correction (2nd order Runge-Kutta)
     sigma_next_vec = torch.full((B,), float(sigma_next), device=device, dtype=x.dtype)
-    denoised_next = score_model(x_euler,
-                                sigma_next_vec,
-                                cond_img=cond_img,
-                                lsm_cond=lsm_cond,
-                                topo_cond=topo_cond,
-                                y=y,
-                                lr_ups=lr_ups)
+    denoised_next = _denoise_with_cfg(x_euler, sigma_next_vec)
     d_next = (x_euler - denoised_next) / sigma_next
 
     x = x_in + (sigma_next - sigma_hat) * 0.5 * (d + d_next)

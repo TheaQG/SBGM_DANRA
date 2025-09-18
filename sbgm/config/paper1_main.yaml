@@ -1,6 +1,6 @@
 experiment:
-  name: EDM_paper1
-  config_name: EDM_paper1
+  name: EDM_paper1_wCFG
+  config_name: EDM_paper1_wCFG
   # Date of the experiment, taken from the environment variable or set to current date
   date: ${env:EXP_DATE} # Date for the experiment, 
 
@@ -118,6 +118,7 @@ training:
   weight_init: true # Whether to initialize weights
   custom_weight_initializer: !!null # Custom weight initializer (if any) - currently not used, but should be 'kaiming', 'he' or 'xavier'
   with_ema: false # Whether to use Exponential Moving Average NOTE: NEEDS TO BE IMPLEMENTED
+  eval_use_ema: false # Whether to use EMA weights for evaluation (validation and generation)
   load_ema: false # Whether to load EMA weights
   ema_decay: 0.9999 # Decay rate for EMA
   weight_decay: 0.000001 # Weight decay for regularization
@@ -140,10 +141,11 @@ classifier_free_guidance:
   enabled: true # Whether to use classifier-free guidance
   drop_prob: 0.1 # Dropout probability for guidance on LR conditions, [0.1 - 0.2]. If over-conditioning (model copies LR too much), increase.
   drop_prob_geo: 0.1 # Optional: lower drop for static geo; else omit and use drop_prob [0.05-0.1]. If spatial artifacts when geo present, reduce.. Keep drop_prob_geo <= drop_prob
-  guidance_scale: 2.0 # Scale for guidance 
+  guidance_scale: 1.0 # Scale for guidance 
   null_label_id: 0 # Use 0 as "null" in label embedding 
   null_scalar_value: 0.0 # Use -1 as "null" for continuous scalar conditions (e.g. seasons as cos/sin)
   guidance_scale_max: 3.0 # Maximum scale for guidance
+  sigma_weighted: true # Whether to weight guidance scale with sigma (True recommended, False for ablation)
 
 edm:
   enabled: true # Whether to use EDM (Elucidated Diffusion Models)

@@ -781,6 +781,7 @@ def apply_cfg_dropout(
         lsm: torch.Tensor | None,
         topo: torch.Tensor | None,
         seasons: torch.Tensor | None,
+        lr_ups: torch.Tensor | None,
         cfg_guidance: dict | None
 ):
     """
@@ -799,6 +800,7 @@ def apply_cfg_dropout(
         seasons:     Seasonal condition. Can be:
                      - Long tensor of class indices [B] or [B, 1]
                      - Float tensor of scalar(s)   [B] or [B, 1] (e.g., cos(day), sin(day))
+        lr_ups:      Low-res conditions upsampled to high-res grid [B, C_lr, H_hr, W_hr] (may be None).
         cfg_guidance: Dict with keys:
             {
               'enabled': bool,
@@ -851,6 +853,9 @@ def apply_cfg_dropout(
         m = _expand_mask(mask_cond, cond_images)
         # Zero is a sensible "null" for continuous LR channels
         cond_images = torch.where(m, torch.zeros_like(cond_images), cond_images)
+    if lr_ups is not None:
+        m = _expand_mask(mask_cond, lr_ups)
+        lr_ups = torch.where(m, torch.zeros_like(lr_ups), lr_ups)
 
     # === Apply to static geo (drop together) ===
     if lsm is not None:
@@ -881,7 +886,7 @@ def apply_cfg_dropout(
                 m = _expand_mask(mask_cond, seasons)
             seasons = torch.where(m, torch.full_like(seasons, fill_val), seasons)
 
-    return cond_images, lsm, topo, seasons
+    return cond_images, lsm, topo, seasons, lr_ups
 
 
 

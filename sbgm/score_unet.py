@@ -82,23 +82,32 @@ class EDMPrecondUNet(nn.Module):
         B = x_t.shape[0]
         c_in, c_skip, c_out, c_noise = self._precond(sigma)
 
-        # Scale input 
-        x_in = c_in.view(B, 1, 1, 1) * x_t  # [B, C, H, W]
-
-        # Build sigma-embedding -> time-dim vector that blocks expect (sigma instead of time)
-        t_emb = self.sigma_emb(c_noise)  # [B, time_dim]    
-
-        # Reuse encoder/decoder, they already take t-emb
-        enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
-
-        out = self.decoder(*enc_fmaps, t=t_emb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+        # === Residual-aware preconditioning ===
+        # NOTE: LR upsampled must be scaled in HR space!
         if self.predict_residual:
             if lr_ups is None:
                 raise ValueError("lr_ups must be provided when predict_residual is True.")
-            x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out # As in Karras et al. (2022)
+            
+            # Shift the noisy input by the baseline so the network denoises the residual r := x0 - lr_ups
+            x_shift = x_t - lr_ups
+            x_in = c_in.view(B, 1, 1, 1) * x_shift  # [B, C, H, W] Scale residual input
+
+            # Reuse encoder/decoder, they already take t-emb
+            t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
+            enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
+            out = self.decoder(*enc_fmaps, t=t_emb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+
+            # Predict x0 as: baseline + preconditioned skip residual + network residual head
+            x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_shift + c_out.view(B, 1, 1, 1) * out # As in Karras et al. (2022)
+
         else:
+            # Standard EDM preconditioning (no residual awareness)
+            x_in = c_in.view(B, 1, 1, 1) * x_t  # [B, C, H, W] Scale input
+            t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
+            enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
+            out = self.decoder(*enc_fmaps, t=t_emb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
             x0_hat = c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out
-    
+
         return x0_hat
     
 

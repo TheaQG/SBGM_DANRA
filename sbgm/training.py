@@ -1,7 +1,5 @@
 """
     TODO:
-        - Implement CFG again
-        - Implement EMA 
         - Implement mixed precision training 
         - Make precipitation evaluations only when precipitation is the target variable
 """
@@ -122,7 +120,12 @@ class TrainingPipeline_general:
         self.weight_init = cfg['training']['weight_init']
         self.custom_weight_initializer = cfg['training']['custom_weight_initializer']
         self.sdf_weighted_loss = cfg['training']['sdf_weighted_loss']
+        
+        # EMA parameters
         self.with_ema = cfg['training']['with_ema']
+        self.ema_decay = float(cfg['training'].get('ema_decay', 0.9999)) # Default to 0.9999 if not specified
+        if self.with_ema:
+            self._init_ema()
 
         # Classifier free guidance config
         self.cfg_guidance = self.cfg.get('classifier_free_guidance', {})
@@ -141,15 +144,6 @@ class TrainingPipeline_general:
             else:
                 self.model.apply(self.xavier_init_weights)
             logger.info(f"→ Model weights initialized with {self.custom_weight_initializer.__name__ if self.custom_weight_initializer else 'Xavier uniform'} initialization.")
-
-        # Set Exponential Moving Average (EMA) if needed
-        if self.with_ema:
-            #!!!!! NOTE: EMA is not implemented yet, this is a placeholder for future implementation"
-            # Create a copy of the model for EMA
-            self.ema_model = copy.deepcopy(self.model)
-            # Detach the EMA model parameters to not update them
-            for param in self.ema_model.parameters():
-                param.detach_()
 
         # Set up checkpoint directory, name and path
         self.checkpoint_dir = cfg['paths']['checkpoint_dir']
@@ -290,6 +284,34 @@ class TrainingPipeline_general:
             # If model has bias, initialize with 0.01 constant
             if m.bias is not None and torch.is_tensor(m.bias):
                 m.bias.data.fill_(0.01)
+    
+    def _init_ema(self):
+        """ 
+            Initialize Exponential Moving Average (EMA) model as a deepcopy of the current model and freeze it.
+        """
+        self.ema_model = copy.deepcopy(self.model)
+        self.ema_model.to(self.device)
+        self.ema_model.eval() # Set to eval mode
+
+        # Detach the EMA model parameters to not update them
+        for param in self.ema_model.parameters():
+            param.requires_grad_(False)
+        logger.info(f"→ EMA model initialized with decay {self.ema_decay}")
+    
+    @torch.no_grad()
+    def _update_ema(self):
+        """
+            Exponential moving average (EMA) update: ema = d*ema + (1-d)*model
+        """
+        if not getattr(self, 'ema_model', None):
+            return  # EMA not initialized
+        d = self.ema_decay
+        msd = self.model.state_dict()  # model state dict
+        esd = self.ema_model.state_dict()  # ema model state dict
+        for k in esd.keys():
+            # Only update if floating-point tensors:
+            if k in msd and esd[k].dtype.is_floating_point:
+                esd[k].mul_(d).add_(msd[k], alpha=1 - d)
 
     def load_checkpoint(self,
                         checkpoint_path,
@@ -299,7 +321,8 @@ class TrainingPipeline_general:
                         device=None
                         ):
         '''
-            Load a checkpoint from the given path.
+            Load a checkpoint from the given path. If load_ema = True and EMA exists, load EMA parameters into self.model
+            Also restore the EMA model when enabled.
             Args:
                 checkpoint_path: Path to the checkpoint file.
                 device: Device to load the checkpoint on. If None, uses the current device.
@@ -308,16 +331,27 @@ class TrainingPipeline_general:
         if device is None:
             device = self.device
         # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=device)['network_params']
-        # Load the state dict into the model
-        self.model.load_state_dict(checkpoint)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        net_sd = checkpoint.get('network_params', None)  # Network state dict
+        ema_sd = checkpoint.get('ema_network_params', None)  # EMA state dict if exists
+
+        if load_ema and (ema_sd is not None):
+            self.model.load_state_dict(ema_sd)
+            logger.info(f"→ Loaded EMA model weights into the main model from checkpoint {checkpoint_path}")
+        elif net_sd is not None:
+            self.model.load_state_dict(net_sd)
+            logger.info(f"→ Loaded model weights into the main model from checkpoint {checkpoint_path}")
+        else:
+            raise KeyError(f"Checkpoint at {checkpoint_path} does not contain 'network_params' or 'ema_network_params'.")
+        
+
 
     def save_model(self,
                    dirname='./model_params',
                    filename='SBGM.pth'
                    ):
         '''
-            Save the model parameters.
+            Save the model parameters and EMA parameters (if available)
             Args:
                 dirname: Directory to save the model parameters.
                 filename: Filename to save the model parameters.
@@ -331,6 +365,9 @@ class TrainingPipeline_general:
             'network_params': self.model.state_dict(),
             'optimizer_params': self.optimizer.state_dict()
         }
+
+        if self.with_ema and hasattr(self, 'ema_model'):
+            state_dicts['ema_network_params'] = self.ema_model.state_dict()
 
         return torch.save(state_dicts, os.path.join(dirname, filename))
     
@@ -378,9 +415,15 @@ class TrainingPipeline_general:
 
             # # === CFG dropout (training) ===
             cfg_guidance = self.cfg_guidance
-            cond_images, lsm, topo, seasons = apply_cfg_dropout(
-                cond_images, lsm, topo, seasons, cfg_guidance
+            cfg_dropout_result = apply_cfg_dropout(
+                cond_images, lsm, topo, seasons, lr_ups_baseline, cfg_guidance
             )
+            if len(cfg_dropout_result) == 5:
+                cond_images, lsm, topo, seasons, lr_ups_baseline = cfg_dropout_result
+            elif len(cfg_dropout_result) == 4:
+                cond_images, lsm, topo, seasons = cfg_dropout_result
+            else:
+                raise ValueError(f"apply_cfg_dropout returned unexpected tuple length: {len(cfg_dropout_result)}")
             # cfg_guidance = self.cfg.get('classifier_free_guidance', {})
             # if bool(cfg_guidance.get('enabled', False)) and cond_images is not None:
             #     drop_prob = float(cfg_guidance.get('drop_prob', 0.1))
@@ -451,7 +494,7 @@ class TrainingPipeline_general:
             if hasattr(self, 'scaler') and self.scaler:
                 with autocast():
                     # Pass the score model and samples+conditions to the loss_fn
-                    batch_loss = self.loss_fn(self.model,
+                    batch_loss = self.loss_fn(self.model, # NOTE: Is this correct? Should I set ema_model somewhere?
                                                x,
                                                y=seasons,
                                                cond_img=cond_images,
@@ -563,6 +606,9 @@ class TrainingPipeline_general:
             batch_loss.backward()
             # Update weights
             self.optimizer.step()
+            # Update EMA model if enabled
+            if self.with_ema:
+                self._update_ema()
 
             # Add batch loss to total loss
             loss_sum += batch_loss.item()
@@ -607,6 +653,8 @@ class TrainingPipeline_general:
             logger.info(f"   ▸ Dropout probability for LR conditions: {self.cfg_guidance.get('drop_prob', 0.1)}")
             logger.info(f"   ▸ Dropout probability for static geo: {self.cfg_guidance.get('drop_prob_geo', self.cfg_guidance.get('drop_prob', 0.1))}")
 
+        # Log EMA
+        logger.info(f"→ EMA enabled: {self.with_ema}; decay: {getattr(self, 'ema_decay', None)}; eval_use_ema: {cfg['training'].get('eval_use_ema', True)}")
 
         train_losses = []
         val_losses = []
@@ -709,6 +757,12 @@ class TrainingPipeline_general:
 
         # Set model to evaluation mode
         self.model.eval()
+        edm_on = bool(self.cfg.get('edm', {}).get('enabled', False))
+
+        # Choose eval model (EMA if enabled and configured)
+        use_ema_for_val = bool(self.cfg['training'].get('eval_use_ema', True))
+        model_eval = self.ema_model if (self.with_ema and use_ema_for_val and hasattr(self, 'ema_model')) else self.model
+
         # Set initial loss to 0
         loss = 0.0
         # Set the progress bar
@@ -719,29 +773,50 @@ class TrainingPipeline_general:
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
             x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
+
+
+
+            # Setup lr_ups_baseline if needed
+            lr_ups_baseline = None
+            if edm_on and self.edm_predict_residual:
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
+
             # No gradients needed for validation
             with torch.inference_mode(): #torch.no_grad(): # New in PyTorch 1.9, slightly faster than torch.no_grad()
                 # Use mixed precision training if needed
                 if hasattr(self, 'scaler') and self.scaler:
                     with autocast():
                         # Pass the score model and samples+conditions to the loss_fn
-                        batch_loss = self.loss_fn(self.model,
+                        batch_loss = self.loss_fn(model_eval,
                                              x,
                                              y=seasons,
                                              cond_img=cond_images,
                                              lsm_cond=lsm,
                                              topo_cond=topo,
-                                             sdf_cond=sdf)
+                                             sdf_cond=sdf,
+                                             lr_ups=lr_ups_baseline
+                                             )
                 else:
                     # No mixed precision, just pass the score model and samples+conditions to the loss_fn
-                    batch_loss = self.loss_fn(self.model,
+                    batch_loss = self.loss_fn(model_eval,
                                          x,
                                          y=seasons,
                                          cond_img=cond_images,
                                          lsm_cond=lsm,
                                          topo_cond=topo,
-                                         sdf_cond=sdf)
-
+                                         sdf_cond=sdf,
+                                         lr_ups=lr_ups_baseline
+                                     )
+                # === Cosine monitoring (validation; lightweight) ===
+                monitor_cfg = self.cfg.get('monitoring', {})
+                log_every = monitor_cfg.get('edm_metrics_every', 50)
+                if edm_on and log_every > 0 and (idx % log_every == 0):
+                    cos_val = edm_cosine_metric(self.loss_fn, model_eval, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo, lr_ups=lr_ups_baseline)
+                    if cos_val is not None:
+                        if verbose:
+                            logger.info(f"→ [monitor][val] Step {idx}: EDM cosine metric: {cos_val:.4f}")
+                        if self.writer is not None:
+                            self.writer.add_scalar('monitoring/edm_cosine_metric_val', cos_val, (current_epoch - 1) * len(dataloader) + idx)
 
             # === Extreme-prcp sentinel on ground-truth HR in validation (optional; lightweight) ===
             if self.extreme_enabled and self.extreme_in_validation and (idx % self.extreme_every_step == 0):
@@ -799,9 +874,28 @@ class TrainingPipeline_general:
                             epoch,
                           ):
         
-        # Load the model from checkpoint_dir with name checkpoint_name
-        best_model_state = torch.load(self.checkpoint_path, map_location=self.device)['network_params']
-        self.model.load_state_dict(best_model_state)
+        # Load the best model (EMA or network) from checkpoint
+        checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+        net_sd = checkpoint.get('network_params', None) # Network state dict
+        ema_sd = checkpoint.get('ema_network_params', None) # EMA state dict if exists
+        use_ema_for_gen = bool(cfg['training'].get('eval_use_ema', True))
+
+        if self.with_ema and use_ema_for_gen and (ema_sd is not None):
+            self.model.load_state_dict(ema_sd)
+            logger.info(f"→ Loaded EMA model weights into the main model from checkpoint {self.checkpoint_path} for sampling.")
+        elif net_sd is not None:
+            self.model.load_state_dict(net_sd)
+            logger.info(f"→ Loaded model weights into the main model from checkpoint {self.checkpoint_path} for sampling.")
+        else:
+            logger.warning(f"→ No EMA weights in checkpoint; using network weights for sampling.")
+
+        # Keep a synced EMA model handy if enabled
+        if self.with_ema:
+            if not hasattr(self, 'ema_model'):
+                self._init_ema()  # Initialize EMA if not already
+            if ema_sd is not None:
+                self.ema_model.load_state_dict(ema_sd)  # Sync EMA model
+
         # Set model to evaluation mode (set back to training mode after sampling)
         self.model.eval()
 
