@@ -121,11 +121,6 @@ class TrainingPipeline_general:
         self.custom_weight_initializer = cfg['training']['custom_weight_initializer']
         self.sdf_weighted_loss = cfg['training']['sdf_weighted_loss']
         
-        # EMA parameters
-        self.with_ema = cfg['training']['with_ema']
-        self.ema_decay = float(cfg['training'].get('ema_decay', 0.9999)) # Default to 0.9999 if not specified
-        if self.with_ema:
-            self._init_ema()
 
         # Classifier free guidance config
         self.cfg_guidance = self.cfg.get('classifier_free_guidance', {})
@@ -145,6 +140,14 @@ class TrainingPipeline_general:
                 self.model.apply(self.xavier_init_weights)
             logger.info(f"→ Model weights initialized with {self.custom_weight_initializer.__name__ if self.custom_weight_initializer else 'Xavier uniform'} initialization.")
 
+        # EMA parameters (should be located)
+        self.with_ema = cfg['training']['with_ema']
+        self.ema_decay = float(cfg['training'].get('ema_decay', 0.9999)) # Default to 0.9999 if not specified
+        self.ema_warmup_steps = int(cfg['training'].get('ema_warmup_steps', 0)) # Default to 0 if not specified
+        self._ema_updates = 0 # Counter for EMA updates
+        if self.with_ema:
+            self._init_ema()
+            
         # Set up checkpoint directory, name and path
         self.checkpoint_dir = cfg['paths']['checkpoint_dir']
         self.checkpoint_name = get_model_string(cfg) + '.pth.tar' 
@@ -302,16 +305,26 @@ class TrainingPipeline_general:
     def _update_ema(self):
         """
             Exponential moving average (EMA) update: ema = d*ema + (1-d)*model
+            Parameter-wise to avoid mutating a detached copy of the model.
         """
         if not getattr(self, 'ema_model', None):
             return  # EMA not initialized
         d = self.ema_decay
-        msd = self.model.state_dict()  # model state dict
-        esd = self.ema_model.state_dict()  # ema model state dict
-        for k in esd.keys():
-            # Only update if floating-point tensors:
-            if k in msd and esd[k].dtype.is_floating_point:
-                esd[k].mul_(d).add_(msd[k], alpha=1 - d)
+        for p_ema, p in zip(self.ema_model.parameters(), self.model.parameters()):
+            if p_ema.dtype.is_floating_point:
+                p_ema.data.mul_(d).add_(p.data, alpha=1.0 - d)
+        # Keep buffers synchronized exactly (GroupNorm has none, safe anyway)
+        for (_, b_ema), (_, b) in zip(self.ema_model.named_buffers(), self.model.named_buffers()):
+            if b_ema.shape == b.shape:
+                b_ema.data.copy_(b.data)
+    
+    def _maybe_update_ema(self):
+        """Call once per omptimizer step. Updates EMA only after warmup, but always increments the counter."""
+        if not self.with_ema:
+            return
+        if self._ema_updates >= self.ema_warmup_steps:
+            self._update_ema()
+        self._ema_updates += 1
 
     def load_checkpoint(self,
                         checkpoint_path,
@@ -387,17 +400,14 @@ class TrainingPipeline_general:
                 SAVE_PATH: Path to save the image.
                 SAVE_NAME: Name of the image to save.
                 use_mixed_precision: Boolean to use mixed precision training.
-        '''
-                # If plot first, then plot an example of the data
-
-        
+        '''        
         # Set model to training mode
         self.model.train()
 
         # Set initial loss to 0
         loss_sum = 0.0
 
-        # Check if cuda is available and set scaler for mixed precision training if needed
+        # AMP scaler (created per-epoch)
         self.scaler = GradScaler() if torch.cuda.is_available() and use_mixed_precision else None
 
         # Set the progress bar
@@ -407,62 +417,31 @@ class TrainingPipeline_general:
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
             x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
-
-            # === EDM: build lr_ups_baseline if needed ===
-            lr_ups_baseline = None
-            if self.edm_enabled and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
-
+            
+            # Cache pre-dropout LR conditions for metrics only
+            cond_images_for_metrics = cond_images
+            
             # # === CFG dropout (training) ===
             cfg_guidance = self.cfg_guidance
+            
+            # We pass None for lr_ups here; if predict_residual is True, it will be built after dropout
             cfg_dropout_result = apply_cfg_dropout(
-                cond_images, lsm, topo, seasons, lr_ups_baseline, cfg_guidance
+                cond_images, lsm, topo, seasons, None, cfg_guidance
             )
             if len(cfg_dropout_result) == 5:
-                cond_images, lsm, topo, seasons, lr_ups_baseline = cfg_dropout_result
+                cond_images, lsm, topo, seasons, _ = cfg_dropout_result
             elif len(cfg_dropout_result) == 4:
                 cond_images, lsm, topo, seasons = cfg_dropout_result
             else:
                 raise ValueError(f"apply_cfg_dropout returned unexpected tuple length: {len(cfg_dropout_result)}")
-            # cfg_guidance = self.cfg.get('classifier_free_guidance', {})
-            # if bool(cfg_guidance.get('enabled', False)) and cond_images is not None:
-            #     drop_prob = float(cfg_guidance.get('drop_prob', 0.1))
-            #     drop_prob_geo = float(cfg_guidance.get('drop_prob_geo', drop_prob)) # Optional separate drop prob for static geo
 
-            #     B = x.size(0)
-            #     device = x.device
+            # === EDM: build lr_ups_baseline AFTER CFG cropout if needed ===
+            lr_ups_baseline = None
+            if self.edm_enabled and self.edm_predict_residual:
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
 
-            #     # Bernoulli masks per-sample NOTE: Shouldn't geo always be dropped at same time as cond + some more times?
-            #     mask_cond = (torch.rand(B, device=device) < drop_prob)  # For LR conditions and labels
-            #     mask_geo = (mask_cond.clone() if drop_prob_geo == drop_prob else (torch.rand(B, device=device) < drop_prob_geo))  # For static geo conditions
-
-            #     # Expand to image shape
-            #     m_img = mask_cond.view(B, 1, 1, 1)  # For cond_images
-            #     m_geo = mask_geo.view(B, 1, 1, 1)  # For static geo (lsm, topo)
-                
-            #     # Nullify static geo (optionally with different prob)
-            #     if lsm is not None:
-            #         lsm = torch.where(m_geo, torch.zeros_like(lsm), lsm)
-            #     if topo is not None:
-            #         topo = torch.where(m_geo, torch.zeros_like(topo), topo)
-
-            #     # Nullify label season/day by sending to null id (0)
-            #     if seasons is not None:
-            #         null_id = int(cfg_guidance.get('null_label_id', 0))
-            #         # seasons expected shape [B] (long) or [B, ...] -> map dropped ones to null_id
-            #         if seasons.dtype == torch.long:
-            #             seasons = torch.where(mask_cond, torch.full_like(seasons, null_id), seasons) # NOTE: These are the same
-            #         else:
-            #             seasons = torch.where(mask_cond, torch.full_like(seasons, null_id), seasons)
-
-            #     # If training with predict_residual == True, also null the LR baseline channel
-            #     lr_ups_baseline = None
-            #     if self.edm_enabled and self.edm_predict_residual:
-            #         lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
-            #         lr_ups_baseline = torch.where(m_img, torch.zeros_like(lr_ups_baseline), lr_ups_baseline)
-
-            # Zero gradients
-            self.optimizer.zero_grad()
+            # Zero gradients, optimizer step 
+            self.optimizer.zero_grad(set_to_none=True)
 
 
             # NOTE: Introduce mixed precision training
@@ -487,11 +466,10 @@ class TrainingPipeline_general:
             # else:
             # logger.info("▸ Computing batch loss without mixed precision...")
                 # Log the shapes of the inputs for debugging
-            for name, tensor in zip(['x', 'seasons', 'cond_images', 'lsm', 'topo'], [x, seasons, cond_images, lsm, topo]):
-                if tensor is not None:
-                    assert tensor.device == x.device, f"{name} is on device {tensor.device}, expected {x.device}"
+                
             
-            if hasattr(self, 'scaler') and self.scaler:
+            
+            if self.scaler is not None:
                 with autocast():
                     # Pass the score model and samples+conditions to the loss_fn
                     batch_loss = self.loss_fn(self.model, # NOTE: Is this correct? Should I set ema_model somewhere?
@@ -501,10 +479,15 @@ class TrainingPipeline_general:
                                                lsm_cond=lsm,
                                                topo_cond=topo,
                                                sdf_cond=sdf,
-                                               lr_ups=lr_ups_baseline
-                                               )
+                                               lr_ups=lr_ups_baseline)
+                    # AMP backward + step
+                    self.scaler.scale(batch_loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    # EMA once per optimizer step
+                    self._maybe_update_ema()
             else:
-                # No mixed precision, just pass the score model and samples+conditions to the loss_fn
+                # FP32 backward + step
                 batch_loss = self.loss_fn(self.model,
                                            x,
                                            y=seasons,
@@ -512,39 +495,65 @@ class TrainingPipeline_general:
                                            lsm_cond=lsm,
                                            topo_cond=topo,
                                            sdf_cond=sdf,
-                                           lr_ups=lr_ups_baseline
-                                       )
+                                           lr_ups=lr_ups_baseline)
+                
+                # Standard backward + step
+                batch_loss.backward()
+                self.optimizer.step()
+                # EMA once per optimizer step
+                self._maybe_update_ema()
 
 
             # === Cosine monitoring (lightweight) ===
             monitor_cfg = self.cfg.get('monitoring', {})
             log_every = monitor_cfg.get('edm_metrics_every', 50)
             global_step = (current_epoch - 1) * len(dataloader) + idx
-            edm_on = self.cfg.get('edm', {}).get('enabled', False)
+            edm_on = bool(self.cfg.get('edm', {}).get('enabled', False))
 
             if edm_on and log_every > 0 and (global_step % log_every == 0):
-                cos = edm_cosine_metric(self.loss_fn, self.model, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo, lr_ups=lr_ups_baseline)
+                with torch.inference_mode():
+                    # Use EMA for monitoring if configured and warmup passed
+                    use_ema_for_mon = bool(self.cfg['training'].get('eval_use_ema', True))
+                    use_ema_now = (self.with_ema and use_ema_for_mon and hasattr(self, 'ema_model') and (self._ema_updates >= max(1, self.ema_warmup_steps)))
+                    model_mon = self.ema_model if use_ema_now else self.model
+
+                    # Detach inputs to avoid autograd overhead
+                    x_m = x.detach(); cond_m = cond_images.detach() if cond_images is not None else None
+                    lsm_m = lsm.detach() if lsm is not None else None
+                    topo_m = topo.detach() if topo is not None else None
+                    seasons_m = seasons.detach() if isinstance(seasons, torch.Tensor) else seasons
+                    lrups_m = lr_ups_baseline.detach() if lr_ups_baseline is not None else None
+
+                    cos = edm_cosine_metric(self.loss_fn, model_mon, x_m, y=seasons_m,
+                                            cond_img=cond_m, lsm_cond=lsm_m, topo_cond=topo_m, lr_ups=lrups_m)
+                    
                 self.live_metrics['steps'].append(global_step)
-                self.live_metrics['edm_cosine'].append(float(cos)) # type: ignore
+                self.live_metrics['edm_cosine'].append(float(cos)) if cos is not None else float('nan')
+
                 if cos is not None:
                     pbar.set_postfix(loss=loss_sum / (idx + 1), edm_cosine=cos)
                     if verbose:
-                        logger.info(f"→ [monitor][train] Step {idx}: EDM cosine metric: {cos:.4f}")
+                        logger.info(f"→ [monitor][train] Step {idx}: EDM cosine metric: {float(cos):.4f}")
                     if self.writer is not None:
-                        self.writer.add_scalar('monitoring/edm_cosine_metric_train', cos, (current_epoch - 1) * len(dataloader) + idx)
+                        self.writer.add_scalar('monitoring/edm_cosine_metric_train', float(cos), global_step)
 
-                # HR <-> LR alignment corr (cheap). Use lr_ups_baseline already built for residual path, else derive it here if needed
+                # HR <-> LR alignment corr (cheap). Compute from PRE-dropout conditions for a fair metric
                 hr_lr_corr_val = float('nan')
-                try: 
-                    if lr_ups_baseline is None and cond_images is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
-                        lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
-                    if lr_ups_baseline is not None:
-                        # Optional land-only mask
-                        mask = None
-                        if self.eval_land_only and (lsm_hr is not None):
-                            mask = (lsm_hr >= 0.5).float()  # [B, 1, H, W]
-                        from sbgm.monitoring import _masked_corrcoef_per_sample
-                        hr_lr_corr_val = _masked_corrcoef_per_sample(x, lr_ups_baseline.expand_as(x), mask=mask).item()
+                try:
+                    with torch.inference_mode():
+                        lrups_corr = lr_ups_baseline
+                        if lrups_corr is None and cond_images_for_metrics is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
+                            lrups_corr = self._build_lr_ups_baseline(cond_images_for_metrics)
+                        if lrups_corr is not None:
+                            mask = None
+                            if self.eval_land_only and (lsm_hr is not None):
+                                mask = (lsm_hr >= 0.5).float()
+                            from sbgm.monitoring import _masked_corrcoef_per_sample
+                            x_corr = x.detach(); lr_corr = lrups_corr.detach().expand_as(x_corr)
+                            mask_corr = mask.detach() if isinstance(mask, torch.Tensor) else None
+                            hr_lr_corr_val = _masked_corrcoef_per_sample(x_corr, lr_corr, mask=mask_corr).item()
+                            if verbose:
+                                logger.info(f"[monitor][train] Step {idx}: HR-LR correlation: {hr_lr_corr_val:.4f}")
                         if verbose:
                             logger.info(f"[monitor][train] Step {idx}: HR-LR correlation: {hr_lr_corr_val:.4f}")
                 except Exception as e:
@@ -553,7 +562,7 @@ class TrainingPipeline_general:
                 finally:
                     self.live_metrics['hr_lr_corr'].append(hr_lr_corr_val)
                     if self.writer is not None:
-                        self.writer.add_scalar('monitoring/hr_lr_corr_train', hr_lr_corr_val, (current_epoch - 1) * len(dataloader) + idx)
+                        self.writer.add_scalar('monitoring/hr_lr_corr_train', hr_lr_corr_val, global_step)
                     
 
             # === Extreme-prcp sentinel on ground-truth HR (optional; lightweight) ===
@@ -564,12 +573,8 @@ class TrainingPipeline_general:
                     if self.extreme_backtransform and self.back_transforms_train is not None:
                         # Expect a callable for HR back-transform under key 'hr'
                         bt = self.back_transforms_train.get('hr', None)
-                        if bt is not None:
-                            if callable(bt):
-                                x_bt = bt(x_for_check.detach().cpu())
-                            else:
-                                logger.warning(f"[monitor] Back-transform object for HR is not callable and has no 'transform' method.")
-                                x_bt = x_for_check.detach().cpu()
+                        if callable(bt):
+                            x_bt = bt(x_for_check.detach().cpu())
                         else:
                             x_bt = x_for_check.detach().cpu()
                     else:
@@ -579,39 +584,21 @@ class TrainingPipeline_general:
                     if not isinstance(x_bt, torch.Tensor):
                         x_bt = torch.tensor(x_bt)
                     check = report_precip_extremes(x_bt=x_bt, name="ground_truth_hr", cap_mm_day=self.extreme_threshold_mm)
-                    # "check" is boolean: True if any extreme values found
-                    has_extreme = check.get('has_extreme', False)
-                    n_extreme = check.get('n_extreme', 0)
-                    extreme_values = check.get('extreme_values', [])
-                    has_below_zero = check.get('has_below_zero', False)
-                    n_below_zero = check.get('n_below_zero', 0)
-                    below_zero_values = check.get('below_zero_values', [])
-
-                    if has_extreme and self.extreme_log_first_n > 0:
-                        # Extract some stats if provided
-                        mx = max(extreme_values) if isinstance(extreme_values, list) else None
+                    
+                    # If extremes found, log them
+                    if check.get('has_extreme', False) and self.extreme_log_first_n > 0:
+                        extreme_values = check.get('extreme_values', [])
+                        mx = max(extreme_values) if isinstance(extreme_values, list) and extreme_values else None
                         cnt = len(extreme_values) if isinstance(extreme_values, list) else None
                         logger.warning(f"[monitor][train] Extreme precipitation detected at step {idx}:")
                         logger.warning(f"               max={mx:.1f} mm/day, count={cnt}, threshold={self.extreme_threshold_mm} mm/day")
                         self.extreme_log_first_n -= 1  # Decrement counter to log fewer next times
 
                 except Exception as e:
-                    logger.warning(f"[monitor] Could not check for extreme precipitation in training step {idx}. Error: {e}")
+                    logger.warning(f"[monitor] Could not check for extremes at step {idx}. Error: {e}")
 
 
-            # logger.info(f"▸ Batch loss computed: {batch_loss.item():.4f}")
-            # Add anomaly detection for loss
-            # with torch.autograd.detect_anomaly():
-            # Backward pass
-            batch_loss.backward()
-            # Update weights
-            self.optimizer.step()
-            # Update EMA model if enabled
-            if self.with_ema:
-                self._update_ema()
-
-            # Add batch loss to total loss
-            loss_sum += batch_loss.item()
+            loss_sum += float(batch_loss.item())
             # Update the bar
             if idx % self.cfg['training'].get('train_postfix_every', 10) == 0:
                 pbar.set_postfix(loss=loss_sum / (idx + 1))
@@ -761,7 +748,8 @@ class TrainingPipeline_general:
 
         # Choose eval model (EMA if enabled and configured)
         use_ema_for_val = bool(self.cfg['training'].get('eval_use_ema', True))
-        model_eval = self.ema_model if (self.with_ema and use_ema_for_val and hasattr(self, 'ema_model')) else self.model
+        use_ema_now = (self.with_ema and use_ema_for_val and hasattr(self, 'ema_model') and (self._ema_updates >= max(1, self.ema_warmup_steps)))
+        model_eval = self.ema_model if use_ema_now else self.model
 
         # Set initial loss to 0
         loss = 0.0
