@@ -3,7 +3,6 @@
     The dataset can be used for training and testing the SBGM_SD model.
 
     TODO:
-        - Training data statistics instead of global statistics for scaling (lines 569, 602)
         - Add static sampling (no crop + shift) option (fixed cutout)
         - Add multiple cutout domains (Northern Germany, Poland, Netherlands etc.)
         - Add option for Day-Of-Year conditional sampling
@@ -565,7 +564,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.cache = {}  # Use a simple dict for caching, if cache_size > 0
 
         if self.scale:
-            # 1. Set condition transforms
+            # 1a. Set condition transforms
             self.lr_transforms_dict = {}
             domain_str_hr = f"{cfg['highres']['full_domain_dims'][0]}x{cfg['highres']['full_domain_dims'][1]}" if cfg is not None else f"{self.hr_data_size[0]}x{self.hr_data_size[1]}"
             domain_str_lr = f"{cfg['lowres']['full_domain_dims'][0]}x{cfg['lowres']['full_domain_dims'][1]}" if cfg is not None else f"{self.target_lr_size[0]}x{self.target_lr_size[1]}"
@@ -575,6 +574,10 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             crop_region_lr_str = '_'.join(map(str, crop_region_lr)) # if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
             scaling_split = self.scaling_split
             stats_load_dir = cfg['paths']['stats_load_dir'] if cfg is not None else './stats'
+            hr_buff = cfg['highres'].get('buffer_frac', 0.5) if cfg is not None else 0.5
+            lr_main_scale = cfg['lowres'].get('lr_main_var_scale', 'LR') if cfg is not None else 'LR' # Whether LR conditions are on LR or HR scale (if cutouts are used)
+            self.lr_hrspace_transform = None
+            self.lr_hr_space_var = None
 
             for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
                 logger.info(f"LR condition: {cond_var}, scaling method: {trans_type}")
@@ -595,12 +598,36 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 ))
                 self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
 
+            # 1b. Build a HR-space forward transform for the LR "main" var (the HR target)
+            #     to be used ONLY as the residual baseline (not as a conditioning channel).
+            #     Enabled when:
+            #       - the HR variable is present in LR conditions and
+            #       - lr_main_var_scale in {"HR", "HR_LR"} or lowres.dual_lr = True
+            if (self.hr_variable in self.lr_conditions) and ((cfg is not None and cfg['lowres'].get('dual_lr', False)) or lr_main_scale in {'HR', 'HR_LR'}):
+                logger.info(f"Buidling HR-space transform for LR baseline of '{self.hr_variable}' using HR stats")
+                self.lr_hrspace_transform = transforms.Compose([
+                    SafeToTensor(),
+                    ResizeTensor(self.hr_size_reduced),
+                    get_transforms_from_stats(
+                        variable=self.hr_variable,
+                        model=self.hr_model,
+                        domain_str=domain_str_hr,
+                        crop_region_str=crop_region_hr_str,
+                        scaling_split=scaling_split,
+                        transform_type=self.hr_scaling_method,
+                        buffer_frac=hr_buff,
+                        stats_file_path=stats_load_dir,
+                    )
+                ])
+                self.lr_hr_space_var = self.hr_variable
+
+
             # 2. Set HR target transform
             hr_transform_list = [
                 SafeToTensor(),
                 ResizeTensor(self.hr_size_reduced)
             ]
-            hr_buff = cfg['highres'].get('buffer_frac', 0.5) if cfg is not None else 0.5
+
             hr_transform_list.append(get_transforms_from_stats(
                 variable=self.hr_variable,
                 model=self.hr_model,
@@ -743,11 +770,22 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             if self.save_original:
                 sample_dict[f"{cond}_lr_original"] = data.copy() if data is not None else None
 
-            # Apply specified transform (specific to various conditions)
+            # Keep a copy for HR-space transform before LR transform mutates it
+            data_raw_for_hrspace = None
+            if data is not None and (self.lr_hrspace_transform is not None) and (cond == self.lr_hr_space_var):
+                data_raw_for_hrspace = data.copy()
+            
+            # Apply specified LR transform (per-variable stats, LR space)
             if data is not None and self.lr_transforms_dict.get(cond, None) is not None:
                 data = self.lr_transforms_dict[cond](data)
             sample_dict[cond + "_lr"] = data
-        
+
+            # Also produce a HR-space scaled LR baseline for the target variable if configured
+            if (data_raw_for_hrspace is not None) and (self.lr_hrspace_transform is not None):
+                try:
+                    sample_dict[f"{cond}_lr_hrspace"] = self.lr_hrspace_transform(data_raw_for_hrspace)
+                except Exception as e:
+                    logger.error(f"Failed to build HR-space LR baseline for '{cond}' on file '{lr_file_name}'. Error: {e}")
 
         # Load HR target variable data
         try:

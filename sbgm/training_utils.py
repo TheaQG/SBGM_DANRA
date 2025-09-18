@@ -59,9 +59,12 @@ def get_loss_fn(cfg, marginal_prob_std_fn=None):
     if marginal_prob_std_fn is None:
         raise ValueError("marginal_prob_std_fn must be provided for VE-DSM loss.")
     
-    use_sdf = bool(_get(cfg, 'stationary_conditions.geographic_conditions.sample_w_sdf', True))
+    # Prefer new training flag; fall back to old location for backwards compatibility
+    use_sdf = bool(_get(cfg, 'training.sdf_weighted_loss', _get(cfg, 'stationary_conditions.geographic_conditions.sample_w_sdf', False)))
     max_land_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.max_land_weight', 1.0))
-    min_sea_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.min_sea_weight', 0.5))
+    # Config uses 'max_ocean_weight'; honor that first, then fall back to legacy 'min_sea_weight'
+    min_sea_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.min_sea_weight', _get(cfg, 'stationary_conditions.geographic_conditions.max_ocean_weight', 0.5)))
+
     return DSMLoss(
                 marginal_prob_std_fn=marginal_prob_std_fn,
                 t_eps=t_eps,

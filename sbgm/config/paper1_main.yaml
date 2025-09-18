@@ -39,6 +39,7 @@ lowres:
   resize_factor: 1 # Factor to resize low-res data (used for testing at lower resolutions)
   cutout_domains: [170, 350, 340, 520] # [x1, x2, y1, y2], coordinates for cutout
   stationary_cutout: false # Whether to use a stationary cutout or random crop from cutout domain
+  lr_main_var_scale: "HR_LR" # Whether LR conditions are on LR or HR scale or combined
 
 sampler:
   sampler_type: edm_sampler #pc_sampler # Type of sampler to use
@@ -74,7 +75,7 @@ stationary_conditions:
     norm_min: -1 # Minimum normalization value for topography and slope
     norm_max: 1 # Maximum normalization value for topography and slope
     max_land_weight: 1.0 # Maximum weight for land in SDF
-    max_ocean_weight: 0.5 # Maximum weight for ocean in SDF
+    min_ocean_weight: 0.5 # Minimum weight for ocean in SDF
   seasonal_conditions:
     sample_w_cond_season: true # Whether to sample with seasonal conditions
     n_seasons: 4 # Number of seasons in the data
@@ -118,7 +119,7 @@ training:
   weight_init: true # Whether to initialize weights
   custom_weight_initializer: !!null # Custom weight initializer (if any) - currently not used, but should be 'kaiming', 'he' or 'xavier'
   with_ema: true # Whether to use Exponential Moving Average NOTE: NEEDS TO BE IMPLEMENTED
-  eval_use_ema: true # Whether to use EMA weights for evaluation (validation and generation)
+  eval_use_ema: false # Whether to use EMA weights for evaluation (validation and generation)
   load_ema: true # Whether to load EMA weights
   ema_decay: 0.999 # Decay rate for EMA. 0.999-0.9995 is a good range for per-step decay with batch size 16-32. Lower for smaller batches, higher for larger batches.
   weight_decay: 0.000001 # Weight decay for regularization

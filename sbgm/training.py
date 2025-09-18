@@ -10,6 +10,7 @@ import copy
 import pickle
 import tqdm
 import logging 
+import csv
 
 import torch.nn as nn
 import matplotlib.pyplot as plt
@@ -147,6 +148,9 @@ class TrainingPipeline_general:
         self._ema_updates = 0 # Counter for EMA updates
         if self.with_ema:
             self._init_ema()
+
+        # Persistent AMP scaler (create once, reuse across epochs)
+        self.scaler = GradScaler(enabled=bool(self.cfg['training'].get('use_mixed_precision', False)) and torch.cuda.is_available())
             
         # Set up checkpoint directory, name and path
         self.checkpoint_dir = cfg['paths']['checkpoint_dir']
@@ -253,13 +257,24 @@ class TrainingPipeline_general:
         self.quantiles_compare_to_hr = bool(cfg_mon__end_of_epoch.get('quantiles_compare_to_hr', True)) # Whether to compare LR/HR quantiles
 
 
-    def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
+    def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None, samples: dict | None = None):
         """
-            Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
-            Returns [B, 1, H, W] or raises if unavailable when predict_residual is True.
+            Extract LR baseline channel (same variable as HR target).
+            Prefer dedicated HR-space channel from the dataset (e.g., '<var>_lr_hrspace') when available.
+            Returns [B, 1, H, W] and raises if unavailable when residual prediction is enabled.
         """
+        # Preferred: use the dedicated HR-space LR baselien if dataset provided it
+        if samples is not None:
+            key = f"{self.hr_var}_lr_hrspace"
+            if (key in samples) and (samples[key] is not None):
+                lr_ups = samples[key].to(self.device, non_blocking=True).float()  # non_blocking if pinned memory
+                if lr_ups.dim() == 3:  # [B, H, W] -> [B, 1, H, W]
+                    lr_ups = lr_ups.unsqueeze(1)
+                return lr_ups
+            
+        # Fallback: extract from cond_images (LR-scaled). This is *not* HR-space and is only used if no hrspace channel exists
         if cond_images is None:
-            raise ValueError("cond_images is None, cannot extract LR baseline for residual prediction.")
+            raise ValueError("cond_images is None, and no '*_lr_hrspace' channel found in samples; cannot extract LR baseline for residual prediction.")
         
         cond_vars = self.cfg['lowres']['condition_variables']
         target_var = self.hr_var
@@ -269,7 +284,8 @@ class TrainingPipeline_general:
         idx = cond_vars.index(target_var)
         if cond_images.shape[1] <= idx:
             raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx} for variable '{target_var}'.")
-        lr_ups = cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
+
+        lr_ups = cond_images[:, idx:idx+1, :, :]  # [B, 1, H, W] - cond_images already upsampled to HR size
         return lr_ups
 
 
@@ -319,7 +335,7 @@ class TrainingPipeline_general:
                 b_ema.data.copy_(b.data)
     
     def _maybe_update_ema(self):
-        """Call once per omptimizer step. Updates EMA only after warmup, but always increments the counter."""
+        """Call once per optimizer step. Updates EMA only after warmup, but always increments the counter."""
         if not self.with_ema:
             return
         if self._ema_updates >= self.ema_warmup_steps:
@@ -348,14 +364,23 @@ class TrainingPipeline_general:
         net_sd = checkpoint.get('network_params', None)  # Network state dict
         ema_sd = checkpoint.get('ema_network_params', None)  # EMA state dict if exists
 
-        if load_ema and (ema_sd is not None):
-            self.model.load_state_dict(ema_sd)
-            logger.info(f"→ Loaded EMA model weights into the main model from checkpoint {checkpoint_path}")
-        elif net_sd is not None:
+        # Prefer training from the network weights; keep EMA in a separate shallow model
+        if net_sd is not None:
             self.model.load_state_dict(net_sd)
             logger.info(f"→ Loaded model weights into the main model from checkpoint {checkpoint_path}")
+        elif ema_sd is not None:
+            self.model.load_state_dict(ema_sd)
+            logger.warning(f"→ No network weights found in checkpoint; loaded EMA weights into the main model from checkpoint {checkpoint_path}")
         else:
             raise KeyError(f"Checkpoint at {checkpoint_path} does not contain 'network_params' or 'ema_network_params'.")
+        
+        # Initialize or refresh EMA shadow model
+        if self.with_ema:
+            if not hasattr(self, 'ema_model'):
+                self._init_ema()
+            if ema_sd is not None:
+                self.ema_model.load_state_dict(ema_sd)
+                logger.info(f"→ Synchronized ema_model state dict from checkpoint {checkpoint_path}")
         
 
 
@@ -407,9 +432,6 @@ class TrainingPipeline_general:
         # Set initial loss to 0
         loss_sum = 0.0
 
-        # AMP scaler (created per-epoch)
-        self.scaler = GradScaler() if torch.cuda.is_available() and use_mixed_precision else None
-
         # Set the progress bar
         pbar = tqdm.tqdm(dataloader, desc=f"Epoch {current_epoch}/{epochs}", unit="batch")
         # Iterate through batches in dataloader (tuple of images and seasons)
@@ -438,36 +460,10 @@ class TrainingPipeline_general:
             # === EDM: build lr_ups_baseline AFTER CFG cropout if needed ===
             lr_ups_baseline = None
             if self.edm_enabled and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images, samples)  # [B, 1, H, W]
 
             # Zero gradients, optimizer step 
-            self.optimizer.zero_grad(set_to_none=True)
-
-
-            # NOTE: Introduce mixed precision training
-            # # Use mixed precision training if needed
-            # if self.scaler:
-            #     with autocast():
-            #         # Pass the score model and samples+conditions to the loss_fn
-            #         batch_loss = loss_fn(self.model,
-            #                              x,
-            #                              self.marginal_prob_std_fn,
-            #                              y=seasons,
-            #                              cond_img=cond_images,
-            #                              lsm_cond=lsm,
-            #                              topo_cond=topo,
-            #                              sdf_cond=sdf)
-            #     # Mixed precision: scale loss and update weights
-            #     self.scaler.scale(batch_loss).backward()
-            #     # Update weights
-            #     self.scaler.step(self.optimizer)
-            #     # Update scaler
-            #     self.scaler.update()
-            # else:
-            # logger.info("▸ Computing batch loss without mixed precision...")
-                # Log the shapes of the inputs for debugging
-                
-            
+            self.optimizer.zero_grad(set_to_none=True)            
             
             if self.scaler is not None:
                 with autocast():
@@ -543,7 +539,7 @@ class TrainingPipeline_general:
                     with torch.inference_mode():
                         lrups_corr = lr_ups_baseline
                         if lrups_corr is None and cond_images_for_metrics is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
-                            lrups_corr = self._build_lr_ups_baseline(cond_images_for_metrics)
+                            lrups_corr = self._build_lr_ups_baseline(cond_images_for_metrics, samples)  # [B, 1, H, W]
                         if lrups_corr is not None:
                             mask = None
                             if self.eval_land_only and (lsm_hr is not None):
@@ -767,7 +763,7 @@ class TrainingPipeline_general:
             # Setup lr_ups_baseline if needed
             lr_ups_baseline = None
             if edm_on and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images, samples)  # [B, 1, H, W]
 
             # No gradients needed for validation
             with torch.inference_mode(): #torch.no_grad(): # New in PyTorch 1.9, slightly faster than torch.no_grad()
@@ -862,30 +858,32 @@ class TrainingPipeline_general:
                             epoch,
                           ):
         
-        # Load the best model (EMA or network) from checkpoint
+        # Load network/EMA weights from checkpoint without mutating training state unnecessarily
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
-        net_sd = checkpoint.get('network_params', None) # Network state dict
-        ema_sd = checkpoint.get('ema_network_params', None) # EMA state dict if exists
+        net_sd = checkpoint.get('network_params', None)  # Network state dict
+        ema_sd = checkpoint.get('ema_network_params', None)  # EMA state dict if exists
         use_ema_for_gen = bool(cfg['training'].get('eval_use_ema', True))
 
-        if self.with_ema and use_ema_for_gen and (ema_sd is not None):
-            self.model.load_state_dict(ema_sd)
-            logger.info(f"→ Loaded EMA model weights into the main model from checkpoint {self.checkpoint_path} for sampling.")
-        elif net_sd is not None:
+        # Load main network weights if available, otherwise fall back to EMA
+        if net_sd is not None:
             self.model.load_state_dict(net_sd)
-            logger.info(f"→ Loaded model weights into the main model from checkpoint {self.checkpoint_path} for sampling.")
+            logger.info(f"→ Loaded network weights into main model from checkpoint {self.checkpoint_path} for sampling.")
+        elif ema_sd is not None and use_ema_for_gen:
+            self.model.load_state_dict(ema_sd)
+            logger.warning(f"→ No network weights in checkpoint; loaded EMA weights into main model from checkpoint {self.checkpoint_path} for sampling.")
         else:
-            logger.warning(f"→ No EMA weights in checkpoint; using network weights for sampling.")
+            logger.warning(f"→ No EMA weights in checkpoint {self.checkpoint_path}; using current in-memory model for sampling.")
 
-        # Keep a synced EMA model handy if enabled
+        # Ensure EMA shadow model is initialized and synchronized if using EMA for generation
         if self.with_ema:
             if not hasattr(self, 'ema_model'):
                 self._init_ema()  # Initialize EMA if not already
             if ema_sd is not None:
                 self.ema_model.load_state_dict(ema_sd)  # Sync EMA model
 
-        # Set model to evaluation mode (set back to training mode after sampling)
-        self.model.eval()
+        # Choose which model to use for generation (without loading into self.model if using EMA)
+        model_eval = self.ema_model if (self.with_ema and use_ema_for_gen and ema_sd is not None) else self.model
+        model_eval.eval()  # Set to eval mode
 
         # Set up sampler 
         edm_on = bool((cfg.get('edm', {}).get('enabled', False)))
@@ -893,7 +891,6 @@ class TrainingPipeline_general:
             sampler_edm = edm_sampler
             sampler = None
             logger.info("→ Sampling using EDM sampler...")
-            
         else:
             sampler_edm = None
             if cfg['sampler']['sampler_type'] == 'pc_sampler':
@@ -945,13 +942,13 @@ class TrainingPipeline_general:
             # Setup lr_ups_baseline if needed
             lr_ups_baseline = None
             if edm_on and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images_gen)  # [B, 1, H, W]
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images_gen, samples)  # [B, 1, H, W]
 
             if edm_on and sampler_edm is not None:
                 edm_cfg = cfg.get('edm', {}) or {}
                 guidance_cfg = cfg.get('classifier_free_guidance', {})
 
-                generated_samples = sampler_edm(score_model=self.model,
+                generated_samples = sampler_edm(score_model=model_eval,
                                             batch_size=cfg['data_handling']['n_gen_samples'],
                                             num_steps=edm_cfg.get('sampling_steps', 18),
                                             device=self.device,
@@ -972,7 +969,7 @@ class TrainingPipeline_general:
                 )
             elif sampler is not None:
                 generated_samples = sampler(
-                    score_model=self.model,
+                    score_model=model_eval,
                     marginal_prob_std=self.marginal_prob_std_fn,
                     diffusion_coeff=self.diffusion_coeff_fn,
                     batch_size=cfg['data_handling']['n_gen_samples'],
@@ -1094,6 +1091,32 @@ class TrainingPipeline_general:
                 plot_quantiles_wetday_history(self.q_hist, save_dir=self.path_metrics,
                                             filename="quantiles_history.png",
                                             title="Quantiles & wet-day history" + (" (land-only)" if self.eval_land_only else ""))
+                
+
+                # === Write epoch metrics to CSV ===
+                try:
+                    row = {"epoch": epoch, "use_ema_eval": bool(cfg['training'].get('eval_use_ema', True))}
+                    # Flatten FSS dict into columns fss_<scale>
+                    if isinstance(fss_dict, dict):
+                        for k, v in fss_dict.items():
+                            row[f"fss_{str(k)}"] = float(v) if v is not None else None
+                    # PSD slopes
+                    if isinstance(psd_dict, dict):
+                        if "gen_slope" in psd_dict: row["psd_gen_slope"] = float(psd_dict["gen_slope"])
+                        if "hr_slope"  in psd_dict: row["psd_hr_slope"]  = float(psd_dict["hr_slope"])
+                    # Quantiles / wet-day
+                    if isinstance(q_dict, dict):
+                        for k, v in q_dict.items():
+                            row[str(k)] = float(v) if (v is not None and not isinstance(v, bool)) else (1.0 if v is True else (0.0 if v is False else None))
+                    csv_path = os.path.join(self.path_metrics, "metrics_epoch.csv")
+                    os.makedirs(self.path_metrics, exist_ok=True)
+                    write_header = not os.path.exists(csv_path)
+                    with open(csv_path, "a", newline="") as f:
+                        w = csv.DictWriter(f, fieldnames=row.keys())
+                        if write_header: w.writeheader()
+                        w.writerow(row)
+                except Exception as e:
+                    logger.warning(f"[monitor] Could not write metrics CSV at epoch {epoch}. Error: {e}")
             except Exception as e:
                 logger.warning(f"[monitor] Could not compute epoch-level metrics at epoch {epoch}. Error: {e}")
 
