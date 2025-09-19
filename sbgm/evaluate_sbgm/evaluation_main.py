@@ -74,9 +74,9 @@ def evaluation_main(cfg):
                 )
             elif method == 'spatial_stats':
                 eval_runner.spatial_statistics(
-                    show_figs=cfg.get('show_figs', False),
-                    save_figs=cfg.get('save_figs', True),
-                    n_samples=cfg.get('n_gen_samples', 4)
+                    show_figs=cfg.evaluation.get('show_figs', False),
+                    save_figs=cfg.evaluation.get('save_figs', True),
+                    n_samples=cfg.evaluation.get('n_gen_samples', 4)
                 )
             else:
                 raise ValueError(f"Invalid evaluation method: {method}. Must be one of ['pixel_stats', 'spatial_stats']")

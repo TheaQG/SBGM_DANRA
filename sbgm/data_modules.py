@@ -515,6 +515,23 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.shuffle = shuffle
         self.cutouts = cutouts
         self.cutout_domains = cutout_domains
+
+        # Set cutout/stationary cutout parameters
+        self.eval_stationary = False
+        self.eval_hr_bounds = None
+        if self.split in ("test", "eval", "val", "valid") and (cfg is not None and 'evaluation' in cfg):
+            eval_cfg = cfg['evaluation']
+            if eval_cfg.get('enabled', False):
+                b = eval_cfg.get('hr_bounds', None)
+                if b and len(b) == 4:
+                    y0, y1, x0, x1 = b
+                    assert (y1 - y0) == self.hr_size_reduced[0]
+                    assert (x1 - x0) == self.hr_size_reduced[1]
+                    self.eval_stationary = True
+                    self.eval_hr_bounds = (y0, y1, x0, x1)
+                    logger.info(f"Using stationary evaluation cutout with HR bounds {self.eval_hr_bounds}")
+
+
         self.sdf_weighted_loss = sdf_weighted_loss
         self.scale = scale
         self.save_original = save_original

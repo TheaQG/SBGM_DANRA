@@ -54,18 +54,57 @@ class SampleGenerator:
         os.makedirs(self.fig_path, exist_ok=True)
         os.makedirs(self.sample_path, exist_ok=True)
 
-    def _run_sampler(self, batch_size, y, cond_img, lsm_cond, topo_cond):
+    def _build_lr_ups_baseline(self, cond_img, samples):
+        """
+            Build LR upsampled baseline for residual aware EDM generation
+            Prefer dedicated HR-space channel '<hr_var>_lr_hrspace' in samples if present
+            Otherwise fall back to extracting the HR target var from cond_img
+            Return [B, 1, H, W] tensor or None if not applicable
+        """
+        # Only needed if EDM and predict_residual enabled
+        edm_cfg = getattr(self.cfg, 'edm', {})
+        if not edm_cfg.get('enabled', False) or not edm_cfg.get('predict_residual', False):
+            return None
+        
+        hr_var = self.cfg.highres.variable
+        # 1) Preferred: dataset-provided HR-space LR baseline
+        key = f"{hr_var}_lr_hrspace"
+        if isinstance(samples, dict) and (key in samples) and (samples[key] is not None):
+            lr_ups = samples[key]
+            if not isinstance(lr_ups, torch.Tensor):
+                lr_ups = torch.tensor(lr_ups, device=self.device)
+            lr_ups = lr_ups.to(self.device, non_blocking=True).float()
+            if lr_ups.ndim == 3:
+                lr_ups = lr_ups.unsqueeze(1) # add channel dim
+            return lr_ups
+        
+        # 2) Fallback: extract corresponding LR from cond_img (LR-scaled, not ideal)
+        cond_vars = list(getattr(self.cfg.lowres, 'condition_variables', []) or [])
+        if (cond_img is None) or (hr_var not in cond_vars):
+            raise ValueError(f"Cannot build LR upsampled baseline for residual-aware EDM generation: missing '{key}' in samples and '{hr_var}' not in cond_vars {cond_vars}")
+        idx = cond_vars.index(hr_var)
+        if cond_img.shape[1] <= idx:
+            raise ValueError(f"Cannot build LR upsampled baseline for residual-aware EDM generation: cond_img has shape {cond_img.shape} but '{hr_var}' is at index {idx} in cond_vars {cond_vars}")
+        lr_ups = cond_img[:, idx:idx+1, :, :].to(self.device, non_blocking=True).float() # [B, 1, H, W]
+        return lr_ups
+
+    def _run_sampler(self, batch_size, y, cond_img, lsm_cond, topo_cond, samples=None):
         """
             Run the correct sampler depending on whether EDM is enabled.
+            Builds LR_ups baseline for residual-aware runs and passes CFG guidance if configured
         """
         use_edm = bool(getattr(self.cfg, 'edm', {}).get('enabled', False))
+        guidance_cfg = getattr(self.cfg, 'classifier_free_guidance', {})
+        lr_ups = self._build_lr_ups_baseline(cond_img, samples) if use_edm else None
 
         if use_edm:
             edm_cfg = getattr(self.cfg, 'edm', {})
             logger.info("[Sampler] Using EDM sampler...")
+            # Prefer EDM specific sampling_steps if provided, else fall back to sampler.n_timesteps
+            n_steps = int(edm_cfg.get('sampling_steps', getattr(self.cfg.sampler, 'n_timesteps', 18)))
             gen_sample = edm_sampler(score_model=self.model,
                                      batch_size=batch_size,
-                                     num_steps=self.cfg.sampler.n_timesteps,
+                                     num_steps=n_steps,
                                      device=self.device,
                                      img_size=self.cfg.highres.data_size[0],
                                      # conditioning
@@ -81,7 +120,8 @@ class SampleGenerator:
                                      S_min=float(edm_cfg.get('S_min', 0.0)),
                                      S_max=float(edm_cfg.get('S_max', 99999.0)),
                                      S_noise=float(edm_cfg.get('S_noise', 1.0)),
-                                     lr_ups=None
+                                     lr_ups=lr_ups,
+                                     cfg_guidance=guidance_cfg if guidance_cfg.get('enabled', False) else None,
                                      )
         else:
             logger.info("[Sampler] Using VE-DSM predictor-corrector sampler...")
@@ -220,7 +260,7 @@ class SampleGenerator:
         x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
         n = x.shape[0]
-        generated = self._run_sampler(n, seasons, cond_images, lsm, topo)
+        generated = self._run_sampler(n, seasons, cond_images, lsm, topo, samples)
 
         # Plotting before back transform to avoid confussion on transformations
         if self.cfg.evaluation.plot_examples:
@@ -263,8 +303,8 @@ class SampleGenerator:
         lsm = lsm[:1] if lsm is not None else None
         topo = topo[:1] if topo is not None else None
         cond_images = cond_images[:1] if cond_images is not None else None
-        
-        generated = self._run_sampler(1, seasons, cond_images, lsm, topo)
+
+        generated = self._run_sampler(1, seasons, cond_images, lsm, topo, samples)
 
         samples_single = get_first_sample_dict(samples)
 
@@ -313,7 +353,7 @@ class SampleGenerator:
         cond_images = cond_images[:1] if cond_images is not None else None
 
         n_repeats = self.cfg.evaluation.n_repeats
-        generated_list = [self._run_sampler(1, seasons, cond_images, lsm, topo) for _ in range(n_repeats)]
+        generated_list = [self._run_sampler(1, seasons, cond_images, lsm, topo, samples) for _ in range(n_repeats)]
         generated = torch.stack(generated_list)
         
         samples_repeated = {k: v[0].repeat(n_repeats, *[1 for _ in v.shape[1:]]) if torch.is_tensor(v) else v for k, v in samples.items()}
