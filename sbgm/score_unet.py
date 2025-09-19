@@ -12,13 +12,95 @@
 import torch
 import logging
 import torch.nn as nn
-import numpy as np
 from torchvision.models.resnet import ResNet, BasicBlock
 from typing import Optional, Iterable
 import functools
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+class SigmaEmbed(nn.Module):
+    """
+        sigma-embedding -> R^time_dim for FiLM like conditioning.
+    """
+    def __init__(self, time_dim: int):
+        super().__init__()
+        self.time_dim = time_dim
+        self.net = nn.Sequential(
+            nn.Linear(1, time_dim),
+            nn.SiLU(),
+            nn.Linear(time_dim, time_dim)
+        )
+    def forward(self, c_noise: torch.Tensor) -> torch.Tensor:
+        # c_noise: [B, 1]
+        return self.net(c_noise)
+
+class EDMPrecondUNet(nn.Module):
+    """
+        Wraps Encoder/Decoder with EDM preconditioning.
+        Predicts x0 directly (no division by sigma) and combines skip/out as in Karras et al. (2022).
+    """
+    def __init__(self,
+                 encoder: nn.Module,
+                 decoder: nn.Module,
+                 sigma_data: float = 1.0,
+                 predict_residual: bool = True,
+                 ):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.sigma_data = sigma_data
+        self.predict_residual = predict_residual
+
+        # time_embedding size is already defined in encoder
+        time_dim = getattr(encoder, "time_embedding", 128)
+        self.sigma_emb = SigmaEmbed(time_dim)
+
+    def _precond(self, sigma: torch.Tensor):
+        """ Compute preconditioning coefficients. (as in Karras et al. 2022) """
+        # sigma: [B]
+        s2 = sigma**2
+        sd2 = self.sigma_data**2
+        c_in    = 1.0 / torch.sqrt(s2 + sd2)
+        c_skip  = sd2 / (s2 + sd2)
+        c_out   = sigma * sd2 / torch.sqrt(s2 + sd2) 
+        # c_noise = 0.25 * log(sigma^2) = 0.25 * 2 * log(sigma)
+        c_noise = (sigma.log() * 0.5).unsqueeze(-1)  # [B, 1]   
+        return c_in, c_skip, c_out, c_noise
+    
+    def forward(self,
+                x_t: torch.Tensor,
+                sigma: torch.Tensor,
+                *,
+                cond_img: torch.Tensor | None = None,
+                lsm_cond: torch.Tensor | None = None,
+                topo_cond: torch.Tensor | None = None,
+                y: torch.Tensor | None = None,
+                lr_ups: torch.Tensor | None = None # <- needed if predict_residual = True
+                ) -> torch.Tensor:
+        B = x_t.shape[0]
+        c_in, c_skip, c_out, c_noise = self._precond(sigma)
+
+        # Scale input 
+        x_in = c_in.view(B, 1, 1, 1) * x_t  # [B, C, H, W]
+
+        # Build sigma-embedding -> time-dim vector that blocks expect (sigma instead of time)
+        t_emb = self.sigma_emb(c_noise)  # [B, time_dim]    
+
+        # Reuse encoder/decoder, they already take t-emb
+        enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
+
+        out = self.decoder(*enc_fmaps, t=t_emb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+        if self.predict_residual:
+            if lr_ups is None:
+                raise ValueError("lr_ups must be provided when predict_residual is True.")
+            x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out # As in Karras et al. (2022)
+        else:
+            x0_hat = c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out
+    
+        return x0_hat
+    
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -297,10 +379,15 @@ class Encoder(ResNet):
         if y is not None:
             y = y.to(dev)
         
-        # Embed the time positions
-        t = t.unsqueeze(-1).type(torch.float)
-        # t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
-        t = self.sinusoidal_embedding(t.view(-1)) # Use the sinusoidal embedding instead of the positional encoding (to align with Decoder)
+
+        # For time-embedding: allow pre-embedded t (for EDM compatibility):
+        if t.dim() == 2 and t.shape[-1] == self.time_embedding:
+            t = t.to(dev)
+        else:
+            # Embed the time positions
+            t = t.unsqueeze(-1).type(torch.float)
+            # t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
+            t = self.sinusoidal_embedding(t.view(-1)) # Use the sinusoidal embedding instead of the positional encoding (to align with Decoder)
     
         #t = self.sinusoidal_embedding(t)
         # Add the label embedding to the time embedding
@@ -511,50 +598,6 @@ class DecoderBlock(nn.Module):
         else:
             self.attention = nn.Identity()
 
-
-
-
-
-
-        ###### OLD CODE ######
-        # # Initialize the attention layer, if compute_attn is True
-        # if self.compute_attn:
-        #     # Initialize the attention layer
-        #     self.attention = ImageSelfAttention(self.output_channels, self.n_heads).to(self.device)
-        # else:
-        #     # Initialize the identity layer as the attention layer
-        #     self.attention = nn.Identity().to(self.device)
-        
-        # # Initialize the sinusoidal time embedding layer with the given time_embedding
-        # self.sinusoidal_embedding = SinusoidalEmbedding(self.time_embedding).to(self.device)
-        
-        # # Initialize the time projection layer, for projecting the time embedding onto the feature maps. SiLU activation function and linear layer.
-        # self.time_projection_layer = nn.Sequential(
-        #         nn.SiLU(),
-        #         nn.Linear(self.time_embedding, self.output_channels)
-        #     ).to(self.device)
-
-        # # Initialize the transposed convolutional layer. 
-        # self.transpose = nn.ConvTranspose2d(
-        #     self.input_channels, self.input_channels, 
-        #     kernel_size=self.upsample_scale, stride=self.upsample_scale).to(self.device)
-        
-        # self.upsample = nn.Upsample(scale_factor = self.upsample_scale, mode="bilinear", align_corners=False).to(self.device)
-        # self.conv_up = nn.Conv2d(self.input_channels, self.input_channels, kernel_size=3, padding=1).to(self.device)
-        
-        # # Define the instance normalization layer, for normalizing the input
-        # self.instance_norm1 = nn.InstanceNorm2d(self.transpose.in_channels).to(self.device)
-
-        # # Define the convolutional layer
-        # self.conv = nn.Conv2d(
-        #     self.transpose.out_channels, self.output_channels, kernel_size=3, stride=1, padding=1).to(self.device)
-        
-        # # Define second instance normalization layer, for normalizing the input
-        # self.instance_norm2 = nn.InstanceNorm2d(self.conv.out_channels).to(self.device)
-        
-        # # Define the activation function
-        # self.activation = activation()
-
     
     def forward(self,
                 fmap:torch.Tensor,
@@ -627,37 +670,6 @@ class DecoderBlock(nn.Module):
         return x
 
 
-        ##### OLD CODE #####
-        # # Prepare the input fmap by applying a transposed convolutional, instance normalization, convolutional, and second instance norm layers
-        # output = self.transpose(fmap)#.to(self.device)
-        # output = self.instance_norm1(output)#.to(self.device)
-        # output = self.conv(output)#.to(self.device)
-        # output = self.instance_norm2(output)#.to(self.device)
-        
-        # # Apply residual connection with previous feature map. If prev_fmap is a tensor and not None, the feature maps must be of the same shape.
-        # if prev_fmap is not None and torch.is_tensor(prev_fmap):
-        #     assert (prev_fmap.shape == output.shape), 'feature maps must be of same shape. Shape of prev_fmap: {}, shape of output: {}'.format(prev_fmap.shape, output.shape)
-        #     # Add the previous feature map to the output
-        #     output = output + prev_fmap.to(self.device)
-            
-        # # Apply timestep embedding if t is a tensor
-        # if torch.is_tensor(t):
-        #     # Embed the time positions
-        #     t = self.sinusoidal_embedding(t).to(self.device)
-        #     # Project the time embedding onto the feature maps
-        #     t_emb = self.time_projection_layer(t).to(self.device)
-        #     # Add the projected time embedding to the output
-        #     output = output + t_emb[:, :, None, None].to(self.device)
-            
-        #     # Calculate the attention for the output
-        #     output = self.attention(output).to(self.device)
-        
-        # # Apply the activation function to the output
-        # output = self.activation(output).to(self.device)
-        # return output
-    
-
-
 
 class Decoder(nn.Module):
     '''
@@ -724,9 +736,9 @@ class Decoder(nn.Module):
             )
         # After creating final layer, make sure no activation or normalization (otherwise mode ljust learns zero mean/unit variance)
         if hasattr(self.final_layer, "norm1"): 
-            self.final_layer.norm1 = nn.Identity()
+            self.final_layer.norm1 = nn.Identity() # type: ignore
         if hasattr(self.final_layer, "norm2"):
-            self.final_layer.norm2 = nn.Identity()
+            self.final_layer.norm2 = nn.Identity() # type: ignore
         self.final_layer.activation = nn.Identity() 
 
 
@@ -878,6 +890,7 @@ class ScoreNet(nn.Module):
 
         return score
 
+
 def marginal_prob_std(t: torch.Tensor,
                       sigma: float,
                       eps: float = 1e-5,
@@ -896,22 +909,6 @@ def marginal_prob_std(t: torch.Tensor,
     # small floor to avoid dicision blow ups when t ~ 0
     return torch.clamp(std, min=eps)
 
-# def marginal_prob_std(t, sigma, device = None):
-#     '''
-#         Function to compute standard deviation of 
-#         the marginal $p_{0t}(x(t)|x(0))$
-#         Input:
-#             - t: time embedding tensor
-#             - sigma: the sigma parameter in our SDE
-#     '''
-#     if device is None:
-#         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#     else:
-#         device = device
-
-#     t = t.to(device)
-    
-#     return torch.sqrt((sigma**(2 * t) - 1.) / 2. / np.log(sigma))
 
 def diffusion_coeff(t, sigma, device = None):
     '''
@@ -937,7 +934,6 @@ def loss_fn(model,
             x,
             marginal_prob_std,
             t_eps=1e-3, # to avoid dead gradients near t=0
-            device = None,
             y = None,
             cond_img = None,
             lsm_cond = None,

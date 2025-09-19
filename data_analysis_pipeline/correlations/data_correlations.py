@@ -50,9 +50,9 @@ class DataCorrelationAnalyzer:
         for k in keys:
             arr = None
             if var_str in zgroup[k]:
-                arr = zgroup[k][var_str][:].squeeze()
+                arr = zgroup[k][var_str][:].squeeze() # type: ignore
             elif 'arr_0' in zgroup[k]:
-                arr = zgroup[k]['arr_0'][:].squeeze()
+                arr = zgroup[k]['arr_0'][:].squeeze() # type: ignore
             if arr is None:
                 continue
             cut = arr[self.cutout[0]:self.cutout[1], self.cutout[2]:self.cutout[3]]

@@ -17,8 +17,20 @@ correlation:
     msl: zscore
     z_pl_500: zscore
   print_results: true
-  n_days: 100
   normalize: true
+
+# --- NEW OPTIONS ---
+  temporal_remove_seasonality: monthly   # null | monthly | doy
+  temporal_aggregate: monthly            # null | weekly | monthly
+  temporal_aggregate_how: mean           # mean | sum
+  temporal_grid_figure: true             # plot all LR pairs in one figure
+  temporal_ncols: 2
+
+  spatial_grid_figure: true              # one figure per HR var with N LR subplots
+  plot_shared_cbar: true                 # if false, each subplot gets its own cbar (if both true, two plots generated)
+  plot_individual_cbar: true                 # if false, each subplot gets its own cbar (if both true, two plots generated)
+  spatial_ncols: 2
+  spatial_remove_seasonality: null       # null | monthly | doy
 
 data:
   data_dir: ${env:DATA_DIR}

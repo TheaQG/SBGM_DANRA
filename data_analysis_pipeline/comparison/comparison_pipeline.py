@@ -6,7 +6,7 @@ from data_analysis_pipeline.stats_analysis.data_loading import DataLoader
 from data_analysis_pipeline.comparison.compare_fields import compare_single_day_fields
 from data_analysis_pipeline.comparison.compare_timeseries import compare_over_time
 from data_analysis_pipeline.comparison.compare_distributions import compare_power_spectra, plot_histograms, batch_compare_power_spectra, compute_distribution_stats, compare_distributions, compare_seasonal_distributions
-from sbgm.utils import plot_sample_with_boxplot
+from sbgm.plotting_utils import plot_sample_with_boxplot
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -42,6 +42,9 @@ def run_comparison_pipeline(cfg):
     show = comparison_cfg.get("show", False)
     save_figures = comparison_cfg.get("save_figures", True)
     save_path = comparison_cfg.get("save_path", "./figures")
+    if split is not None:
+        # Append split to save path if not "all"
+        save_path = os.path.join(save_path, split) if split != "all" else save_path
     print_results = comparison_cfg.get("print_results", True)
     max_days = comparison_cfg.get("max_days", None)  # Limit number of days to process (for testing)
 

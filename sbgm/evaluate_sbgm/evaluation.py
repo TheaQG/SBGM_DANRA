@@ -1,4 +1,3 @@
-
 import torch
 import os
 import logging
@@ -6,9 +5,7 @@ import logging
 import numpy as np
 from matplotlib import pyplot as plt
 
-from sbgm.score_sampling import pc_sampler
-from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
-from sbgm.utils import plot_samples_and_generated, extract_samples, get_model_string, get_first_sample_dict
+from sbgm.utils import get_model_string
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +57,6 @@ class Evaluation:
         self.generated_sample_type = generated_sample_type
         logger.info(f'Type of generated samples: {self.generated_sample_type}\n')
 
-
-        # Load correct .npz !!! NEEDS TO BE FIXED! NEED CORRECT PATH TO DATA !!!
         if self.generated_sample_type == 'repeated':
             load_str = '_repeated_' + str(n_samples) + '.npz'
         elif self.generated_sample_type == 'single':
@@ -169,7 +164,7 @@ class Evaluation:
         if plot_with_cond:
             cond_imgs = self.cond_imgs[:n_samples]
             for i, cond_name in enumerate(self.lr_vars):
-                cond_channel = cond_imgs[:, i, :, :]
+                cond_channel = cond_imgs[:, i, :, :] # type: ignore
                 plot_list.append(cond_channel)
                 plot_titles.append(f'Condition: {cond_name}')
 
@@ -372,19 +367,14 @@ class Evaluation:
 
 
 
-    def daily_statistics(self,
-                        plot_stats=False,
-                        save_plots=False,
-                        save_stats=False,
-                        save_path=None
-                        ):
-        '''
-            Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
-        '''
+    # def daily_statistics(self):
+    #     '''
+    #         Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
+    #     '''
 
-        # Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
-        mae_daily = torch.abs(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2))
-        rmse_daily = torch.sqrt(torch.square(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2)))
+    #     # Calculate daily average MAE and RMSE for all samples (average over spatial dimensions) ignoring nans
+    #     mae_daily = torch.abs(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2))
+    #     rmse_daily = torch.sqrt(torch.square(self.gen_imgs - self.eval_imgs).nanmean(dim=(1,2)))
 
 
                                 
@@ -392,7 +382,6 @@ class Evaluation:
     def spatial_statistics(self,
                            show_figs=False,
                            save_figs=False,
-                           save_stats=False,
                            save_path=None,
                            n_samples=1
                            ):

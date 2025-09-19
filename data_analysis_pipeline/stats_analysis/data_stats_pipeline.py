@@ -21,6 +21,13 @@ def run_data_statistics(cfg):
     split = cfg.get("data", {}).get("split", "all")
 
     data_dir = cfg.get("data", {}).get("data_dir", ".")
+    # Check if data_dir ends with _small, if so set data_batch_small to True
+    if data_dir.endswith("_small"):
+        small_data_batch = True
+        logger.info(f"Detected small data batch from data_dir ending with '_small': {data_dir}")
+    else:
+        small_data_batch = False
+
     fig_save_dir = cfg.get("plotting", {}).get("fig_save_dir", ".")
     stats_save_dir = cfg.get("statistics", {}).get("stats_save_dir", ".")
     logger.info(f"  PATHS:")
@@ -76,6 +83,7 @@ def run_data_statistics(cfg):
                                                                 stats_save_path=stats_save_dir,
                                                                 log_stats=variable in ['prcp', 'cape'],
                                                                 pool_pixels=True,
+                                                                small_data_batch=small_data_batch,
                                                                 )
         all_results[f"{level}__{variable}"] = {
             "global": global_stats,
@@ -145,6 +153,7 @@ def run_data_statistics(cfg):
                                                                     stats_save_path=stats_save_dir,
                                                                     log_stats=variable in ['prcp', 'cape'],
                                                                     pool_pixels=True,
+                                                                    small_data_batch=small_data_batch
                                                                     )
             all_results[f"{level}__agg__{variable}"] = {
                 "global": global_stats,

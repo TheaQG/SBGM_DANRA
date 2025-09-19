@@ -6,7 +6,7 @@
 import logging
 import numpy as np
 import matplotlib.pyplot as plt
-from sbgm.utils import get_cmap_for_variable, get_unit_for_variable
+from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable
 
 
 # Setup logging

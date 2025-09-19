@@ -4,23 +4,70 @@ import torch.nn as nn
 import zarr
 import logging
 
-import matplotlib.pyplot as plt
 import numpy as np
-from datetime import datetime
 
 from torch.utils.data import DataLoader
 from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
-from sbgm.score_unet import ScoreNet, Encoder, Decoder, marginal_prob_std_fn
-from sbgm.score_sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
-from sbgm.utils import build_data_path, get_units, get_cmaps, get_model_string
-from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
+from sbgm.score_unet import ScoreNet, Encoder, Decoder, EDMPrecondUNet, marginal_prob_std_fn
+from sbgm.losses import EDMLoss, DSMLoss
+from sbgm.utils import build_data_path, get_model_string
+from sbgm.variable_utils import get_units
+from sbgm.special_transforms import build_back_transforms_from_stats
 # from sbgm.evaluation.evaluation import evaluate_model
 
 # # Set up logging
 logger = logging.getLogger(__name__)
+
+def _get(cfg, path, default=None):
+    """
+        Safe nested get: path like 'a.b.c'
+    """
+    node = cfg
+    for k in path.split('.'):
+        if not isinstance(node, dict) or k not in node:
+            return default
+        node = node[k]
+    return node
+
+def get_loss_fn(cfg, marginal_prob_std_fn=None):
+    edm_cfg = cfg.get('edm', {})
+
+    if bool(edm_cfg.get('enabled', False)):
+        # === EDM branch ===
+        P_mean          = float(edm_cfg.get('P_mean', -1.2)) # NVLabs defaults
+        P_std           = float(edm_cfg.get('P_std', 1.2))
+        sigma_data      = float(edm_cfg.get('sigma_data', 1.0)) # MUST match model preconditioning
+
+        use_sdf         = bool(_get(cfg, 'stationary_conditions.geographic_conditions.sample_w_sdf', False))
+        max_land_w      = float(_get(cfg, 'stationary_conditions.geographic_conditions.max_land_weight', 1.0))
+        min_sea_w       = float(_get(cfg, 'stationary_conditions.geographic_conditions.min_sea_weight', 0.5))
+
+
+        return EDMLoss(
+                P_mean=P_mean,
+                P_std=P_std,
+                use_sdf_weight=use_sdf,
+                max_land_weight=max_land_w,
+                min_sea_weight=min_sea_w)
+
+    # === DSM default branch ===
+    ve_cfg = cfg.get('ve_dsm', {})
+    t_eps = float(ve_cfg.get('t_eps', 1e-3))
+    if marginal_prob_std_fn is None:
+        raise ValueError("marginal_prob_std_fn must be provided for VE-DSM loss.")
+    
+    use_sdf = bool(_get(cfg, 'stationary_conditions.geographic_conditions.sample_w_sdf', True))
+    max_land_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.max_land_weight', 1.0))
+    min_sea_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.min_sea_weight', 0.5))
+    return DSMLoss(
+                marginal_prob_std_fn=marginal_prob_std_fn,
+                t_eps=t_eps,
+                use_sdf_weight=use_sdf,
+                max_land_weight=max_land_w,
+                min_sea_weight=min_sea_w)
 
 def get_dataloader(cfg, verbose=True):
     '''
@@ -84,28 +131,8 @@ def get_dataloader(cfg, verbose=True):
         lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'train')
         lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'valid')
         lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
-
-    # # Set scaling and matching 
-    # scaling = cfg['transforms']['scaling']
-    # force_matching_scale = cfg['transforms']['force_matching_scale']
-    # show_both_orig_scaled = cfg['visualization']['show_both_orig_scaled']
-    # transform_back_bf_plot = cfg['visualization']['transform_back_bf_plot']
-
-    # # Set up scaling methods
-    # hr_scaling_method = cfg['highres']['scaling_method']
-    # hr_scaling_params = cfg['highres']['scaling_params']
-    # lr_scaling_methods = cfg['lowres']['scaling_methods']
-    # lr_scaling_params = cfg['lowres']['scaling_params']
-
-    # Set up back transformations (for plotting and visual inspection + later evaluation)
-    # back_transforms = build_back_transforms(
-    #     hr_var              = cfg['highres']['variable'],
-    #     hr_scaling_method   = cfg['highres']['scaling_method'],
-    #     hr_scaling_params   = cfg['highres']['scaling_params'],
-    #     lr_vars             = cfg['lowres']['condition_variables'],
-    #     lr_scaling_methods  = cfg['lowres']['scaling_methods'],
-    #     lr_scaling_params   = cfg['lowres']['scaling_params']
-    # )
+    
+    # Set scaling and matching
     full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
@@ -126,7 +153,7 @@ def get_dataloader(cfg, verbose=True):
                         crop_region_str_lr  = crop_region_lr_str,
                         lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                         lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                        split               = 'all',
+                        split               = cfg['transforms']['scaling_split'] if 'scaling_split' in cfg['transforms'] else 'train',
                         stats_dir_root      = cfg['paths']['stats_load_dir']
                         )
 
@@ -430,27 +457,7 @@ def get_gen_dataloader(cfg, verbose=True):
         lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'valid')
         lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
 
-    # # Set scaling and matching 
-    # scaling = cfg['transforms']['scaling']
-    # force_matching_scale = cfg['transforms']['force_matching_scale']
-    # show_both_orig_scaled = cfg['visualization']['show_both_orig_scaled']
-    # transform_back_bf_plot = cfg['visualization']['transform_back_bf_plot']
-
-    # # Set up scaling methods
-    # hr_scaling_method = cfg['highres']['scaling_method']
-    # hr_scaling_params = cfg['highres']['scaling_params']
-    # lr_scaling_methods = cfg['lowres']['scaling_methods']
-    # lr_scaling_params = cfg['lowres']['scaling_params']
-
-    # Set up back transformations (for plotting and visual inspection + later evaluation)
-    # back_transforms = build_back_transforms(
-    #     hr_var              = cfg['highres']['variable'],
-    #     hr_scaling_method   = cfg['highres']['scaling_method'],
-    #     hr_scaling_params   = cfg['highres']['scaling_params'],
-    #     lr_vars             = cfg['lowres']['condition_variables'],
-    #     lr_scaling_methods  = cfg['lowres']['scaling_methods'],
-    #     lr_scaling_params   = cfg['lowres']['scaling_params']
-    # )
+    # Set scaling and matching
     full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
     crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
@@ -471,7 +478,7 @@ def get_gen_dataloader(cfg, verbose=True):
                         crop_region_str_lr  = crop_region_lr_str,
                         lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                         lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                        split               = 'all',
+                        split               = cfg['transforms']['scaling_split'] if 'scaling_split' in cfg['transforms'] else 'train',
                         stats_dir_root      = cfg['paths']['stats_load_dir']
                         )
 
@@ -613,6 +620,8 @@ def get_model(cfg):
     logger.info(f"Input channels: {input_channels}")
     logger.info(f"Output channels: {output_channels}")
 
+    device = get_device()
+
     # === Model architecture knobs (decoder upsampling/norm/activation) ===
     model_cfg = cfg.get('model', {})
     use_resize_conv = bool(model_cfg.get('use_resize_conv', True))
@@ -658,14 +667,28 @@ def get_model(cfg):
                       gn_groups=decoder_gn_groups,
                       activation=decoder_activation,
                       )
+    
+    edm_cfg = cfg.get('edm', {})
+    edm_enabled = bool(edm_cfg.get('enabled', False))
 
-    score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
-                           encoder=encoder,
-                           decoder=decoder,
-                           debug_pre_sigma_div=False
-                           )
-    
-    
+    if edm_enabled:
+        sigma_data = float(edm_cfg.get('sigma_data', 1.0))
+        predict_residual = bool(edm_cfg.get('predict_residual', False)) # NOTE: Start with False, when EDM is stable, try True
+        score_model = EDMPrecondUNet(encoder=encoder,
+                                     decoder=decoder,
+                                     sigma_data=sigma_data,
+                                     predict_residual=predict_residual).to(device)
+        
+    else:
+        score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
+                            encoder=encoder,
+                            decoder=decoder,
+                            debug_pre_sigma_div=False
+                            )
+
+    if hasattr(score_model, "debug_pre_sigma_div"):
+        object.__setattr__(score_model, "debug_pre_sigma_div", False)
+
     return score_model, checkpoint_dir, checkpoint_name
 
 
@@ -751,73 +774,191 @@ def get_device(verbose=True):
     if verbose:
         logger.info(f"Using device: {device}")
     return device
-    
 
 
-def plot_results(train_losses, val_losses, train_scores, val_scores):
+def apply_cfg_dropout(
+        cond_images: torch.Tensor | None,
+        lsm: torch.Tensor | None,
+        topo: torch.Tensor | None,
+        seasons: torch.Tensor | None,
+        cfg_guidance: dict | None
+):
     """
-    Plot the training and validation losses and scores.
-    
+    Classifier-free guidance style dropout for conditioning signals.
+    - Supports separate drop probabilities for LR dynamic conditions and geo/static conditions 
+    - Drops all LR channels per sample together, using Bernoulli masks (good for CFG)
+    - Drops lsm and topo together per sample (so "geo off" really means no geography)
+    - Handles seasons whther it is categorical (LongTensor labels) or continuous scalars (e.g. cos/sin day-of-year),
+      using null_label_id or null_scalar_value from cfg_guidance respectively.
+    - Works with any tensor shapes by broadcasting the per-sample mask to [B, 1, ...] as needed.
+
     Args:
-        train_losses (list): List of training losses.
-        val_losses (list): List of validation losses.
-        train_scores (list): List of training scores.
-        val_scores (list): List of validation scores.
+        cond_images: Low-res dynamic conditions [B, C_lr, H, W] (already upsampled/aligned to model grid).
+        lsm:         Land-sea mask or static mask(s)         [B, C_geo1, H, W] or [B,1,H,W] (may be None).
+        topo:        Topography/static feature(s)            [B, C_geo2, H, W] or [B,1,H,W] (may be None).
+        seasons:     Seasonal condition. Can be:
+                     - Long tensor of class indices [B] or [B, 1]
+                     - Float tensor of scalar(s)   [B] or [B, 1] (e.g., cos(day), sin(day))
+        cfg_guidance: Dict with keys:
+            {
+              'enabled': bool,
+              'drop_prob_lr': float,     # drop probability for LR dynamic conditions (+ seasons)
+              'drop_prob_geo': float,    # drop probability for geo/static conditions
+              'null_label_id': int,      # category id for "null" label (for long seasons)
+              'null_scalar_value': float # value to use when dropping scalar seasons
+            }
+
+    Returns:
+        Tuple[cond_images, lsm, topo, seasons] with per-sample drops applied.
     """
-    epochs = range(1, len(train_losses) + 1)
+    if not cfg_guidance or not cfg_guidance.get('enabled', False):
+        return cond_images, lsm, topo, seasons
+    
+    # Resolve per-group drop probabilities
+    p_cond = float(cfg_guidance.get('drop_prob_lr', 0.1))
+    p_geo = float(cfg_guidance.get('drop_prob_geo', 0.1))
+    null_label_id = int(cfg_guidance.get('null_label_id', 0))
+    null_scalar = float(cfg_guidance.get('null_scalar_value', 0.0))
 
-    plt.figure(figsize=(12, 5))
+    
+    # Choose a reference tensor to get B/device
+    ref = None
+    for t in (cond_images, lsm, topo, seasons):
+        if t is not None:
+            ref = t
+            break
 
-    # Plot losses
-    plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_losses, label='Train Loss')
-    plt.plot(epochs, val_losses, label='Validation Loss')
-    plt.title('Losses')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
+    if ref is None:
+        # No drop possible
+        return cond_images, lsm, topo, seasons
+    B = ref.shape[0]
+    device = ref.device
+    
+    # === Build per-sample Bernoulli masks ===
+    # LR dynamic (and seasons share p_cond)
+    mask_cond = (torch.rand(B, device=device) < p_cond)  # True -> drop this sample's LR (+season)
+    # Geo/static (drop lsm/topo together per sample)
+    mask_geo  = (torch.rand(B, device=device) < p_geo)   # True -> drop this sample's geo
 
-    # Plot scores
-    plt.subplot(1, 2, 2)
-    plt.plot(epochs, train_scores, label='Train Score')
-    plt.plot(epochs, val_scores, label='Validation Score')
-    plt.title('Scores')
-    plt.xlabel('Epochs')
-    plt.ylabel('Score')
-    plt.legend()
+    # Helper to expand [B] -> broadcast shape of a target tensor
+    def _expand_mask(m: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Target can be [B, ...]. We want mask shaped [B,1,1,1] or [B,1] etc. to broadcast.
+        view_shape = [B] + [1] * (target.dim() - 1)
+        return m.view(*view_shape)
 
-    plt.tight_layout()
-    plt.show()
+    # === Apply to LR dynamic conditions ===
+    if cond_images is not None:
+        m = _expand_mask(mask_cond, cond_images)
+        # Zero is a sensible "null" for continuous LR channels
+        cond_images = torch.where(m, torch.zeros_like(cond_images), cond_images)
+
+    # === Apply to static geo (drop together) ===
+    if lsm is not None:
+        m_geo = _expand_mask(mask_geo, lsm)
+        lsm = torch.where(m_geo, torch.zeros_like(lsm), lsm)
+    if topo is not None:
+        m_geo = _expand_mask(mask_geo, topo)
+        topo = torch.where(m_geo, torch.zeros_like(topo), topo)
+
+    # === Apply to seasonal condition (shares LR mask) ===
+    if seasons is not None:
+        # Accept [B], [B,1], or more
+        if seasons.dtype in (torch.long, torch.int64, torch.int32):
+            # categorical labels
+            if seasons.dim() == 1:
+                seasons = seasons.clone()
+                seasons[mask_cond] = null_label_id
+            else:
+                # e.g., [B,1]
+                m = _expand_mask(mask_cond, seasons)
+                seasons = torch.where(m, torch.full_like(seasons, null_label_id), seasons)
+        else:
+            # float scalar(s)
+            fill_val = null_scalar
+            if seasons.dim() == 1:
+                m = mask_cond
+            else:
+                m = _expand_mask(mask_cond, seasons)
+            seasons = torch.where(m, torch.full_like(seasons, fill_val), seasons)
+
+    return cond_images, lsm, topo, seasons
 
 
-def setup_logger(log_dir, name="train_log", log_to_stdout=True):
-    # Set up the path for the log directory
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"{name}_{timestamp}.log")
 
-    # Set up a logger, with level set to INFO which means it will log INFO, WARNING, ERROR, and CRITICAL messages
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
 
-    # Remove existing handlers (we remove all handlers to avoid duplicates)
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
 
-    # File handler to write logs to a file
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.INFO)
-    # Set the format for the log messages
-    file_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
-    # Apply the formatter to the file handler
-    logger.addHandler(file_handler)
 
-    # Optional: also print to terminal
-    if log_to_stdout:
-        stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.INFO)
-        stream_handler.setFormatter(file_formatter)
-        logger.addHandler(stream_handler)
 
-    logger.info(f"Logging to {log_path}")
-    return logger
+
+
+
+
+def apply_condition_dropout(cond_images, lsm, topo, seasons, cfg, *, predict_residual=False):
+    """
+        NOTE: NOT IMPLEMENTED IN CURRENT TRAINING
+        Classifier-free guidance for each channel of the low-res conditions.
+        Helpful, as long as:
+        - Keep geo/static channels
+        - Keep residual baseline channel (if residual training)
+        - Enforce "at least one meteo channel kept" when not unconditional
+        - Drop the normalization mean
+    """
+    if cond_images is None:
+        return cond_images, lsm, topo, seasons
+
+    B, C, H, W = cond_images.shape
+    device = cond_images.device
+    lr_vars = cfg['lowres']['condition_variables']
+    target_var = cfg['highres']['variable']
+
+    # probs
+    p_uncond = float(cfg.get('classifier_free_guidance', {}).get('p_uncond', 0.15))
+    p_ch     = float(cfg.get('classifier_free_guidance', {}).get('p_channel', 0.10))
+    p_geo    = float(cfg.get('classifier_free_guidance', {}).get('p_geo', 0.02))
+
+    # masks
+    m_uncond = (torch.rand(B, device=device) < p_uncond)        # [B]
+    keep_ch  = (torch.rand(B, C, device=device) >= p_ch)        # [B, C]
+
+    # geo indices (don’t drop, or drop with tiny prob)
+    geo_idx = [i for i, v in enumerate(lr_vars) if v in ('lsm', 'topo', 'slope')]
+    if len(geo_idx) > 0:
+        # override with much lower drop prob
+        keep_geo = (torch.rand(B, len(geo_idx), device=device) >= p_geo)
+        keep_ch[:, torch.as_tensor(geo_idx, device=device)] = keep_geo
+
+    # don't drop baseline channel for residual training
+    if predict_residual and (target_var in lr_vars):
+        base_idx = lr_vars.index(target_var)
+        keep_ch[:, base_idx] = True
+
+    # ensure at least one meteo channel is kept when not unconditional
+    meteo_idx = [i for i, v in enumerate(lr_vars) if v not in ('lsm', 'topo', 'slope')]
+    if len(meteo_idx) > 0:
+        k = torch.as_tensor(meteo_idx, device=device)
+        none_kept = (~keep_ch[:, k]).all(dim=1) & (~m_uncond)  # [B]
+        if none_kept.any():
+            # randomly turn one meteo channel back on for those samples
+            rnd_choice = torch.randint(low=0, high=len(meteo_idx), size=(none_kept.sum().item(),), device=device) # type: ignore
+            keep_ch[none_kept, k[rnd_choice]] = True
+
+    # unconditional samples: drop everything (+ null season label if you use it for CFG)
+    keep_ch[m_uncond] = False
+    if seasons is not None:
+        # null class 0 convention for CFG; adapt if you use another scheme
+        seasons = torch.where(m_uncond, torch.zeros_like(seasons), seasons)
+
+    # neutral fill (0 is the mean in z-score/[-1,1] schemes)
+    neutral = 0.0
+    mask_bc11 = keep_ch[:, :, None, None]  # [B,C,1,1]
+    cond_images = cond_images * mask_bc11 + neutral * (~mask_bc11)
+
+    # geo maps (if provided) – usually keep them; if you really want to drop, mirror p_geo
+    if lsm is not None and p_geo > 0.0:
+        keep_lsm = (torch.rand(B, device=device) >= p_geo).view(B, 1, 1, 1)
+        lsm = lsm * keep_lsm + neutral * (~keep_lsm)
+    if topo is not None and p_geo > 0.0:
+        keep_topo = (torch.rand(B, device=device) >= p_geo).view(B, 1, 1, 1)
+        topo = topo * keep_topo + neutral * (~keep_topo)
+
+    return cond_images, lsm, topo, seasons

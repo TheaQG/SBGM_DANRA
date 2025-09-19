@@ -1,48 +1,16 @@
 import os 
 import logging
-import random
 import numpy as np
 import torch
 from datetime import datetime
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from sbgm.training_utils import get_model, get_gen_dataloader
-from sbgm.special_transforms import build_back_transforms, build_back_transforms_from_stats
+from sbgm.special_transforms import build_back_transforms_from_stats
 from sbgm.evaluate_sbgm.generation import SampleGenerator #run_generation_multiple, run_generation_single, run_generation_repeated
 from sbgm.utils import get_model_string
 
-def setup_logger(log_dir, name="gen_log", log_to_stdout=True):
-    # Set up the path for the log directory
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"{name}_{timestamp}.log")
-
-    # Set up a logger, with level set to INFO which means it will log INFO, WARNING, ERROR, and CRITICAL messages
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    # Remove existing handlers (we remove all handlers to avoid duplicates)
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-
-    # File handler to write logs to a file
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.INFO)
-    # Set the format for the log messages
-    file_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
-    # Apply the formatter to the file handler
-    logger.addHandler(file_handler)
-
-    # Optional: also print to terminal
-    if log_to_stdout:
-        stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.INFO)
-        stream_handler.setFormatter(file_formatter)
-        logger.addHandler(stream_handler)
-
-    logger.info(f"Logging to {log_path}")
-    return logger
-
+logger = logging.getLogger(__name__)
 
 def generation_main(cfg):
     """
@@ -62,7 +30,6 @@ def generation_main(cfg):
     os.makedirs(gen_dir, exist_ok=True)
     os.makedirs(log_gen_dir, exist_ok=True)
 
-    logger = setup_logger(log_gen_dir)
     logger.info(f'[INFO] Configuration: {OmegaConf.to_yaml(cfg)}') # Print the configuration for debugging
 
     # --- 1. Set device -------------------------------------------------------------
@@ -106,15 +73,6 @@ def generation_main(cfg):
                         split               = 'all',
                         stats_dir_root      = cfg['paths']['stats_load_dir']
                         )
-                        
-    # back_transforms = build_back_transforms(hr_var=cfg.highres.variable,
-    #                                         hr_scaling_method= cfg.highres.scaling_method,
-    #                                         hr_scaling_params=cfg.highres.scaling_params,
-    #                                         lr_vars=cfg.lowres.condition_variables,
-    #                                         lr_scaling_methods=cfg.lowres.scaling_methods,
-    #                                         lr_scaling_params=cfg.lowres.scaling_params,
-    #                                         )
-    
 
     # --- Initialize SampleGenerator --------------------------------------------------------
     generator = SampleGenerator(cfg, model, gen_dataloader, back_transforms, device)
@@ -141,41 +99,3 @@ def generation_main(cfg):
             logger.info(f"[INFO] Running {cfg.evaluation.n_repeats} repeated generations...")
             generator.generate_repeated()
             logger.info("[INFO] Repeated generation completed.\n")
-
-
-
-
-
-
-
-
-
-
-
-    # # --- 5. Choose generation method ---------------------------------------------
-    # # Is a list of strings
-    # gen_types = cfg.evaluation.gen_type
-
-    # valid_types = {'multiple', 'single', 'repeated'}
-
-    # for gen_type in gen_types:
-    #     if gen_type not in valid_types:
-    #         raise ValueError(f"\nUnknown generation type: {gen_type}\n")
-        
-    #     logger.info(f"Running generation: {gen_type}")
-
-    #     if gen_type == 'multiple':
-    #         logger.info("[INFO] Running multiple generations...")
-    #         run_generation_multiple(cfg, gen_dataloader, model, back_transforms, device)
-    #     elif gen_type == 'single':
-    #         logger.info("[INFO] Running single generation...")
-    #         run_generation_single(cfg, gen_dataloader, model, back_transforms, device)
-    #     elif gen_type == 'repeated':
-    #         logger.info("[INFO] Running repeated generation...")
-    #         run_generation_repeated(cfg, gen_dataloader, model, back_transforms, device)
-    
-
-
-# if __name__ == "__main__":
-#     cfg = hydra.compose(config_name="default_config")
-#     main_generation(cfg)
