@@ -495,19 +495,69 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 self.lr_cond_files_dict[cond] = list(group.keys())
         else:
             raise ValueError('LR condition directories (lr_cond_dirs_zarr) must be provided as a dictionary.')
+        
+        # Guard: Drop any lr_conditions that don't have a matching zarr group (e.g synthetic names like <var>_hrspace) and keep lr_scaling_methods in sync
+        filtered_conditions = []
+        filtered_methods = []
+        for cond, method in zip(self.lr_conditions, self.lr_scaling_methods):
+            if cond in self.lr_cond_zarr_dict:
+                filtered_conditions.append(cond)
+                filtered_methods.append(method)
+            else:
+                logger.warning(f"Condition '{cond}' not found in lr_cond_dirs_zarr (synthetic or misconfigured); dropping from conditions list.")
+
+        self.lr_conditions = filtered_conditions
+        self.lr_scaling_methods = filtered_methods
 
         # HR target variable parameters
         self.hr_variable = hr_variable
         self.hr_model = hr_model
         self.hr_scaling_method = hr_scaling_method
+
+        # Save classifier-free guidance parameters
+        self.cfg = cfg
+        self.split = split
+
+        # Decide when we need a HR-space baseline vs. a HR-space conditioning channel
+        try:
+            lowres_cfg = (self.cfg or {}).get('lowres', {})
+            edm_cfg = (self.cfg or {}).get('edm', {})
+            self.dual_lr = bool(lowres_cfg.get('dual_lr', False))
+            predict_residual = bool(edm_cfg.get('predict_residual', False))
+            baseline_space = str(edm_cfg.get('baseline_space', 'auto').lower())
+
+            # We need HR-space mapping for the baseline when doing residuals in HR/auto mode
+            self._need_hrspace_baseline = (self.hr_variable in self.lr_conditions) and predict_residual and (baseline_space in ('hr','auto'))
+            # We only want to EXPOSE hrspace as a conditioning channel if dual_lr is enabled
+            self._want_hrspace_channel = self.dual_lr and (self.hr_variable in self.lr_conditions)
+
+            # Append ONLY when we actually want it as a conditioning channel (dual_lr=True)
+            if self._want_hrspace_channel and (self.cfg is not None):
+                if 'lowres' not in self.cfg:
+                    self.cfg['lowres'] = {}
+                if 'condition_variables' not in self.cfg['lowres']:
+                    self.cfg['lowres']['condition_variables'] = []
+                cond_vars_cfg = self.cfg['lowres']['condition_variables']
+                hrspace_name = f"{self.hr_variable}_hrspace"
+                if hrspace_name not in cond_vars_cfg:
+                    cond_vars_cfg.append(hrspace_name)
+                    logger.info(
+                        f"[data_modules] dual_lr=True → appended '{hrspace_name}' to cfg['lowres']['condition_variables']"
+                    )
+            elif self._need_hrspace_baseline and (self.hr_variable not in self.lr_conditions):
+                # If hrspace is wanted but hr variable not in conditions, cannot add hrspace
+                logger.info(
+                    f"[data_modules] HR-space baseline requested but HR variable '{self.hr_variable}' not in LR conditions; cannot add hrspace channel."
+                )
+        except Exception as e:
+                logger.warning(f"[data_modules] Could not evaluate/apply hrspace condition requirement: {e}")
+
         
         # Save geo variables full-domain arrays
         self.lsm_full_domain = lsm_full_domain
         self.topo_full_domain = topo_full_domain
 
-        # Save classifier-free guidance parameters
-        self.cfg = cfg
-        self.split = split
+
 
         # Save what split statistics to use for scaling (train, valid, test or all). ALMOST ALWAYS USE 'train' TO AVOID DATA LEAKAGE 
         self.scaling_split = cfg['transforms']['scaling_split'] if cfg is not None else 'train'
@@ -539,6 +589,9 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # For each LR condition, build a file map: date -> file key
         self.lr_file_map = {}
         for cond in self.lr_conditions:
+            if cond not in self.lr_cond_files_dict:
+                logger.warning(f"[data_modules] Skipping LR condition '{cond}' (no files dict)")
+                continue
             self.lr_file_map[cond] = {}
             for file in self.lr_cond_files_dict[cond]:
                 try:
@@ -550,7 +603,11 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # Compute common dates across HR and all LR conditions
         common_dates = set(self.hr_file_map.keys())
         for cond in self.lr_conditions:
-            common_dates = common_dates.intersection(set(self.lr_file_map[cond].keys()))
+            if cond in self.lr_file_map:
+                common_dates = common_dates.intersection(set(self.lr_file_map[cond].keys()))
+            else:
+                logger.warning(f"[data_modules] Condition '{cond}' missing from lr_file_map; it will be ignored for common date intersection.")
+
         self.common_dates = sorted(list(common_dates))
         if len(self.common_dates) < self.n_samples:
             self.n_samples = len(self.common_dates)
@@ -594,6 +651,41 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     stats_file_path=stats_load_dir,
                 ))
                 self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
+            
+            # 1.1 NEW: HR-space transform for the LR variable that matches the HR target
+            if self.scale and (self.hr_variable in self.lr_conditions):
+                # Build a transform that maps the LR field into HR z-space (using HR global stats)
+                hrspace_transform_list = [
+                    SafeToTensor(),
+                    ResizeTensor(self.lr_size_reduced)
+                ]
+                hr_buff = cfg['highres'].get('buffer_frac', 0.5) if cfg is not None else 0.5
+                hrspace_transform_list.append(get_transforms_from_stats(
+                    variable=self.hr_variable,
+                    model=self.hr_model,
+                    domain_str=domain_str_hr,
+                    crop_region_str=crop_region_hr_str,
+                    scaling_split=scaling_split,
+                    transform_type=self.hr_scaling_method,
+                    buffer_frac=hr_buff,
+                    stats_file_path=stats_load_dir,
+                ))
+                # Store under the synthetic condition name "<hr_var>_hrspace_lr"
+                self.lr_transforms_dict[f"{self.hr_variable}_hrspace_lr"] = transforms.Compose(hrspace_transform_list)
+                # If hrspace is requested, ensure the synthetic condition name is advertised so the downstream code (that stacks cond_images for cfg list) includes it
+                if self._want_hrspace_channel and (self.cfg is not None):
+                    try:
+                        if 'lowres' not in self.cfg:
+                            self.cfg['lowres'] = {}
+                        if 'condition_variables' not in self.cfg['lowres']:
+                            self.cfg['lowres']['condition_variables'] = []
+                        cond_vars_cfg = self.cfg['lowres']['condition_variables']
+                        hrspace_name = f"{self.hr_variable}_hrspace"
+                        if hrspace_name not in cond_vars_cfg:
+                            cond_vars_cfg.append(hrspace_name)
+                            logger.info(f"Dual LR enabled: Appended synthetic condition '{hrspace_name}' to cfg['lowres']['condition_variables'] (will map to '{hrspace_name}_lr' in sample_dict)")
+                    except Exception as e:
+                        logger.warning(f"Could not append hrspace name to cfg['lowres']['condition_variables']. Error: {e}")
 
             # 2. Set HR target transform
             hr_transform_list = [
@@ -653,6 +745,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     ResizeTensor(self.lr_size_reduced)
                 ])
                 self.geo_transform_lsm = self.geo_transform_topo
+
+
 
     def __len__(self):
         '''
@@ -743,10 +837,32 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             if self.save_original:
                 sample_dict[f"{cond}_lr_original"] = data.copy() if data is not None else None
 
-            # Apply specified transform (specific to various conditions)
+            # If we need an HR-space variant for baseline or conditioning, build it **from raw, unit-corrected LR data**
+            # Do this BEFORE applying the LR-space transform to avoid double-transforming/logging
+            if ((getattr(self, '_want_hrspace_channel', False)) or (getattr(self, '_need_hrspace_baseline', False)) and (cond == self.hr_variable)):
+                hrspace_key = f"{cond}_hrspace_lr"
+                if data is not None and hrspace_key in self.lr_transforms_dict:
+                    try:
+                        data_hrspace = self.lr_transforms_dict[hrspace_key](data)
+                        sample_dict[hrspace_key] = data_hrspace
+                    except Exception as e:
+                        logger.warning(f"Failed to build HR-space variant for key '{hrspace_key}': {e}")
+                else:
+                    logger.warning(f"HR-space is requested for '{cond}' but no raw data is None or no HR-space transform found for key '{hrspace_key}'")
+            
+            # Now build the standard LR-space tensor for this condition
             if data is not None and self.lr_transforms_dict.get(cond, None) is not None:
                 data = self.lr_transforms_dict[cond](data)
             sample_dict[cond + "_lr"] = data
+
+            # # NEW: Also produce HR-space variant for the HR target, when hr_space is requested
+            # if getattr(self, '_want_hrspace_channel', False) or getattr(self, '_need_hrspace_baseline', False) and (cond == self.hr_variable):
+            #     hrspace_key = f"{cond}_hrspace_lr"
+            #     if hrspace_key in self.lr_transforms_dict:
+            #         data_hrspace = self.lr_transforms_dict[hrspace_key](sample_dict[cond + "_lr"].clone() if isinstance(sample_dict[cond + "_lr"], torch.Tensor) else sample_dict[cond + "_lr"])
+            #         sample_dict[hrspace_key] = data_hrspace
+            #     else:
+            #         logger.warning(f"HR-space is requested but no HR-space transform found for key '{hrspace_key}'")
         
 
         # Load HR target variable data
@@ -864,43 +980,44 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             sample_dict['hr_points'] = hr_point
             sample_dict['lr_points'] = lr_point
 
-        # -------------------------------------------------------------------------------
-        # Classifier-Free Guidance dropout (training split only)
-        # -------------------------------------------------------------------------------
-        cfg_guidance = getattr(self, "cfg", {}).get("classifier_free_guidance", {})
-        drop_prob = cfg_guidance.get("drop_prob", 0.1)
-        dropped = False
-        if self.split == "train" and cfg_guidance.get("enabled", False):
-            if torch.rand(()) < cfg_guidance.get(drop_prob, 0.1):
-                dropped = True
+        # # NOTE: ALREADY IMPLEMENTED IN TRAINING SO REMOVING FROM THIS CLASS
+        # # -------------------------------------------------------------------------------
+        # # Classifier-Free Guidance dropout (training split only)
+        # # -------------------------------------------------------------------------------
+        # cfg_guidance = getattr(self, "cfg", {}).get("classifier_free_guidance", {})
+        # drop_prob = cfg_guidance.get("drop_prob", 0.1)
+        # dropped = False
+        # if self.split == "train" and cfg_guidance.get("enabled", False):
+        #     if torch.rand(()) < drop_prob:
+        #         dropped = True
 
-                # 1) z-scored low-res fields --> set to zero
-                for key, val in list(sample_dict.items()):
-                    if key.endswith("_lr") and val is not None:
-                        sample_dict[key] = torch.zeros_like(val)
+        #         # 1) z-scored low-res fields --> set to zero
+        #         for key, val in list(sample_dict.items()):
+        #             if key.endswith("_lr") and val is not None:
+        #                 sample_dict[key] = torch.zeros_like(val)
 
-                # 2) Bounded geo maps (lsm, topo) -> keep value, append MASK channel
-                for geo_key in ("lsm", "topo"):
-                    geo = sample_dict.get(geo_key)
-                    if geo is not None:
-                        mask = torch.zeros_like(geo)        # 0 --> dropped
-                        sample_dict[geo_key] = torch.cat([geo, mask], dim=0)  # Append mask channel [2, H, W]
+        #         # 2) Bounded geo maps (lsm, topo) -> keep value, append MASK channel
+        #         for geo_key in ("lsm", "topo"):
+        #             geo = sample_dict.get(geo_key)
+        #             if geo is not None:
+        #                 mask = torch.zeros_like(geo)        # 0 --> dropped
+        #                 sample_dict[geo_key] = torch.cat([geo, mask], dim=0)  # Append mask channel [2, H, W]
 
-                # 3) scalar season / class index --> special NULL token 
-                if "classifier" in sample_dict and sample_dict["classifier"] is not None:
-                    null_token = 0
-                    sample_dict["classifier"].fill_(null_token)  # Set to NULL token, 0
+        #         # 3) scalar season / class index --> special NULL token 
+        #         if "classifier" in sample_dict and sample_dict["classifier"] is not None:
+        #             null_token = 0
+        #             sample_dict["classifier"].fill_(null_token)  # Set to NULL token, 0
                 
-        # ----------------------------------------------------------------------------
-        # If NOT dropped, still append a mask channel = 1 to keep the channel count fixed
-        # ----------------------------------------------------------------------------
-        for geo_key in ("lsm", "topo"):
-            geo = sample_dict.get(geo_key)
-            if geo is not None:
-                if geo.shape[0] == 1:       # I.e. mask is not added yet
-                    mask_val = 0.0 if dropped else 1.0
-                    mask = torch.full_like(geo, mask_val)       # (1, H, W)
-                    sample_dict[geo_key] = torch.cat([geo, mask], dim=0) # (2, H, W)
+        # # ----------------------------------------------------------------------------
+        # # If NOT dropped, still append a mask channel = 1 to keep the channel count fixed
+        # # ----------------------------------------------------------------------------
+        # for geo_key in ("lsm", "topo"):
+        #     geo = sample_dict.get(geo_key)
+        #     if geo is not None:
+        #         if geo.shape[0] == 1:       # I.e. mask is not added yet
+        #             mask_val = 0.0 if dropped else 1.0
+        #             mask = torch.full_like(geo, mask_val)       # (1, H, W)
+        #             sample_dict[geo_key] = torch.cat([geo, mask], dim=0) # (2, H, W)
         # Add item to cache
         self._addToCache(idx, sample_dict)
 

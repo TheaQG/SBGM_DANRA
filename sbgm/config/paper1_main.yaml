@@ -162,6 +162,7 @@ edm:
   S_noise: 1.0 # Noise parameter for EDM
   sampling_steps: 40 # Number of sampling steps for EDM (suggested: 35-50)
   predict_residual: true # Whether to predict residual from LR baseline
+  baseline_space: auto # Which z-space to use for lr_ups baseline: 'hr' | 'lr' | 'auto' (auto prefers *_hrspace if available)
 
 ve_dsm: # Default parameters for VE-DSM loss
   t_eps: 1e-3 # Small epsilon for VE-DSM

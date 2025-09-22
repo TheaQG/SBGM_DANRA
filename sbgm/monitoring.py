@@ -264,9 +264,8 @@ def compute_q95_q99_and_wet_day(
 @torch.no_grad() # Disable gradient computation for monitoring
 def edm_cosine_metric(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None):
     """
-    Compute the cosine similarity metric for EDM models as per Karras et al. (2022).
+    Compute the cosine similarity metric for EDM models.
     Similarity metric between predicted x0_hat and x0 for EDM.
-    Uses the same sigma sampling as in the EDMLoss object.
     """
     if not isinstance(loss_obj, EDMLoss):
         logger.warning("edm_cosine_metric is only defined for EDMLoss. Returning None.")
