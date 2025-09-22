@@ -15,7 +15,6 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 
 from torch.cuda.amp import autocast, GradScaler
-from typing import Optional 
 
 from sbgm.special_transforms import build_back_transforms_from_stats
 from sbgm.utils import extract_samples
@@ -250,158 +249,25 @@ class TrainingPipeline_general:
         self.psd_compare_to_hr = bool(cfg_mon__end_of_epoch.get('psd_compare_to_hr', True)) # Whether to compare LR/HR PSD slopes
         self.quantiles_compare_to_hr = bool(cfg_mon__end_of_epoch.get('quantiles_compare_to_hr', True)) # Whether to compare LR/HR quantiles
 
-    def _assert_finite(self, name: str, t: torch.Tensor | None):
-        if t is None:
-            return
-        if not torch.is_tensor(t):
-            raise TypeError(f"{name} is not a tensor (type {type(t)}).")
-        # Count NaNs/Infs and log some stats
-        n_nan = torch.isnan(t).sum().item()
-        n_inf = torch.isinf(t).sum().item()
-        if n_nan or n_inf:
-            try:
-                t_num = torch.nan_to_num(t.detach())
-                mn = float(t_num.min().item())
-                mx = float(t_num.max().item())
-                mean = float(t_num.mean().item())
-                msg_stats = f" min={mn:.3e}, max={mx:.3e}, mean={mean:.3e}"
-            except Exception:
-                msg_stats = ""
-            raise ValueError(f"[NaN/Inf] {name} has nan = {n_nan}, inf = {n_inf}.{msg_stats}")
 
-    def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None, batch: Optional[dict] = None):
+    def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
         """
-        Select the LR baseline (same variable as HR target):
-        - If baseline_space in {'hr','auto'} and '<target>_hrspace' is listed in condition_variables,
-        slice that channel from cond_images.
-        - Else if baseline_space in {'hr','auto'} and batch contains '<target>_hrspace_lr',
-        use that tensor as the baseline channel (without being in cond_images).
-        - Else (or if 'lr'), use the '<target>' LR-space channel from cond_images.
-        Returns [B, 1, h, w].
+            Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
+            Returns [B, 1, H, W] or raises if unavailable when predict_residual is True.
         """
         if cond_images is None:
             raise ValueError("cond_images is None, cannot extract LR baseline for residual prediction.")
-
-        edm_cfg = self.cfg.get('edm', {})
-        baseline_space = str(edm_cfg.get('baseline_space', 'auto')).lower()
+        
         cond_vars = self.cfg['lowres']['condition_variables']
         target_var = self.hr_var
-
-        def _slice(idx: int) -> torch.Tensor:
-            if cond_images.shape[1] <= idx:
-                raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx}.")
-            return cond_images[:, idx:idx+1, :, :]
-
-        hrspace_name = f"{target_var}_hrspace"
-
-        # Prefer explicit hrspace channel from cond_images
-        if baseline_space in ('hr', 'auto') and hrspace_name in cond_vars:
-            idx = cond_vars.index(hrspace_name)
-            logger.info(f"[EDM] Using HR-space baseline channel '{hrspace_name}' (index {idx}).")
-            return _slice(idx)
-
-        # If HR-space requested but not part of cond_images, try batch-level tensor
-        if baseline_space in ('hr', 'auto') and isinstance(batch, dict):
-            key = f"{target_var}_hrspace_lr"
-            if key in batch and batch[key] is not None:
-                t = batch[key]
-                if t.ndim == 3:     # [C,H,W] → [B,1,h,w]
-                    t = t.unsqueeze(0)
-                if t.ndim == 4 and t.shape[1] != 1:
-                    t = t[:, :1, :, :]
-                logger.info(f"[EDM] Using HR-space baseline from batch['{key}'] (not part of cond_images).")
-                t = t.to(cond_images.device, non_blocking=True)
-                return t
-
-        # LR-space fallback
-        if target_var in cond_vars:
-            idx = cond_vars.index(target_var)
-            if baseline_space == 'hr':
-                logger.warning(f"[EDM] Requested 'hr' baseline_space but no hrspace channel available; falling back to '{target_var}' (LR-space).")
-            logger.info(f"[EDM] Using LR-space baseline channel '{target_var}' (index {idx}).")
-            return _slice(idx)
-
-        raise ValueError(
-            f"Could not find baseline channel for target '{target_var}'. "
-            f"Looked for '{hrspace_name}' and '{target_var}' in condition_variables={cond_vars}, "
-            f"and batch key '{target_var}_hrspace_lr'."
-        )
-
-    def _ensure_geo_two_channels(self, geo: torch.Tensor | None, *, dropped: bool = False) -> torch.Tensor | None:
-        """Ensure geo map has 2 channels: [value, mask].
-        If `geo` is None, return None. If it has 1 channel, append a mask (ones if not dropped, zeros if dropped).
-        If it already has 2 channels, return as-is.
-        Shapes expected: [B, C, H, W].
-        """
-        if geo is None:
-            return None
-        if not torch.is_tensor(geo):
-            raise ValueError(f"Geo tensor must be a torch.Tensor, got {type(geo)}")
-        if geo.ndim != 4:
-            raise ValueError(f"Geo tensor must be [B,C,H,W], got shape {geo.shape}")
-        C = geo.shape[1]
-        if C == 1:
-            mask_val = 0.0 if dropped else 1.0
-            mask = torch.full_like(geo[:, :1, ...], mask_val)
-            return torch.cat([geo, mask], dim=1)
-        elif C == 2:
-            return geo
-        else:
-            # Allow >2, but warn once
-            try:
-                logger.warning(f"[geo] Expected 1 or 2 channels, got {C}. Passing through unchanged.")
-            except Exception:
-                pass
-            return geo
-    # def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
-    #     """
-    #         Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
-    #         If 'edm.baseline_space' is 'hr' or 'auto', prefer the '<target_var>_hrspace' channel if available.
-    #         If not found (or if 'baseline_space' is 'lr'), use the '<target_var>' channel (i.e. the LR-space baseline).
-    #         Returns [B, 1, H, W] or raises if unavailable when predict_residual is True.
-    #     """
-    #     if cond_images is None:
-    #         raise ValueError("cond_images is None, cannot extract LR baseline for residual prediction.")
+        if target_var not in cond_vars:
+            raise ValueError(f"Target variable '{target_var}' not found in condition variables {cond_vars}, cannot extract LR baseline for residual prediction.")
         
-    #     # What to use for lr_ups baseline: 'hr' | 'lr' | 'auto'
-    #     edm_cfg = self.cfg.get('edm', {})
-    #     baseline_space = edm_cfg.get('baseline_space', 'auto').lower()
-    #     if baseline_space not in ['hr', 'lr', 'auto']:
-    #         baseline_space = 'auto'
-    #         logger.warning(f"[EDM] Unknown edm.baseline_space '{baseline_space}' in config; defaulting to 'auto'.")
-
-    #     cond_vars = self.cfg['lowres']['condition_variables']
-    #     target_var = self.hr_var
-        
-    #     # Helper to slice a single channels safely
-    #     def _slice_channel(idx: int):
-    #         if cond_images.shape[1] <= idx:
-    #             raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx} for variable '{target_var}'.")
-    #         return cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
-        
-    #     # Try hrspace variant first when requested/allowed
-    #     hrspace_name = f"{target_var}_hrspace"
-    #     used = None
-    #     if (baseline_space in ['hr', 'auto']) and (hrspace_name in cond_vars):
-    #         idx = cond_vars.index(hrspace_name)
-    #         logger.info(f"[EDM] Using HR-space baseline channel '{hrspace_name}' (index {idx}) for residual prediction.")
-    #         used = hrspace_name
-    #         lr_ups = _slice_channel(idx)
-    #         return lr_ups
-        
-    #     # Fallbacks
-    #     if target_var in cond_vars:
-    #         idx = cond_vars.index(target_var)
-    #         if baseline_space == 'hr':
-    #             logger.warning(f"[EDM] Requested 'hr' baseline_space but '{hrspace_name}' not found in condition variables; falling back to '{target_var}' (LR-space).")
-    #         logger.warning(f"[EDM] Using LR-space baseline channel '{target_var}' (index {idx}) for residual prediction.")
-    #         used = target_var
-    #         lr_ups = _slice_channel(idx)
-    #         return lr_ups
-        
-    #     # If we get here, nothing was found
-    #     raise ValueError(f"[EDM] Could not find suitable LR baseline channel for variable '{target_var}' in cond_images with variables {cond_vars}. Searched for '{hrspace_name}' and '{target_var}'. Cannot extract LR baseline for residual prediction.")
-
+        idx = cond_vars.index(target_var)
+        if cond_images.shape[1] <= idx:
+            raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx} for variable '{target_var}'.")
+        lr_ups = cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
+        return lr_ups
 
 
     def xavier_init_weights(self, m):
@@ -540,22 +406,12 @@ class TrainingPipeline_general:
         for idx, samples in enumerate(pbar):
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
-            # Ensure device is a torch.device object
-            x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples,
-                                                                                                    device=self.device,
-                                                                                                    allowed_lr_names=self.cfg['lowres']['condition_variables'])
-            
-            # Make sure geo tensors have 2 channels if they exist
-            lsm = self._ensure_geo_two_channels(lsm)
-            topo = self._ensure_geo_two_channels(topo)
+            x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
             # === EDM: build lr_ups_baseline if needed ===
             lr_ups_baseline = None
             if self.edm_enabled and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images, batch=samples)  # [B, 1, H, W]
-            
-            if lr_ups_baseline is not None:
-                lr_ups_baseline = lr_ups_baseline.to(self.device, non_blocking=True)
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
 
             # # === CFG dropout (training) ===
             cfg_guidance = self.cfg_guidance
@@ -568,15 +424,6 @@ class TrainingPipeline_general:
                 cond_images, lsm, topo, seasons = cfg_dropout_result
             else:
                 raise ValueError(f"apply_cfg_dropout returned unexpected tuple length: {len(cfg_dropout_result)}")
-            
-            # After extracting tensors and moving to device, check for NaNs/Infs
-            self._assert_finite("x (HR)", x)
-            self._assert_finite("cond_images (LR stack)", cond_images)
-            self._assert_finite("lsm", lsm)
-            self._assert_finite("topo", topo)
-            self._assert_finite("seasons", seasons)
-            self._assert_finite("lr_ups_baseline", lr_ups_baseline)
-
             # cfg_guidance = self.cfg.get('classifier_free_guidance', {})
             # if bool(cfg_guidance.get('enabled', False)) and cond_images is not None:
             #     drop_prob = float(cfg_guidance.get('drop_prob', 0.1))
@@ -668,8 +515,7 @@ class TrainingPipeline_general:
                                            lr_ups=lr_ups_baseline
                                        )
 
-            if not torch.isfinite(batch_loss):
-                raise ValueError("[NaN/Inf] batch_loss is not finite.")
+
             # === Cosine monitoring (lightweight) ===
             monitor_cfg = self.cfg.get('monitoring', {})
             log_every = monitor_cfg.get('edm_metrics_every', 50)
@@ -691,7 +537,7 @@ class TrainingPipeline_general:
                 hr_lr_corr_val = float('nan')
                 try: 
                     if lr_ups_baseline is None and cond_images is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
-                        lr_ups_baseline = self._build_lr_ups_baseline(cond_images, batch=samples)  # [B, 1, H, W]
+                        lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
                     if lr_ups_baseline is not None:
                         # Optional land-only mask
                         mask = None
@@ -926,20 +772,14 @@ class TrainingPipeline_general:
         for idx, samples in enumerate(pbar):
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
-            x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples,
-                                                                                                    device=self.device,
-                                                                                                    allowed_lr_names=self.cfg['lowres']['condition_variables'])
+            x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
-            # Make sure geo tensors have 2 channels if they exist
-            lsm = self._ensure_geo_two_channels(lsm)
-            topo = self._ensure_geo_two_channels(topo)
+
 
             # Setup lr_ups_baseline if needed
             lr_ups_baseline = None
             if edm_on and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images, batch=samples)  # [B, 1, H, W]
-            if lr_ups_baseline is not None:
-                lr_ups_baseline = lr_ups_baseline.to(self.device, non_blocking=True)
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
 
             # No gradients needed for validation
             with torch.inference_mode(): #torch.no_grad(): # New in PyTorch 1.9, slightly faster than torch.no_grad()
@@ -1110,23 +950,14 @@ class TrainingPipeline_general:
         for idx, samples in enumerate(p_bar):
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
-            x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples,
-                                                                                                                                        device=self.device,
-                                                                                                                                        allowed_lr_names=self.cfg['lowres']['condition_variables'])
-            
-            # Make sure geo tensors have 2 channels if they exist
-            lsm_gen = self._ensure_geo_two_channels(lsm_gen)
-            topo_gen = self._ensure_geo_two_channels(topo_gen)
-            
+            x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
             logger.info(f"→ Generating {len(x_gen)} samples at epoch {epoch}, batch {idx}...")
             logger.info(f"      Only plotting first {min(cfg['visualization'].get('n_plot_samples', 4), cfg['data_handling']['n_gen_samples'])} samples.")
 
             # Setup lr_ups_baseline if needed
             lr_ups_baseline = None
             if edm_on and self.edm_predict_residual:
-                lr_ups_baseline = self._build_lr_ups_baseline(cond_images_gen, batch=samples)  # [B, 1, H, W]
-            if lr_ups_baseline is not None:
-                lr_ups_baseline = lr_ups_baseline.to(self.device, non_blocking=True)
+                lr_ups_baseline = self._build_lr_ups_baseline(cond_images_gen)  # [B, 1, H, W]
 
             if edm_on and sampler_edm is not None:
                 edm_cfg = cfg.get('edm', {}) or {}
@@ -1135,7 +966,7 @@ class TrainingPipeline_general:
                 generated_samples = sampler_edm(score_model=self.model,
                                             batch_size=cfg['data_handling']['n_gen_samples'],
                                             num_steps=edm_cfg.get('sampling_steps', 18),
-                                            device=str(self.device),
+                                            device=self.device,
                                             img_size=cfg['highres']['data_size'][0],
                                             y=seasons_gen,
                                             cond_img=cond_images_gen,
@@ -1158,7 +989,7 @@ class TrainingPipeline_general:
                     diffusion_coeff=self.diffusion_coeff_fn,
                     batch_size=cfg['data_handling']['n_gen_samples'],
                     num_steps=cfg['sampler']['n_timesteps'],
-                    device=str(self.device),
+                    device=self.device,
                     img_size=cfg['highres']['data_size'][0],
                     y=seasons_gen,
                     cond_img=cond_images_gen,

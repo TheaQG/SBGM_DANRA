@@ -311,90 +311,60 @@ def convert_nc_to_zarr(nc_directory, zarr_file, VERBOSE=False):
                 # Save the data as a zarr array
                 zarr_group.array(nc_file.replace('.nc', '') + '/' + var, data, chunks=True, dtype=np.float32)
 
-
-import torch
-from typing import Optional, List, Tuple
-
-def extract_samples(samples: dict,
-                    device = None,
-                    allowed_lr_names: Optional[List[str]] = None
-                    ) -> Tuple[torch.Tensor,
-                               Optional[torch.Tensor],
-                               Optional[torch.Tensor],
-                               Optional[torch.Tensor],
-                               Optional[torch.Tensor],
-                               Optional[torch.Tensor],
-                               Optional[torch.Tensor],
-                               Optional[torch.Tensor],
-                               Optional[torch.Tensor]]:
+def extract_samples(samples, device=None):
     """
-    Extract samples from the dictionary returned by the dataset class.
-
-    Expected keys:
-      - HR image: any key ending with '_hr' (e.g. 'prcp_hr') [ignores keys ending with '_original']
-      - Classifier: 'classifier'
-      - LR conditions: keys ending with '_lr' (e.g. 'prcp_lr')
-      - HR mask: 'lsm_hr'
-      - Land/sea mask: 'lsm'
-      - SDF: 'sdf'
-      - Topography: 'topo'
-      - Points: 'hr_point' and 'lr_point'
-
-    If multiple LR condition keys are present, they are concatenated along channel dim.
-    If `allowed_lr_names` is provided, only include LR keys whose _base_ is in that list,
-    and preserve that list's order.
+        Extract samples from the dictionary returned by the dataset class.
+        Expected keys:
+            - HR image: key ending with '_hr' (e.g. 'prcp_hr') [ignoring keys ending with '_original']
+            - Classifier: key 'classifier'
+            - LR conditions: key(s) ending with '_lr' (e.g. 'prcp_lr')
+            - HR mask: key 'lsm_hr'
+            - Land/sea mask: key 'lsm'
+            - SDF: key 'sdf'
+            - Topography: key 'topo'
+            - Points: keys 'hr_point' and 'lr_point'
+        If multiple LR condition keys are present, they are concatenated along the channel dimension
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # HR image (first key ending with _hr, excluding *_original)
+    # HR image (choose key ending with '_hr' not containing 'original')
     hr_keys = [k for k in samples.keys() if k.endswith('_hr') and not k.endswith('_original')]
+    # If key 'lsm_hr' in hr_keys, remove it
     if 'lsm_hr' in hr_keys:
         hr_keys.remove('lsm_hr')
+    
     if len(hr_keys) == 0:
         raise ValueError('No HR image found in samples dictionary.')
     hr_img = samples[hr_keys[0]].to(device, non_blocking=True).float()
-
+    # if len(hr_keys) > 1:
+    #     logger.warning(f'Multiple HR images found. Using the first one: {hr_keys[0]}')
+    
     # Classifier (if available)
     classifier = samples.get('classifier', None)
     if classifier is not None:
-        classifier = classifier.to(device, non_blocking=True)
+        classifier = classifier.to(device, non_blocking=True)#.float()
 
-    # LR conditions
-    all_lr_keys = [k for k in samples.keys() if k.endswith('_lr') and not k.endswith('_original')]
-    def _base(n: str) -> str:
-        return n[:-3] if n.endswith('_lr') else n
-
-    if allowed_lr_names is not None:
-        # Include *only* names from the list, and keep the list's order
-        present = {k: k for k in all_lr_keys}  # map for quick membership
-        lr_keys = []
-        for name in allowed_lr_names:
-            k = f"{name}_lr"
-            if k in present:
-                lr_keys.append(k)
-    else:
-        # Fall back to including all LR keys sorted alphabetically (deterministic)
-        lr_keys = sorted(all_lr_keys)
-
+    # LR conditions: if multiple, stack along channel dimensio
+    lr_keys = [k for k in samples.keys() if k.endswith('_lr') and not k.endswith('_original')]
     if len(lr_keys) == 0:
         lr_img = None
     elif len(lr_keys) == 1:
         lr_img = samples[lr_keys[0]].to(device, non_blocking=True).float()
     else:
-        lr_list = [samples[k].to(device, non_blocking=True).float() for k in lr_keys]
+        lr_list = [samples[k].to(device, non_blocking=True).float() for k in sorted(lr_keys)]
         lr_img = torch.cat(lr_list, dim=1)
 
-    # HR mask
+    # HR mask (LSM)
     lsm_hr = samples.get('lsm_hr', None)
     if lsm_hr is not None:
         lsm_hr = lsm_hr.to(device, non_blocking=True).float()
-
-    # LSM
+    
+    # Land/sea mask (LSM)
     lsm = samples.get('lsm', None)
     if lsm is not None:
         lsm = lsm.to(device, non_blocking=True).float()
-
+    
     # SDF
     sdf = samples.get('sdf', None)
     if sdf is not None:
@@ -405,92 +375,18 @@ def extract_samples(samples: dict,
     if topo is not None:
         topo = topo.to(device, non_blocking=True).float()
 
-    # Points
+    # HR crop points (if available)
     hr_points = samples.get('hr_point', None)
-    if hr_points is not None and hasattr(hr_points, 'to'):
+    if hr_points is not None:
         hr_points = hr_points.to(device).float()
+
+    # LR crop points (if available)
     lr_points = samples.get('lr_point', None)
-    if lr_points is not None and hasattr(lr_points, 'to'):
+    if lr_points is not None:
         lr_points = lr_points.to(device).float()
 
+    # Return all extracted samples
     return hr_img, classifier, lr_img, lsm_hr, lsm, sdf, topo, hr_points, lr_points
-
-# def extract_samples(samples, device=None):
-#     """
-#         Extract samples from the dictionary returned by the dataset class.
-#         Expected keys:
-#             - HR image: key ending with '_hr' (e.g. 'prcp_hr') [ignoring keys ending with '_original']
-#             - Classifier: key 'classifier'
-#             - LR conditions: key(s) ending with '_lr' (e.g. 'prcp_lr')
-#             - HR mask: key 'lsm_hr'
-#             - Land/sea mask: key 'lsm'
-#             - SDF: key 'sdf'
-#             - Topography: key 'topo'
-#             - Points: keys 'hr_point' and 'lr_point'
-#         If multiple LR condition keys are present, they are concatenated along the channel dimension
-#     """
-#     if device is None:
-#         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-#     # HR image (choose key ending with '_hr' not containing 'original')
-#     hr_keys = [k for k in samples.keys() if k.endswith('_hr') and not k.endswith('_original')]
-#     # If key 'lsm_hr' in hr_keys, remove it
-#     if 'lsm_hr' in hr_keys:
-#         hr_keys.remove('lsm_hr')
-    
-#     if len(hr_keys) == 0:
-#         raise ValueError('No HR image found in samples dictionary.')
-#     hr_img = samples[hr_keys[0]].to(device, non_blocking=True).float()
-#     # if len(hr_keys) > 1:
-#     #     logger.warning(f'Multiple HR images found. Using the first one: {hr_keys[0]}')
-    
-#     # Classifier (if available)
-#     classifier = samples.get('classifier', None)
-#     if classifier is not None:
-#         classifier = classifier.to(device, non_blocking=True)#.float()
-
-#     # LR conditions: if multiple, stack along channel dimensio
-#     lr_keys = [k for k in samples.keys() if k.endswith('_lr') and not k.endswith('_original')]
-#     if len(lr_keys) == 0:
-#         lr_img = None
-#     elif len(lr_keys) == 1:
-#         lr_img = samples[lr_keys[0]].to(device, non_blocking=True).float()
-#     else:
-#         lr_list = [samples[k].to(device, non_blocking=True).float() for k in sorted(lr_keys)]
-#         lr_img = torch.cat(lr_list, dim=1)
-
-#     # HR mask (LSM)
-#     lsm_hr = samples.get('lsm_hr', None)
-#     if lsm_hr is not None:
-#         lsm_hr = lsm_hr.to(device, non_blocking=True).float()
-    
-#     # Land/sea mask (LSM)
-#     lsm = samples.get('lsm', None)
-#     if lsm is not None:
-#         lsm = lsm.to(device, non_blocking=True).float()
-    
-#     # SDF
-#     sdf = samples.get('sdf', None)
-#     if sdf is not None:
-#         sdf = sdf.to(device, non_blocking=True).float()
-
-#     # Topography
-#     topo = samples.get('topo', None)
-#     if topo is not None:
-#         topo = topo.to(device, non_blocking=True).float()
-
-#     # HR crop points (if available)
-#     hr_points = samples.get('hr_point', None)
-#     if hr_points is not None:
-#         hr_points = hr_points.to(device).float()
-
-#     # LR crop points (if available)
-#     lr_points = samples.get('lr_point', None)
-#     if lr_points is not None:
-#         lr_points = lr_points.to(device).float()
-
-#     # Return all extracted samples
-#     return hr_img, classifier, lr_img, lsm_hr, lsm, sdf, topo, hr_points, lr_points
 
 
 def get_first_sample_dict(samples: dict) -> dict:
