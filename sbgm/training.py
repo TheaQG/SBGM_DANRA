@@ -16,17 +16,15 @@ import matplotlib.pyplot as plt
 
 from torch.cuda.amp import autocast, GradScaler
 
+
 from sbgm.special_transforms import build_back_transforms_from_stats
-from sbgm.utils import extract_samples
+from sbgm.utils import get_model_string, extract_samples
 from sbgm.plotting_utils import (
     get_cmaps,
     plot_samples_and_generated,
     plot_live_training_metrics,
-    plot_fss_epoch,
     plot_fss_history,
-    plot_psd_slope_epoch,
     plot_psd_slope_history,
-    plot_quantiles_wetday_epoch,
     plot_quantiles_wetday_history,
     )
 from sbgm.monitoring import (
@@ -37,7 +35,8 @@ from sbgm.monitoring import (
     compute_q95_q99_and_wet_day,
     )
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
-from sbgm.training_utils import get_model_string, get_units, get_loss_fn, apply_cfg_dropout
+from sbgm.training_utils import get_loss_fn, apply_cfg_dropout
+from sbgm.variable_utils import get_units
 
 # Speed up conv algo selection on fixed input sizes
 if torch.cuda.is_available():
@@ -88,13 +87,13 @@ class TrainingPipeline_general:
         # Set class variables
         self.model = model
         # Set debug_pre_sigma_div from cfg if exists, else default to True
-        self.model.debug_pre_sigma_div = cfg['training'].get('debug_pre_sigma_div', True)
+        self.model.debug_pre_sigma_div = cfg['training'].get('debug_pre_sigma_div', False)
 
         self.marginal_prob_std_fn = marginal_prob_std_fn
         self.diffusion_coeff_fn = diffusion_coeff_fn
         self.optimizer = optimizer
         # self.loss_fn = loss_fn
-        self.loss_fn = get_loss_fn(self.cfg, marginal_prob_std_fn=getattr(self, 'marginal_prob_std_fn', None))
+        self.loss_fn = get_loss_fn(self.cfg, marginal_prob_std_fn_in=getattr(self, 'marginal_prob_std_fn', None))
 
         self.lr_scheduler = lr_scheduler
 
@@ -424,69 +423,11 @@ class TrainingPipeline_general:
                 cond_images, lsm, topo, seasons = cfg_dropout_result
             else:
                 raise ValueError(f"apply_cfg_dropout returned unexpected tuple length: {len(cfg_dropout_result)}")
-            # cfg_guidance = self.cfg.get('classifier_free_guidance', {})
-            # if bool(cfg_guidance.get('enabled', False)) and cond_images is not None:
-            #     drop_prob = float(cfg_guidance.get('drop_prob', 0.1))
-            #     drop_prob_geo = float(cfg_guidance.get('drop_prob_geo', drop_prob)) # Optional separate drop prob for static geo
-
-            #     B = x.size(0)
-            #     device = x.device
-
-            #     # Bernoulli masks per-sample NOTE: Shouldn't geo always be dropped at same time as cond + some more times?
-            #     mask_cond = (torch.rand(B, device=device) < drop_prob)  # For LR conditions and labels
-            #     mask_geo = (mask_cond.clone() if drop_prob_geo == drop_prob else (torch.rand(B, device=device) < drop_prob_geo))  # For static geo conditions
-
-            #     # Expand to image shape
-            #     m_img = mask_cond.view(B, 1, 1, 1)  # For cond_images
-            #     m_geo = mask_geo.view(B, 1, 1, 1)  # For static geo (lsm, topo)
-                
-            #     # Nullify static geo (optionally with different prob)
-            #     if lsm is not None:
-            #         lsm = torch.where(m_geo, torch.zeros_like(lsm), lsm)
-            #     if topo is not None:
-            #         topo = torch.where(m_geo, torch.zeros_like(topo), topo)
-
-            #     # Nullify label season/day by sending to null id (0)
-            #     if seasons is not None:
-            #         null_id = int(cfg_guidance.get('null_label_id', 0))
-            #         # seasons expected shape [B] (long) or [B, ...] -> map dropped ones to null_id
-            #         if seasons.dtype == torch.long:
-            #             seasons = torch.where(mask_cond, torch.full_like(seasons, null_id), seasons) # NOTE: These are the same
-            #         else:
-            #             seasons = torch.where(mask_cond, torch.full_like(seasons, null_id), seasons)
-
-            #     # If training with predict_residual == True, also null the LR baseline channel
-            #     lr_ups_baseline = None
-            #     if self.edm_enabled and self.edm_predict_residual:
-            #         lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
-            #         lr_ups_baseline = torch.where(m_img, torch.zeros_like(lr_ups_baseline), lr_ups_baseline)
 
             # Zero gradients
             self.optimizer.zero_grad()
 
-
-            # NOTE: Introduce mixed precision training
-            # # Use mixed precision training if needed
-            # if self.scaler:
-            #     with autocast():
-            #         # Pass the score model and samples+conditions to the loss_fn
-            #         batch_loss = loss_fn(self.model,
-            #                              x,
-            #                              self.marginal_prob_std_fn,
-            #                              y=seasons,
-            #                              cond_img=cond_images,
-            #                              lsm_cond=lsm,
-            #                              topo_cond=topo,
-            #                              sdf_cond=sdf)
-            #     # Mixed precision: scale loss and update weights
-            #     self.scaler.scale(batch_loss).backward()
-            #     # Update weights
-            #     self.scaler.step(self.optimizer)
-            #     # Update scaler
-            #     self.scaler.update()
-            # else:
-            # logger.info("▸ Computing batch loss without mixed precision...")
-                # Log the shapes of the inputs for debugging
+            # Log the shapes of the inputs for debugging
             for name, tensor in zip(['x', 'seasons', 'cond_images', 'lsm', 'topo'], [x, seasons, cond_images, lsm, topo]):
                 if tensor is not None:
                     assert tensor.device == x.device, f"{name} is on device {tensor.device}, expected {x.device}"
@@ -686,6 +627,16 @@ class TrainingPipeline_general:
             # Append validation loss to list
             val_losses.append(val_loss)
 
+            # Step the learning rate scheduler if provided
+            if self.lr_scheduler is not None:
+                if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.lr_scheduler.step(val_loss)  # Step with validation loss
+                else:
+                    self.lr_scheduler.step()  # Regular step
+                if verbose:
+                    current_lr = self.lr_scheduler.get_last_lr()[0]
+                    logger.info(f"→ Learning rate after epoch {epoch}: {current_lr:.6f}")
+
             # Capture improvement before updating best loss
             improved = val_loss < best_loss
 
@@ -874,7 +825,9 @@ class TrainingPipeline_general:
                             epoch,
                           ):
         
-        # Load the best model (EMA or network) from checkpoint
+        # Load the best model (EMA or network) from checkpoint WITHOUT altering training weights
+        model_sd_backup = copy.deepcopy(self.model.state_dict())  # Backup current model state dict
+
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
         net_sd = checkpoint.get('network_params', None) # Network state dict
         ema_sd = checkpoint.get('ema_network_params', None) # EMA state dict if exists
@@ -937,7 +890,7 @@ class TrainingPipeline_general:
                             crop_region_str_lr  = crop_region_lr_str,
                             lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                             lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                            split               = 'all',
+                            split               = 'train',
                             stats_dir_root      = cfg['paths']['stats_load_dir']
                             )
 
@@ -1125,9 +1078,9 @@ class TrainingPipeline_general:
                     logger.info(f"→ Figure saved to {os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png')}")
                 plt.close(fig)
                 break  # one batch per epoch                    
-
-        # Set model back to training mode
-        self.model.train()
+        # Restore training weights and mode
+        self.model.load_state_dict(model_sd_backup)  # Restore original model weights
+        self.model.train()  # Set back to training mode
 
     def plot_losses(self,
                     train_losses,

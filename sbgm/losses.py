@@ -44,6 +44,7 @@ class EDMLoss(nn.Module):
         dtype = x0.dtype
 
         sigma = self.sample_sigma(B, device, dtype=dtype)  # [B]
+        
         n = torch.randn_like(x0)  # [B, C, H, W]
         x_t = x0 + sigma.view(B, 1, 1, 1) * n  # [B, C, H, W]
         x0_hat = edm_model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
@@ -51,7 +52,7 @@ class EDMLoss(nn.Module):
         # EDM weight (per-sample scalra) - added for guiding the model to focus on low-noise samples
         s2 = sigma**2
         sd2 = self.sigma_data**2
-        w = (s2 + sd2) / ((sigma * self.sigma_data)**2) 
+        w = (s2 + sd2) / ((sigma * self.sigma_data)**2)
         w = w.view(B, 1, 1, 1)
 
         err2 = (x0_hat - x0)**2  # [B, C, H, W]
@@ -113,4 +114,5 @@ class DSMLoss(nn.Module):
             loss = torch.mean(torch.sum((score * std.view(B, 1, 1, 1) + z)**2, dim=(1, 2, 3)))
         
         return loss
+
 

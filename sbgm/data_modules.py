@@ -105,7 +105,7 @@ def generate_sdf(mask):
     dist_transform_sea = distance(~binary_mask)
 
     # Set land to 1 and subtract sea distances
-    sdf = 10*binary_mask.float() - dist_transform_sea
+    sdf = 10*binary_mask.float() - dist_transform_sea # NOTE: 10 is an arbitrary positive value for land - not a problem, when normalizing later
 
     return sdf
 
@@ -450,6 +450,12 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.lr_conditions = lr_conditions
         self.lr_model = lr_model
         self.lr_scaling_methods = lr_scaling_methods
+
+        # Check for dual_lr or predict_residual with baseline_space in cfg
+        self.dual_lr = cfg['lowres'].get('dual_lr', False) if cfg is not None and 'lowres' in cfg else False
+        self.predict_residual = cfg['edm'].get('predict_residual', False) if cfg is not None and 'edm' in cfg else False
+        self.lr_baseline_space = cfg['edm'].get('baseline_space', 'auto') if cfg is not None and 'edm' in cfg else 'auto'
+
         
         # If any conditions exist, set with_conditions to True
         self.with_conditions = len(self.lr_conditions) > 0
@@ -863,44 +869,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         if self.cutouts:
             sample_dict['hr_points'] = hr_point
             sample_dict['lr_points'] = lr_point
-
-        # -------------------------------------------------------------------------------
-        # Classifier-Free Guidance dropout (training split only)
-        # -------------------------------------------------------------------------------
-        cfg_guidance = getattr(self, "cfg", {}).get("classifier_free_guidance", {})
-        drop_prob = cfg_guidance.get("drop_prob", 0.1)
-        dropped = False
-        if self.split == "train" and cfg_guidance.get("enabled", False):
-            if torch.rand(()) < cfg_guidance.get(drop_prob, 0.1):
-                dropped = True
-
-                # 1) z-scored low-res fields --> set to zero
-                for key, val in list(sample_dict.items()):
-                    if key.endswith("_lr") and val is not None:
-                        sample_dict[key] = torch.zeros_like(val)
-
-                # 2) Bounded geo maps (lsm, topo) -> keep value, append MASK channel
-                for geo_key in ("lsm", "topo"):
-                    geo = sample_dict.get(geo_key)
-                    if geo is not None:
-                        mask = torch.zeros_like(geo)        # 0 --> dropped
-                        sample_dict[geo_key] = torch.cat([geo, mask], dim=0)  # Append mask channel [2, H, W]
-
-                # 3) scalar season / class index --> special NULL token 
-                if "classifier" in sample_dict and sample_dict["classifier"] is not None:
-                    null_token = 0
-                    sample_dict["classifier"].fill_(null_token)  # Set to NULL token, 0
-                
-        # ----------------------------------------------------------------------------
-        # If NOT dropped, still append a mask channel = 1 to keep the channel count fixed
-        # ----------------------------------------------------------------------------
-        for geo_key in ("lsm", "topo"):
-            geo = sample_dict.get(geo_key)
-            if geo is not None:
-                if geo.shape[0] == 1:       # I.e. mask is not added yet
-                    mask_val = 0.0 if dropped else 1.0
-                    mask = torch.full_like(geo, mask_val)       # (1, H, W)
-                    sample_dict[geo_key] = torch.cat([geo, mask], dim=0) # (2, H, W)
+            
         # Add item to cache
         self._addToCache(idx, sample_dict)
 

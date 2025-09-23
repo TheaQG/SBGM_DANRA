@@ -61,10 +61,11 @@ class EDMPrecondUNet(nn.Module):
         """ Compute preconditioning coefficients. (as in Karras et al. 2022) """
         # sigma: [B]
         s2 = sigma**2
-        sd2 = self.sigma_data**2
+        sd = self.sigma_data
+        sd2 = sd**2
         c_in    = 1.0 / torch.sqrt(s2 + sd2)
         c_skip  = sd2 / (s2 + sd2)
-        c_out   = sigma * sd2 / torch.sqrt(s2 + sd2) 
+        c_out   = sigma * sd / torch.sqrt(s2 + sd2)  # corrected formula
         # c_noise = 0.25 * log(sigma^2) = 0.25 * 2 * log(sigma)
         c_noise = (sigma.log() * 0.5).unsqueeze(-1)  # [B, 1]   
         return c_in, c_skip, c_out, c_noise
@@ -400,7 +401,7 @@ class Encoder(ResNet):
     
         #t = self.sinusoidal_embedding(t)
         # Add the label embedding to the time embedding
-        if y is not None:
+        if y is not None and hasattr(self, "label_emb"):
             t += self.label_emb(y)
         #logger.debug('\n Time embedding type: ', t.dtype, '\n')
         # Prepare fmap1, the first feature map, by applying the first convolutional layer to the input x
@@ -935,58 +936,58 @@ def diffusion_coeff(t, sigma, device = None):
     diff_coeff = diff_coeff.to(t.device)
     return diff_coeff
 
-sigma =  25.0#@param {'type':'number'}
-marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma)
-diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
+# sigma_marg =  25.0#@param {'type':'number'}
+# marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma_marg)
+# diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma_marg)
 
-def loss_fn(model,
-            x,
-            marginal_prob_std,
-            t_eps=1e-3, # to avoid dead gradients near t=0
-            y = None,
-            cond_img = None,
-            lsm_cond = None,
-            topo_cond = None,
-            sdf_cond = None):
-    '''
-        The loss function for training SBGM.
+# def loss_fn(model,
+#             x,
+#             marginal_prob_std,
+#             t_eps=1e-3, # to avoid dead gradients near t=0
+#             y = None,
+#             cond_img = None,
+#             lsm_cond = None,
+#             topo_cond = None,
+#             sdf_cond = None):
+#     '''
+#         The loss function for training SBGM.
 
-        Input:
-            - model: A PyTorch model that represents a time-dependent Score Based model
-            - x: The input tensor (mini-batch of training data)
-            - marginal_prob_std: A function that gives the std of 
-                the perturbation kernel
-            - eps: A small constant to avoid division by zero
-    '''
-    # Sample a random time step for each sample in the mini-batch
-    random_t = torch.rand(x.shape[0], device=x.device) * (1. - t_eps) + t_eps
-    # Sample a random noise vector for each sample in the mini-batch
-    z = torch.randn_like(x)
-    # Compute the std of the perturbation kernel at the random time step
-    std = marginal_prob_std(random_t)
-    # Perturb the input x with the random noise vector z
-    perturbed_x = x + std[:, None, None, None] * z
+#         Input:
+#             - model: A PyTorch model that represents a time-dependent Score Based model
+#             - x: The input tensor (mini-batch of training data)
+#             - marginal_prob_std: A function that gives the std of 
+#                 the perturbation kernel
+#             - eps: A small constant to avoid division by zero
+#     '''
+#     # Sample a random time step for each sample in the mini-batch
+#     random_t = torch.rand(x.shape[0], device=x.device) * (1. - t_eps) + t_eps
+#     # Sample a random noise vector for each sample in the mini-batch
+#     z = torch.randn_like(x)
+#     # Compute the std of the perturbation kernel at the random time step
+#     std = marginal_prob_std(random_t)
+#     # Perturb the input x with the random noise vector z
+#     perturbed_x = x + std[:, None, None, None] * z
 
-    for name, arr in [('cond_img', cond_img), ('lsm_cond', lsm_cond), ('topo_cond', topo_cond), ('y', y)]:
-        if arr is not None and arr.shape[0] != x.shape[0]:
-            raise ValueError(f'Batch size mismatch: x={x.shape[0]}, {name}={arr.shape[0]}')
+#     for name, arr in [('cond_img', cond_img), ('lsm_cond', lsm_cond), ('topo_cond', topo_cond), ('y', y)]:
+#         if arr is not None and arr.shape[0] != x.shape[0]:
+#             raise ValueError(f'Batch size mismatch: x={x.shape[0]}, {name}={arr.shape[0]}')
     
-    # Estimate the score at the perturbed input x and the random time step t
-    score = model(perturbed_x, random_t, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
+#     # Estimate the score at the perturbed input x and the random time step t
+#     score = model(perturbed_x, random_t, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
     
-    # logger.info('[Loss fn] Score computed.')
+#     # logger.info('[Loss fn] Score computed.')
 
-    max_land_weight=1.0
-    min_sea_weight=0.5
-    if sdf_cond is not None:
-        sdf_weights = torch.sigmoid(sdf_cond) * (max_land_weight - min_sea_weight) + min_sea_weight
-        sdf_weights = sdf_weights.to(x.device)
-    else:
-        sdf_weights = torch.ones_like(x).to(x.device)
+#     max_land_weight=1.0
+#     min_sea_weight=0.5
+#     if sdf_cond is not None:
+#         sdf_weights = torch.sigmoid(sdf_cond) * (max_land_weight - min_sea_weight) + min_sea_weight
+#         sdf_weights = sdf_weights.to(x.device)
+#     else:
+#         sdf_weights = torch.ones_like(x).to(x.device)
     
     
-    # Compute the loss
-    loss = torch.mean(torch.sum(sdf_weights * (score * std[:, None, None, None] + z)**2, dim=(1, 2, 3)))
-    return loss
+#     # Compute the loss
+#     loss = torch.mean(torch.sum(sdf_weights * (score * std[:, None, None, None] + z)**2, dim=(1, 2, 3)))
+#     return loss
 
 

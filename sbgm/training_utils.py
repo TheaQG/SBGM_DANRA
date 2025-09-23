@@ -9,14 +9,17 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
+from functools import partial
 
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
-from sbgm.score_unet import ScoreNet, Encoder, Decoder, EDMPrecondUNet, marginal_prob_std_fn
+from sbgm.score_unet import ScoreNet, Encoder, Decoder, EDMPrecondUNet, marginal_prob_std
 from sbgm.losses import EDMLoss, DSMLoss
 from sbgm.utils import build_data_path, get_model_string
 from sbgm.variable_utils import get_units
 from sbgm.special_transforms import build_back_transforms_from_stats
 # from sbgm.evaluation.evaluation import evaluate_model
+
+
 
 # # Set up logging
 logger = logging.getLogger(__name__)
@@ -32,7 +35,7 @@ def _get(cfg, path, default=None):
         node = node[k]
     return node
 
-def get_loss_fn(cfg, marginal_prob_std_fn=None):
+def get_loss_fn(cfg, marginal_prob_std_fn_in=None):
     edm_cfg = cfg.get('edm', {})
 
     if bool(edm_cfg.get('enabled', False)):
@@ -49,6 +52,7 @@ def get_loss_fn(cfg, marginal_prob_std_fn=None):
         return EDMLoss(
                 P_mean=P_mean,
                 P_std=P_std,
+                sigma_data=sigma_data,
                 use_sdf_weight=use_sdf,
                 max_land_weight=max_land_w,
                 min_sea_weight=min_sea_w)
@@ -56,14 +60,16 @@ def get_loss_fn(cfg, marginal_prob_std_fn=None):
     # === DSM default branch ===
     ve_cfg = cfg.get('ve_dsm', {})
     t_eps = float(ve_cfg.get('t_eps', 1e-3))
-    if marginal_prob_std_fn is None:
+    mprob = marginal_prob_std_fn_in
+
+    if mprob is None:
         raise ValueError("marginal_prob_std_fn must be provided for VE-DSM loss.")
     
     use_sdf = bool(_get(cfg, 'stationary_conditions.geographic_conditions.sample_w_sdf', True))
     max_land_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.max_land_weight', 1.0))
     min_sea_w = float(_get(cfg, 'stationary_conditions.geographic_conditions.min_sea_weight', 0.5))
     return DSMLoss(
-                marginal_prob_std_fn=marginal_prob_std_fn,
+                marginal_prob_std_fn=mprob,
                 t_eps=t_eps,
                 use_sdf_weight=use_sdf,
                 max_land_weight=max_land_w,
@@ -104,7 +110,6 @@ def get_dataloader(cfg, verbose=True):
         lr_data_size_use = (lr_data_size_use[0] // cfg['lowres']['resize_factor'], lr_data_size_use[1] // cfg['lowres']['resize_factor'])
     else:
         hr_data_size_use = hr_data_size
-        lr_data_size_use = lr_data_size_use
     if verbose:
         logger.info(f"\n\nHigh-resolution data size: {hr_data_size_use}")
         if cfg['lowres']['resize_factor'] > 1:
@@ -140,6 +145,7 @@ def get_dataloader(cfg, verbose=True):
     crop_region_lr = cfg['lowres']['cutout_domains'] if cfg['lowres']['cutout_domains'] is not None else "full_region"
     crop_region_lr_str = '_'.join(map(str, crop_region_lr)) #if isinstance(crop_region_lr, (list, tuple)) else crop_region_lr
 
+    # NOTE: Maybe remove? Should be handled in dataset class
     back_transforms = build_back_transforms_from_stats(
                         hr_var              = cfg['highres']['variable'],
                         hr_model            = cfg['highres']['model'],
@@ -220,20 +226,6 @@ def get_dataloader(cfg, verbose=True):
     else:
         cache_size_train = cfg['data_handling']['cache_size']
         cache_size_valid = cfg['data_handling']['cache_size']
-
-    if verbose:
-        logger.info(f"\n\n\nNumber of training samples: {n_samples_train}")
-        logger.info(f"Number of validation samples: {n_samples_valid}")
-        logger.info(f"Cache size for training: {cache_size_train}")
-        logger.info(f"Cache size for validation: {cache_size_valid}\n\n\n")
-
-
-    # if cfg['data_handling']['cache_size'] == 0:
-    #     cache_size_train = n_samples_train//2
-    #     cache_size_valid = n_samples_valid//2
-    # else:
-    #     cache_size_train = cfg['data_handling']['cache_size']
-    #     cache_size_valid = cfg['data_handling']['cache_size']
 
     if verbose:
         logger.info(f"\n\n\nNumber of training samples: {n_samples_train}")
@@ -343,46 +335,45 @@ def get_dataloader(cfg, verbose=True):
                             resize_factor=cfg['lowres']['resize_factor'],
                             )
     # Setup dataloaders
-    raw_workers = cfg['data_handling']['num_workers'] 
-    try:
-        num_workers = int(raw_workers) if raw_workers is not None else 0
-    except ValueError:
-        # Fallback: treat non-numeric as 0 workers
-        num_workers = 0
-    logger.info(f"Number of workers set to: {num_workers} (raw input was: {raw_workers})")
+    raw_workers = int(cfg['data_handling'].get('num_workers', 0) or 0)
+    pin = bool(cfg['data_handling'].get('pin_memory', torch.cuda.is_available())) and torch.cuda.is_available()
+    persist = raw_workers > 0
 
-    # Check if pin_memory is set in the config, default to False if not
-    pin_memory = torch.cuda.is_available() and cfg['data_handling']['pin_memory'] if 'pin_memory' in cfg['data_handling'] else False
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size              = cfg['training']['batch_size'],
-        shuffle                 = True,
-        num_workers             = int(cfg['data_handling']['num_workers']),#num_workers,
-        pin_memory              = torch.cuda.is_available(), #pin_memory,
-        persistent_workers      = True, #num_workers > 0, # keeps workers alive between epochs
-        prefetch_factor         = 4, # Each worker preloads 4 batches
-        drop_last               = True # Better for BatchNorm / GroupNorm
+    train_kwargs = dict(
+        batch_size=int(cfg['training']['batch_size']),
+        shuffle=True,
+        num_workers=int(raw_workers),
+        pin_memory=bool(pin),
+        persistent_workers=bool(persist),
+        drop_last=True)
+    
+    if persist:
+        train_kwargs['prefetch_factor'] = 4  # Each worker preloads 4 batches
 
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size              = cfg['training']['batch_size'],
-        shuffle                 = False,
-        num_workers             = int(cfg['data_handling']['num_workers']),#max(2, num_workers // 4),
-        pin_memory              = torch.cuda.is_available(), #pin_memory,
-        persistent_workers      = True, #num_workers > 0, # keeps workers alive between epochs
-        prefetch_factor         = 2, # Each worker preloads 2 batches
-        drop_last               = (len(val_dataset) % cfg['training']['batch_size']) != 0
-    )
+    train_loader = DataLoader(train_dataset, **train_kwargs)
+
+
+    val_kwargs = dict(
+        batch_size=int(cfg['training']['batch_size']),
+        shuffle=False,
+        num_workers=int(raw_workers),
+        pin_memory=bool(pin),
+        persistent_workers=bool(persist),
+        drop_last=(len(val_dataset) % cfg['training']['batch_size']) != 0)
+    
+    if persist:
+        val_kwargs['prefetch_factor'] = 2  # Each worker preloads 2 batches
+    val_loader = DataLoader(val_dataset, **val_kwargs)
+
+
+    gen_bs = int(cfg['data_handling']['n_gen_samples'])
     gen_loader = DataLoader(
         gen_dataset,
-        batch_size              = cfg['data_handling']['n_gen_samples'], # Generation dataset uses a fixed batch size based on n samples to generate
+        batch_size              = gen_bs,
         shuffle                 = False,
         num_workers             = 0, #max(2, num_workers // 4),
-        # pin_memory              = pin_memory,
-        # persistent_workers      = num_workers > 0,
-        drop_last               = (len(gen_dataset) % cfg['training']['batch_size']) != 0,
-    )
+        drop_last               = (len(gen_dataset) % gen_bs) != 0,)
+
 
     # Print dataset information
     # if verbose:
@@ -465,6 +456,7 @@ def get_gen_dataloader(cfg, verbose=True):
     crop_region_lr = cfg['lowres']['cutout_domains'] if cfg['lowres']['cutout_domains'] is not None else "full_region"
     crop_region_lr_str = '_'.join(map(str, crop_region_lr)) #if isinstance(crop_region_lr, (list, tuple)) else crop_region_lr
 
+    # NOTE: Maybe remove? Should be handled in dataset class
     back_transforms = build_back_transforms_from_stats(
                         hr_var              = cfg['highres']['variable'],
                         hr_model            = cfg['highres']['model'],
@@ -567,21 +559,13 @@ def get_gen_dataloader(cfg, verbose=True):
                             resize_factor=cfg['lowres']['resize_factor'],
                             )
     # Setup dataloaders
-    raw_workers = cfg['data_handling']['num_workers'] 
-    try:
-        num_workers = int(raw_workers) if raw_workers is not None else 0
-    except ValueError:
-        # Fallback: treat non-numeric as 0 workers
-        num_workers = 0
-
+    gen_bs = int(cfg['data_handling']['n_gen_samples'])
     gen_loader = DataLoader(
         gen_dataset,
-        batch_size              = cfg['evaluation']['batch_size'],
+        batch_size              = gen_bs,
         shuffle                 = False,
-        num_workers             = 0, #max(2, num_workers // 4),
-        # pin_memory              = pin_memory,
-        # persistent_workers      = num_workers > 0,
-        drop_last               = (len(gen_dataset) % cfg['training']['batch_size']) != 0,
+        num_workers             = 0, 
+        drop_last               = (len(gen_dataset) % gen_bs) != 0,
     )
 
     # Print dataset information
@@ -593,12 +577,21 @@ def get_gen_dataloader(cfg, verbose=True):
 
 
 def infer_in_channels(cfg: dict) -> int:
+    # TODO: Should be more general - e.g. if multiple LR conds with different channels (HR/LR scaling), multiple geo channels (mask+value)
     # low-res conditions
     n_lr = len(cfg['lowres']['condition_variables']) if cfg['lowres']['condition_variables'] is not None else 0
-    # geo maps (value + mask)
+
+    if cfg['lowres']['dual_lr']:
+        n_lr += 1 # Add one channel for the dual-res mask
+
     n_geo = 0
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']:
-        n_geo = 2 * len(cfg["stationary_conditions"]["geographic_conditions"]["geo_variables"])
+        geo_variables = cfg["stationary_conditions"]["geographic_conditions"]["geo_variables"]
+        # If using mask in classifier, double the number of geo channels (mask + value)
+        if cfg['stationary_conditions']['geographic_conditions']['with_mask']:
+            n_geo = 2 * len(geo_variables)
+        else:
+            n_geo = len(geo_variables)
     return n_lr + n_geo
 
 def get_model(cfg):
@@ -680,7 +673,9 @@ def get_model(cfg):
                                      predict_residual=predict_residual).to(device)
         
     else:
-        score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn,
+        sigma = float(cfg.get('ve_dsm', {}).get('sigma', 25.0))
+        mprob = partial(marginal_prob_std, sigma=sigma)
+        score_model = ScoreNet(marginal_prob_std=mprob,
                             encoder=encoder,
                             decoder=decoder,
                             debug_pre_sigma_div=False
@@ -720,13 +715,6 @@ def get_optimizer(cfg, model):
     
     return optimizer
 
-def get_loss(cfg):
-    '''
-        Get the loss function based on the configuration.
-    '''
-
-    
-    return
 
 def get_scheduler(cfg, optimizer):
     '''
@@ -757,7 +745,7 @@ def get_scheduler(cfg, optimizer):
         scheduler = None
         logger.warning("No learning rate scheduler specified. Using the optimizer's default learning rate.")
     else:
-        raise ValueError(f"Scheduler {lr_scheduler_type} not recognized. Use 'step', 'reduce_on_plateau', or 'cosine_annealing'.")
+        raise ValueError(f"Scheduler {lr_scheduler_type} not recognized. Use 'Step', 'ReduceLROnPlateau', or 'CosineAnnealing'.")
 
     return scheduler
 
@@ -811,10 +799,10 @@ def apply_cfg_dropout(
             }
 
     Returns:
-        Tuple[cond_images, lsm, topo, seasons] with per-sample drops applied.
+        Tuple[cond_images, lsm, topo, seasons, lr_ups] with per-sample drops applied.
     """
     if not cfg_guidance or not cfg_guidance.get('enabled', False):
-        return cond_images, lsm, topo, seasons
+        return cond_images, lsm, topo, seasons, lr_ups # Always return 5 
     
     # Resolve per-group drop probabilities
     p_cond = float(cfg_guidance.get('drop_prob_lr', 0.1))
@@ -853,7 +841,9 @@ def apply_cfg_dropout(
         m = _expand_mask(mask_cond, cond_images)
         # Zero is a sensible "null" for continuous LR channels
         cond_images = torch.where(m, torch.zeros_like(cond_images), cond_images)
-    if lr_ups is not None:
+    
+    predict_residual = bool(cfg_guidance.get('predict_residual', False))
+    if lr_ups is not None and not predict_residual:
         m = _expand_mask(mask_cond, lr_ups)
         lr_ups = torch.where(m, torch.zeros_like(lr_ups), lr_ups)
 
@@ -888,82 +878,3 @@ def apply_cfg_dropout(
 
     return cond_images, lsm, topo, seasons, lr_ups
 
-
-
-
-
-
-
-
-
-
-
-def apply_condition_dropout(cond_images, lsm, topo, seasons, cfg, *, predict_residual=False):
-    """
-        NOTE: NOT IMPLEMENTED IN CURRENT TRAINING
-        Classifier-free guidance for each channel of the low-res conditions.
-        Helpful, as long as:
-        - Keep geo/static channels
-        - Keep residual baseline channel (if residual training)
-        - Enforce "at least one meteo channel kept" when not unconditional
-        - Drop the normalization mean
-    """
-    if cond_images is None:
-        return cond_images, lsm, topo, seasons
-
-    B, C, H, W = cond_images.shape
-    device = cond_images.device
-    lr_vars = cfg['lowres']['condition_variables']
-    target_var = cfg['highres']['variable']
-
-    # probs
-    p_uncond = float(cfg.get('classifier_free_guidance', {}).get('p_uncond', 0.15))
-    p_ch     = float(cfg.get('classifier_free_guidance', {}).get('p_channel', 0.10))
-    p_geo    = float(cfg.get('classifier_free_guidance', {}).get('p_geo', 0.02))
-
-    # masks
-    m_uncond = (torch.rand(B, device=device) < p_uncond)        # [B]
-    keep_ch  = (torch.rand(B, C, device=device) >= p_ch)        # [B, C]
-
-    # geo indices (don’t drop, or drop with tiny prob)
-    geo_idx = [i for i, v in enumerate(lr_vars) if v in ('lsm', 'topo', 'slope')]
-    if len(geo_idx) > 0:
-        # override with much lower drop prob
-        keep_geo = (torch.rand(B, len(geo_idx), device=device) >= p_geo)
-        keep_ch[:, torch.as_tensor(geo_idx, device=device)] = keep_geo
-
-    # don't drop baseline channel for residual training
-    if predict_residual and (target_var in lr_vars):
-        base_idx = lr_vars.index(target_var)
-        keep_ch[:, base_idx] = True
-
-    # ensure at least one meteo channel is kept when not unconditional
-    meteo_idx = [i for i, v in enumerate(lr_vars) if v not in ('lsm', 'topo', 'slope')]
-    if len(meteo_idx) > 0:
-        k = torch.as_tensor(meteo_idx, device=device)
-        none_kept = (~keep_ch[:, k]).all(dim=1) & (~m_uncond)  # [B]
-        if none_kept.any():
-            # randomly turn one meteo channel back on for those samples
-            rnd_choice = torch.randint(low=0, high=len(meteo_idx), size=(none_kept.sum().item(),), device=device) # type: ignore
-            keep_ch[none_kept, k[rnd_choice]] = True
-
-    # unconditional samples: drop everything (+ null season label if you use it for CFG)
-    keep_ch[m_uncond] = False
-    if seasons is not None:
-        # null class 0 convention for CFG; adapt if you use another scheme
-        seasons = torch.where(m_uncond, torch.zeros_like(seasons), seasons)
-
-    # neutral fill (0 is the mean in z-score/[-1,1] schemes)
-    neutral = 0.0
-    mask_bc11 = keep_ch[:, :, None, None]  # [B,C,1,1]
-    cond_images = cond_images * mask_bc11 + neutral * (~mask_bc11)
-
-    # geo maps (if provided) – usually keep them; if you really want to drop, mirror p_geo
-    if lsm is not None and p_geo > 0.0:
-        keep_lsm = (torch.rand(B, device=device) >= p_geo).view(B, 1, 1, 1)
-        lsm = lsm * keep_lsm + neutral * (~keep_lsm)
-    if topo is not None and p_geo > 0.0:
-        keep_topo = (torch.rand(B, device=device) >= p_geo).view(B, 1, 1, 1)
-        topo = topo * keep_topo + neutral * (~keep_topo)
-
-    return cond_images, lsm, topo, seasons

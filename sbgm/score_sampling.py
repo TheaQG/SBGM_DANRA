@@ -9,11 +9,6 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def edm_sigma_schedule(n_steps, sigma_min=0.002, sigma_max=80, rho=7.0, device='cuda'):
-  i = torch.linspace(0, 1, n_steps, device=device)
-  sigmas = (sigma_max**(1 / rho) + i * (sigma_min**(1 / rho) - sigma_max**(1 / rho)))**rho
-  return sigmas
-
 # === EDM sampler (Karras et al., 2022) ===
 @torch.no_grad()
 def edm_sampler(score_model,
@@ -42,10 +37,18 @@ def edm_sampler(score_model,
       Expects score_model(x_t, sigma, cond_img=..., lsm_cond=..., topo_cond=..., y=..., lr_ups=...) -> x0_hat.
       Returns a tensor shaped like the model outputs (i.e. a sample batch, shape (B, C, H, W)).
   """
+  # Move all conditional tensors to the correct device
+  def to_dev(t): return None if t is None else t.to(device)
+  cond_img, lsm_cond, topo_cond, y, lr_ups = map(to_dev, (cond_img, lsm_cond, topo_cond, y, lr_ups))
   
-  cfg_enabled = bool(cfg_guidance is not None and getattr(cfg_guidance, 'get', None) is not None and cfg_guidance.get('enabled', False))
-  base_scale = float(cfg_guidance['guidance_scale'] if isinstance(cfg_guidance, dict) and 'guidance_scale' in cfg_guidance else 0.0) if cfg_enabled else 0.0
-  null_label_id = int(cfg_guidance['null_label_id'] if isinstance(cfg_guidance, dict) and 'null_label_id' in cfg_guidance else 0) if cfg_enabled else 0
+  if isinstance(cfg_guidance, dict) and cfg_guidance.get('enabled', False):
+    cfg_enabled = True
+    base_scale = float(cfg_guidance.get('guidance_scale', 0.0))
+    null_label_id = int(cfg_guidance.get('null_label_id', 0))
+  else:
+    cfg_enabled = False
+    base_scale = 0.0
+    null_label_id = 0
 
   device = torch.device(device)
 
@@ -73,7 +76,7 @@ def edm_sampler(score_model,
       H = W = int(img_size)
 
   # Infer channels from model if possible
-  C_out = getattr(getattr(score_model, 'decoder', None), 'out_channels', None)
+  C_out = getattr(getattr(score_model, 'decoder', None), 'output_channels', None)
   if C_out is None:
     # Fallback: assume single-channel output
     C_out = 1
@@ -90,7 +93,8 @@ def edm_sampler(score_model,
   null_lsm = torch.zeros_like(lsm_cond) if (cfg_enabled and lsm_cond is not None) else None
   null_topo = torch.zeros_like(topo_cond) if (cfg_enabled and topo_cond is not None) else None
   null_y = torch.full_like(y, null_label_id) if (cfg_enabled and y is not None) else None
-  null_lr_ups = torch.zeros_like(lr_ups) if (cfg_enabled and lr_ups is not None) else None
+  # null_lr_ups = torch.zeros_like(lr_ups) if (cfg_enabled and lr_ups is not None) else None
+  null_lr_ups = lr_ups if (cfg_enabled and lr_ups is not None) else None # Use actual lr_ups for unconditional branch, to keep baseline info
   
   def _denoise_with_cfg(x_in, sigma_vec):
     if cfg_enabled and base_scale > 0.0:
@@ -168,6 +172,35 @@ def edm_sampler(score_model,
     x = x_in + (sigma_next - sigma_hat) * 0.5 * (d + d_next)
   
   return x
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def guided_score_fn(score_model,
@@ -254,8 +287,7 @@ def Euler_Maruyama_sampler(score_model,
     Samples.    
   """
   t = torch.ones(batch_size, device=device)
-  init_x = torch.randn(batch_size, 1, 32, 32, device=device) \
-    * marginal_prob_std(t)[:, None, None, None]
+  init_x = torch.randn(batch_size, 1, img_size, img_size, device=device) * marginal_prob_std(t)[:, None, None, None]
   time_steps = torch.linspace(1., eps, num_steps, device=device)
   step_size = time_steps[0] - time_steps[1]
   x = init_x
@@ -363,7 +395,8 @@ def pc_sampler(score_model,
       grad = score                                                                                       
       grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
       noise_norm = np.sqrt(np.prod(x.shape[1:]))
-      langevin_step_size = 2 * (snr * noise_norm / grad_norm)**2
+      eps_norm = 1e-12
+      langevin_step_size = 2 * (snr * noise_norm / (grad_norm + eps_norm))**2
       x = x + langevin_step_size * grad + torch.sqrt(2 * langevin_step_size) * torch.randn_like(x)      
 
       # Predictor step (Euler-Maruyama)
