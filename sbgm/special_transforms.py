@@ -12,15 +12,20 @@ import logging
 import os
 import json
 from typing import Optional, List, Dict
+from dataclasses import dataclass
 # Set up logging
 logger = logging.getLogger(__name__)
 
+
+EPS = 1e-8 # Small epsilon to avoid division by zero in Z-score and Scale transforms
 
 # Make a function to compute transformations from stats dict
 def transform_from_stats(data, 
                             transform_type: str,
                             cfg,
-                            stats: dict):
+                            stats: dict,
+                            eps=0.01
+                            ):
     """
         Build transformations from stats dict
     """
@@ -39,7 +44,8 @@ def transform_from_stats(data,
                                     glob_std_log=stats["log_std"],
                                     glob_min_log=stats["log_min"],
                                     glob_max_log=stats["log_max"],
-                                    buffer_frac=cfg.get("data", {}).get("buffer_frac", 0.5))
+                                    buffer_frac=cfg.get("data", {}).get("buffer_frac", 0.0),
+                                    eps=eps)
         data_transformed = transform(data)
     else:
         raise ValueError(f"Unknown transform type: {transform_type}")
@@ -60,7 +66,8 @@ def build_back_transforms_from_stats(hr_var: str,
                                      lr_scaling_methods: List[str],
                                      lr_buffer_frac: float, # Maybe should be a list to allow different buffers for different variables
                                      split: str,
-                                     stats_dir_root: str) -> Dict[str, object]:
+                                     stats_dir_root: str,
+                                     eps: float = 0.01) -> Dict[str, object]:
     """
         Build inverse transforms (back-transforms) for HR and LR variables using
         saved global statistics (no manual input of stats needed).
@@ -78,7 +85,8 @@ def build_back_transforms_from_stats(hr_var: str,
                                           scaling_split=split,
                                           transform_type=hr_scaling_method,
                                           buffer_frac=hr_buffer_frac,
-                                          stats_file_path=stats_dir_root
+                                          stats_file_path=stats_dir_root,
+                                          eps=eps
                                           )
     bt[f"{hr_var}_hr"] = inv_hr
     bt["generated"] = inv_hr  # 'generated' images are in the same space as the HR target
@@ -92,7 +100,8 @@ def build_back_transforms_from_stats(hr_var: str,
                                               scaling_split=split,
                                               transform_type=mth,
                                               buffer_frac=lr_buffer_frac,
-                                              stats_file_path=stats_dir_root
+                                              stats_file_path=stats_dir_root,
+                                              eps=eps
                                               )
         bt[f"{cond}_lr"] = inv_lr
 
@@ -129,7 +138,8 @@ def get_transforms_from_stats(variable: str,
                                 buffer_frac: float,
                                 stats: Optional[dict] = None,
                                 stats_file_path: str = '',
-                                verbose=False
+                                verbose=False,
+                                eps=0.01
                                 ):
     """
         Build transformations from stats, either given stats or given file path
@@ -162,7 +172,8 @@ def get_transforms_from_stats(variable: str,
                                 glob_std_log=stats["log_std"],
                                 glob_min_log=stats["log_min"],
                                 glob_max_log=stats["log_max"],
-                                buffer_frac=buffer_frac
+                                buffer_frac=buffer_frac,
+                                eps=eps
                                 )
     else:
         raise ValueError(f"Unknown transform type: {transform_type}")
@@ -176,7 +187,8 @@ def get_backtransforms_from_stats(variable: str,
                                   buffer_frac: float,
                                   stats: Optional[dict] = None,
                                   stats_file_path: str = '',
-                                  verbose=False
+                                  verbose=False,
+                                  eps=0.01
                                   ):
     """
         Build backtransformations from stats, either given stats or given file path
@@ -212,6 +224,7 @@ def get_backtransforms_from_stats(variable: str,
                                 buffer_frac=buffer_frac,
                                 clamp_log_min=stats["log_min"], # Optionally clamp to the observed log-min and log-max
                                 clamp_log_max=stats["log_max"], # Optionally clamp to the observed log-min and log-max
+                                eps=eps
                                 )
     else:
         raise ValueError(f"Unknown transform type: {transform_type}")
@@ -253,6 +266,11 @@ class Scale(object):
         '''
         data = sample
         OldRange = (self.data_max_in - self.data_min_in)
+        # Guard range
+        if not torch.is_tensor(OldRange):
+            OldRange = torch.tensor(OldRange, dtype=torch.float32, device=data.device)
+        # Make sure OldRange is not zero
+        OldRange = torch.clamp(OldRange, min=EPS) # Avoid division by zero # type: ignore
         NewRange = (self.in_high - self.in_low)
 
         # Generating the new data based on the given intervals
@@ -291,6 +309,10 @@ class ScaleBackTransform(object):
         '''
         data = sample
         OldRange = (self.in_high - self.in_low)
+        # Guard range
+        if not torch.is_tensor(OldRange):
+            OldRange = torch.tensor(OldRange, dtype=torch.float32, device=data.device if torch.is_tensor(data) else 'cpu')
+        OldRange = torch.clamp(OldRange, min=EPS) # Avoid division by zero # type: ignore
         NewRange = (self.data_max_in - self.data_min_in)
 
         # Back-transforming the data
@@ -307,7 +329,7 @@ class ZScoreTransform(object):
     The data is standardized to have a mean of 0 and a standard deviation of 1.
     The mean and standard deviation of the training data should be provided.
     '''
-    def __init__(self, mean, std):
+    def __init__(self, mean, std, eps=1e-8):
         '''
         Initialize the class.
         Input:
@@ -316,6 +338,7 @@ class ZScoreTransform(object):
         '''
         self.mean = mean
         self.std = std
+        self.eps = eps # Make sure eps is the same as in ZScoreBackTransform
 
     def __call__(self, sample):
         '''
@@ -340,7 +363,7 @@ class ZScoreTransform(object):
                 self.std = self.std.unsqueeze(0)
 
         # Standardizing the sample
-        standardized_sample = (sample - self.mean) / (self.std + 1e-8)  # Add a small epsilon to avoid division by zero
+        standardized_sample = (sample - self.mean) / (self.std + self.eps)  # Add a small epsilon to avoid division by zero
 
         return standardized_sample
     
@@ -350,7 +373,7 @@ class ZScoreBackTransform(object):
     Class for back-transforming the Z-score standardized data.
     The data is back-transformed to the original distribution with mean and standard deviation.
     '''
-    def __init__(self, mean, std):
+    def __init__(self, mean, std, eps=1e-8):
         '''
         Initialize the class.
         Input:
@@ -359,6 +382,7 @@ class ZScoreBackTransform(object):
         '''
         self.mean = mean
         self.std = std
+        self.eps = eps # Make sure eps is the same as in ZScoreTransform
 
     def __call__(self, sample):
         '''
@@ -382,14 +406,12 @@ class ZScoreBackTransform(object):
                 self.mean = self.mean.unsqueeze(0)
                 self.std = self.std.unsqueeze(0)
 
-        # Set the epsilon, and send to same device and type
-        eps = 1e-8
         # Make sure mean and std are on same device as sample
         self.mean = self.mean.to(sample.device)
         self.std = self.std.to(sample.device)
 
         # Back-transforming the sample
-        back_transformed_sample = (sample * (self.std + eps)) + self.mean  # Add a small epsilon to avoid division by zero
+        back_transformed_sample = (sample * (self.std + self.eps)) + self.mean  # Add a small epsilon to avoid division by zero
 
         return back_transformed_sample
     
@@ -404,13 +426,13 @@ class PrcpLogTransform(object):
     eps should not be too small, as it can lead to numerical issues and affect the distribution of low values.
     '''
     def __init__(self,
-                 eps=0.01, # Small epsilon to avoid log(0) - chosen based on physical precipitation considerations
+                 eps=0.01, # Small epsilon to avoid log(0) - chosen based on physical precipitation considerations. NOTE: Should be same as in PrcpLogBackTransform
                  scale_type='log_zscore', # 'log_zscore', 'log_01', 'log_minus1_1', 'log', 
                  glob_mean_log=None,
                  glob_std_log=None,
                  glob_min_log=None,
                  glob_max_log=None,
-                 buffer_frac=0.5,
+                 buffer_frac=0.0,
                  ):
         '''
         Initialize the class.
@@ -455,11 +477,14 @@ class PrcpLogTransform(object):
         '''
         if not isinstance(sample, torch.Tensor):
             sample = torch.tensor(sample, dtype=torch.float32)  # Ensure the input is a Tensor
+        
+        # Clamp negative values to zero
+        sample = torch.clamp(sample, min=0.0)
 
         # Log-transform the sample
         log_sample = torch.log(sample + self.eps) # Add a small epsilon to avoid log(0)
 
-        # Scale the log-transformed data to [0,1]ß
+        # Scale the log-transformed data to [0,1]
         if self.scale_type == 'log_01':
             if (self.glob_min_log is None) or (self.glob_max_log is None):
                 # If the min and max log values are not provided, find them in the data
@@ -469,9 +494,9 @@ class PrcpLogTransform(object):
             
             # Shift and scale to [0, 1]: (log_sample - glob_min_log) / (glob_max_log - glob_min_log)
             denom = (self.glob_max_log - self.glob_min_log)
-            # If denominator is zero, raise an error
-            if denom == 0:
-                raise ValueError("The log-range of data is zero. Cannot scale to [0, 1]. Please check the data.")
+            # Clamp denominator to avoid division by zero
+            denom = torch.clamp(denom, min=EPS) # Avoid division by zero # type: ignore
+
             log_sample = (log_sample - self.glob_min_log) / (denom)
         
         # Scale the log-transformed data to have mean 0 and std 1
@@ -479,18 +504,26 @@ class PrcpLogTransform(object):
             # Standardize the log-transformed data
             mu = self.glob_mean_log
             sigma = self.glob_std_log
+            # Make sure sigma is not zero (and torch tensor for broadcasting)
+            sigma = torch.as_tensor(sigma, dtype=torch.float32, device=log_sample.device)
+            sigma = torch.clamp(sigma, min=EPS) # Avoid division by zero #
 
             if mu is None or sigma is None:
                 raise ValueError("Global mean and standard deviation must not be None for 'log_zscore' scaling.")
+            
+            log_sample = (log_sample - mu) / (sigma)  
 
-            log_sample = (log_sample - mu) / (sigma + 1e-8)  
-            # logger.debug(f"Min log in sample (zscore): {torch.min(log_sample)}")
-            # logger.debug(f"Max log in sample (zscore): {torch.max(log_sample)}")
         elif self.scale_type == 'log_minus1_1':
-            # Scale the log-transformed data to [-1, 1]
             if self.glob_min_log is None or self.glob_max_log is None:
                 raise ValueError("Min and max log values must not be None for 'log_minus1_1' scaling.")
-            log_sample = 2 * ((log_sample - self.glob_min_log) / (self.glob_max_log - self.glob_min_log)) - 1
+            
+            # Scale the log-transformed data to [-1, 1]
+            denom = (self.glob_max_log - self.glob_min_log)
+            denom = torch.as_tensor(denom, dtype=torch.float32, device=log_sample.device)
+            # Clamp denominator to avoid division by zero
+            denom = torch.clamp(denom, min=EPS) # Avoid division by zero 
+            
+            log_sample = 2 * ((log_sample - self.glob_min_log) / denom) - 1
 
         elif self.scale_type == 'log':
             pass
@@ -512,9 +545,10 @@ class PrcpLogBackTransform(object):
                  glob_std_log=None,
                  glob_min_log=None,
                  glob_max_log=None,
-                 buffer_frac=0.5,
+                 buffer_frac=0.0,
                  clamp_log_min=None,
                  clamp_log_max=None,
+                 eps=0.01, # Small epsilon to avoid log(0) - chosen based on physical precipitation considerations NOTE: Should be same as in PrcpLogTransform
                  verbose=False,
                 #  **kwargs # Swallow any unused keys
                  ):
@@ -531,6 +565,7 @@ class PrcpLogBackTransform(object):
         self.buffer_frac = buffer_frac
         self.clamp_log_min = clamp_log_min
         self.clamp_log_max = clamp_log_max
+        self.eps = eps
 
         self.hi = float("inf") if self.clamp_log_max is None else float(self.clamp_log_max)
         self.lo = -float("inf") if self.clamp_log_min is None else float(self.clamp_log_min)
@@ -540,8 +575,8 @@ class PrcpLogBackTransform(object):
             if verbose:
                 logger.info(f'Extended log range from [{self.glob_min_log}, {self.glob_max_log}]')
             log_range = self.glob_max_log - self.glob_min_log
-            self.glob_min_log = self.glob_min_log - (self.buffer_frac/2) * log_range
-            self.glob_max_log = self.glob_max_log + (self.buffer_frac/2) * log_range
+            self.glob_min_log = self.glob_min_log - (self.buffer_frac) * log_range
+            self.glob_max_log = self.glob_max_log + (self.buffer_frac) * log_range
             if verbose:
                 logger.info(f'to [{self.glob_min_log}, {self.glob_max_log}]\n')
 
@@ -572,46 +607,48 @@ class PrcpLogBackTransform(object):
             sample = torch.tensor(sample, dtype=torch.float32)  # Ensure the input is a Tensor
 
         if self.scale_type == 'log_01':
-            # Back-transform the data to log-space
-            log_sample = sample
             # Ensure min and max log values are not None
             if self.glob_max_log is None or self.glob_min_log is None:
                 raise ValueError("glob_max_log and glob_min_log must not be None for 'log_01' back-transform.")
-            # Scale the log-transformed data back to the original range
-            back_transformed_sample = log_sample * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
-            # Inverse log-transform the data
-            back_transformed_sample = torch.clamp(back_transformed_sample, self.lo, self.hi)
-            back_transformed_sample = torch.exp(back_transformed_sample)
+            
+            log_sample = sample * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
+        
         elif self.scale_type == 'log_zscore':
-            # Back-transform the data to log-space
-            mu = self.glob_mean_log
-            sigma = self.glob_std_log
+            sigma = torch.as_tensor(self.glob_std_log, dtype=sample.dtype, device=sample.device)
+            sigma = torch.clamp(sigma, min=EPS) # Avoid division by zero # type: ignore
+            mu = torch.as_tensor(self.glob_mean_log, dtype=sample.dtype, device=sample.device)
             if mu is None or sigma is None:
                 raise ValueError("Global mean and standard deviation must not be None for 'log_zscore' back-transform.")
-            log_sample = (sample * (sigma + 1e-8)) + mu
-            # Inverse log-transform the data
-            back_transformed_sample = torch.clamp(log_sample, self.lo, self.hi)
-            back_transformed_sample = torch.exp(back_transformed_sample)
+            
+            log_sample = (sample * (sigma)) + mu
+
         elif self.scale_type == 'log_minus1_1':
-            # Back-transform the data to log-space
             if self.glob_max_log is None or self.glob_min_log is None:
                 raise ValueError("glob_max_log and glob_min_log must not be None for 'log_minus1_1' back-transform.")
+            
             log_sample = 0.5 * (sample + 1) * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
-            # Inverse log-transform the data
-            log_sample = torch.clamp(log_sample, self.lo, self.hi)
-            back_transformed_sample = torch.exp(log_sample)
+
         elif self.scale_type == 'log':
-            sample = torch.clamp(sample, self.lo, self.hi)
-            back_transformed_sample = torch.exp(sample)
+            
+            log_sample = sample
+
         else:
             raise ValueError("Invalid scale type. Please choose from ['log_01', 'log_zscore', 'log_minus1_1', 'log'].")
+        
+        # Clamp in log-space to keep exp stable
+        hi = float("inf") if self.clamp_log_max is None else float(self.clamp_log_max)
+        lo = -float("inf") if self.clamp_log_min is None else float(self.clamp_log_min)
+        log_sample = torch.clamp(log_sample, lo, hi)
 
-        return back_transformed_sample
+        out = torch.exp(log_sample) - self.eps
+        # Make sure we never go negative due to -eps shift
+        out = torch.clamp(out, min=0.0)
+        return out
 
 
 def build_back_transforms(hr_var,
                           hr_scaling_method, hr_scaling_params,
-                          lr_vars, lr_scaling_methods, lr_scaling_params):
+                          lr_vars, lr_scaling_methods, lr_scaling_params, eps=0.01):
     """
     Returns a dict that maps plot-keys (e.g. 'prcp_hr', 'prcp_lr', 'generated')
     to callable inverse-transform objects.
@@ -629,6 +666,7 @@ def build_back_transforms(hr_var,
                                 buffer_frac=hr_scaling_params["buffer_frac"],
                                 clamp_log_min=hr_scaling_params.get("clamp_log_min", None),
                                 clamp_log_max=hr_scaling_params.get("clamp_log_max", None),
+                                eps=eps
                                 )
     elif hr_scaling_method == "zscore":
         inv = ZScoreBackTransform(hr_scaling_params["glob_mean"],
@@ -656,6 +694,7 @@ def build_back_transforms(hr_var,
                                            buffer_frac=prm["buffer_frac"],
                                            clamp_log_min=prm.get("clamp_log_min", None),
                                            clamp_log_max=prm.get("clamp_log_max", None),
+                                             eps=eps
                                            )
         elif mth == "zscore":
             bt[key] = ZScoreBackTransform(prm["glob_mean"], prm["glob_std"])
@@ -667,3 +706,121 @@ def build_back_transforms(hr_var,
     return bt
 
 
+
+# === Remap helpers between different scalings ===
+
+@torch.no_grad()
+def remap_between_scalings_from_stats(
+    x_norm: torch.Tensor,
+    *,
+    src_variable: str,
+    src_model: str,
+    src_domain_str: str,
+    src_crop_region_str: str,
+    src_split: str,
+    src_scaling_method: str,
+    src_buffer_frac: float,
+    src_stats_dir_root: str,
+
+    dst_variable: str,
+    dst_model: str,
+    dst_domain_str: str,
+    dst_crop_region_str: str,
+    dst_split: str,
+    dst_scaling_method: str,
+    dst_buffer_frac: float,
+    dst_stats_dir_root: str,
+
+    eps: float = 0.01
+) -> torch.Tensor:
+    """
+        Remap 'x_norm' that is normalized with 'src' stats/method into the space normalized with the *destination* stats/method, by changing:
+            x_norm --(src back-transform)--> x_phys --(dst forward-transform)--> x_dst_norm
+
+        Uses existing get_backtransforms_from_stats(), src, and get_transforms_from_stats(), dst, functions to load the necessary transforms.
+    """
+    # 1) src normalized -> physical space  
+    inv_src = get_backtransforms_from_stats(
+        variable=src_variable,
+        model=src_model,
+        domain_str=src_domain_str,
+        crop_region_str=src_crop_region_str,
+        scaling_split=src_split,
+        transform_type=src_scaling_method,
+        buffer_frac=src_buffer_frac,
+        stats_file_path=src_stats_dir_root,
+        eps=eps
+    )
+    x_phys = inv_src(x_norm)
+
+    # 2) Physical -> dst normalized space
+    fwd_dst = get_transforms_from_stats(
+        variable=dst_variable,
+        model=dst_model,
+        domain_str=dst_domain_str,
+        crop_region_str=dst_crop_region_str,
+        scaling_split=dst_split,
+        transform_type=dst_scaling_method,
+        buffer_frac=dst_buffer_frac,
+        stats_file_path=dst_stats_dir_root,
+        eps=eps
+    )
+    x_dst_norm = fwd_dst(x_phys)
+
+    return x_dst_norm
+
+@torch.no_grad()
+def lr_baseline_to_hr_zspace(
+    lr_chan_norm: torch.Tensor,
+    *,
+    # LR meta
+    lr_variable: str,
+    lr_model: str,
+    lr_domain_str: str,
+    lr_crop_region_str: str,
+    lr_split: str,
+    lr_scaling_method: str,
+    lr_buffer_frac: float,
+    lr_stats_dir_root: str,
+    # HR meta
+    hr_variable: str,
+    hr_model: str,
+    hr_domain_str: str,
+    hr_crop_region_str: str,
+    hr_split: str,
+    hr_buffer_frac: float,
+    hr_stats_dir_root: str,
+    hr_scaling_method: str = "log_zscore",
+
+    eps: float = 0.01
+) -> torch.Tensor:
+    """
+        Convenience for EDM residuals: take the LR baseline channel (already normalized with LR stats)
+        and map it into the HR targeto's normalized space.
+
+        Typical use:
+            lr_ups_baseline_hrZ = lr_baseline_to_hr_zspace(lr_ups_baseline, ...meta from cfg...)
+
+    """
+    return remap_between_scalings_from_stats(
+        lr_chan_norm,
+        src_variable=lr_variable,
+        src_model=lr_model,
+        src_domain_str=lr_domain_str,
+        src_crop_region_str=lr_crop_region_str,
+        src_split=lr_split,
+        src_scaling_method=lr_scaling_method,
+        src_buffer_frac=lr_buffer_frac,
+        src_stats_dir_root=lr_stats_dir_root,
+
+        dst_variable=hr_variable,
+        dst_model=hr_model,
+        dst_domain_str=hr_domain_str,
+        dst_crop_region_str=hr_crop_region_str,
+        dst_split=hr_split,
+        dst_scaling_method=hr_scaling_method,
+        dst_buffer_frac=hr_buffer_frac,
+        dst_stats_dir_root=hr_stats_dir_root,
+
+        eps=eps
+    )

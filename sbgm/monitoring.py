@@ -17,6 +17,7 @@ import torch
 import logging
 import os
 import math
+import json 
 
 import numpy as np
 import torch.nn.functional as F
@@ -358,3 +359,112 @@ def report_precip_extremes(x_bt: torch.Tensor, name: str, cap_mm_day: float = 50
         return {'has_below_zero': True, 'has_below_zero': True, 'n_below_zero': n_b0, 'below_zero_values': vals_b0}
 
     return {'has_extreme': False}
+
+
+
+
+
+
+# === Diagnostics helpers for EDM training ===
+@torch.no_grad()
+def _finite_mask(x: torch.Tensor) -> torch.Tensor:
+    return torch.isfinite(x)
+@torch.no_grad()
+def tensor_stats(x: torch.Tensor, name: str, pctiles=(0.1, 1, 5, 50, 95, 99, 99.9), log_fn=logger.info):
+    """
+        Quick, safe stats with NaN/Inf awareness. Logs: shape, dtype, device, finite ratio, mean, std, min, max, a few percentiles. 
+    """
+    if x is None:
+        log_fn(f"{name}: None")
+        return
+    
+    # cpu snapshot for percentiles (subsample to keep cheap)
+    x_detached = x.detach()
+    mask = _finite_mask(x_detached)
+    n_total = x_detached.numel()
+    n_finite = int(mask.sum().item())
+
+    log_fn(f"[{name}] shape={tuple(x_detached.shape)}, dtype={x_detached.dtype}, device={x_detached.device}, finite_ratio={n_finite} / {n_total} ({100.0 * n_finite / n_total:.2f}%)")
+
+    if n_finite == 0:
+        log_fn(f"[{name}] !!! No finite values (NaN/Inf everywhere) !!!")
+        return
+    
+    xf = x_detached[mask]
+    # downsample if huge
+    if xf.numel() > 1_000_000:
+        idx = torch.randint(0, xf.numel(), (200_000,), device=xf.device)
+        xf = xf.view(-1)[idx]
+
+    # core stats on device
+    x_min = float(xf.min().item())
+    x_max = float(xf.max().item())
+    x_mean = float(xf.mean().item())
+    x_std = float(xf.std(unbiased=False).item())
+
+    # move small vector for percentiles
+    xcpu = xf.float().flatten().cpu()
+    # percentiles
+    pcts = {}
+    for p in pctiles:
+        q = torch.quantile(xcpu, torch.tensor(float(p) / 100.0))
+        pcts[p] = float(q.item())
+
+    pts_str = " ".join([f"P{int(p)}={pcts[p]:.4g}" for p in pctiles])
+    log_fn(f"[{name}] min={x_min:.4g} max={x_max:.4g} mean={x_mean:.4g} std={x_std:.4g} | {pts_str}")
+
+@torch.no_grad()
+def save_histogram(x:torch.Tensor, save_path: str, bins: int = 200, range_: tuple[float,float] | None = None):
+    """
+        Save a histogram of tensor x to the specified path.
+        x: input tensor
+    """
+    x = x.detach().flatten()
+    x = x[torch.isfinite(x)]  # Keep only finite values
+    if x.numel() == 0:
+        logger.warning(f"[save_histogram]: No finite values in tensor, skipping histogram save to {save_path}.")
+        return
+    xcpu = x.float().cpu()
+    lo = float(xcpu.min().item()) if range_ is None else range_[0]
+    hi = float(xcpu.max().item()) if range_ is None else range_[1]
+    
+    hist, edges = np.histogram(xcpu.numpy(), bins=bins, range=(lo, hi))
+    name = f"hist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    path = os.path.join(save_path, name)
+    with open(path, 'w') as f:
+        json.dump({"edges": edges.tolist(), "hist": hist.tolist()}, f)
+
+@torch.no_grad()
+def plot_saved_histograms(save_path: str, fig_save_path: str | None = None):
+    """
+        Plot all saved histograms in the current directory (files named hist_*.json).
+    """
+    import glob
+    files = glob.glob(os.path.join(save_path, "hist_*.json"))
+    if len(files) == 0:
+        logger.warning(f"No histogram files found in {save_path}.")
+        return
+    
+    plt.figure(figsize=(10,6))
+    for file in files:
+        with open(file, 'r') as f:
+            data = json.load(f)
+        edges = np.array(data['edges'])
+        hist = np.array(data['hist'])
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        plt.plot(centers, hist, label=os.path.basename(file))
+    
+    plt.xlabel('Value')
+    plt.ylabel('Frequency')
+    plt.title('Saved Histograms')
+    plt.legend()
+    plt.grid()
+
+    if fig_save_path is not None:
+        plt.savefig(fig_save_path)
+        logger.info(f"Saved histogram plot to {fig_save_path}.")
+    else:
+        plt.show()
+    plt.close()
+    
+

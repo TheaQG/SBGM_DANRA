@@ -506,6 +506,9 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.hr_variable = hr_variable
         self.hr_model = hr_model
         self.hr_scaling_method = hr_scaling_method
+
+        # Global epsilon for log scaling to avoid log(0)
+        self.glob_prcp_epsilon = cfg['transforms'].get('prcp_eps', 0.01) if cfg is not None else 0.01
         
         # Save geo variables full-domain arrays
         self.lsm_full_domain = lsm_full_domain
@@ -598,6 +601,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                     transform_type=trans_type,
                     buffer_frac=cfg['lowres'].get('buffer_frac', 0.5) if cfg is not None else 0.5,
                     stats_file_path=stats_load_dir,
+                    eps=self.glob_prcp_epsilon if cond_var in ['prcp', 'tp'] else 0.0,
+
                 ))
                 self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
 
@@ -616,6 +621,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 transform_type=self.hr_scaling_method,
                 buffer_frac=hr_buff,
                 stats_file_path=stats_load_dir,
+                eps=self.glob_prcp_epsilon if self.hr_variable in ['prcp', 'tp'] else 0.0,
             ))
             self.hr_transform = transforms.Compose(hr_transform_list)
         
@@ -869,7 +875,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         if self.cutouts:
             sample_dict['hr_points'] = hr_point
             sample_dict['lr_points'] = lr_point
-            
+
         # Add item to cache
         self._addToCache(idx, sample_dict)
 

@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from torch.cuda.amp import autocast, GradScaler
 
 
-from sbgm.special_transforms import build_back_transforms_from_stats
+from sbgm.special_transforms import build_back_transforms_from_stats, remap_between_scalings_from_stats, lr_baseline_to_hr_zspace
 from sbgm.utils import get_model_string, extract_samples
 from sbgm.plotting_utils import (
     get_cmaps,
@@ -33,6 +33,9 @@ from sbgm.monitoring import (
     compute_fss_at_scales,
     compute_psd_slope,
     compute_q95_q99_and_wet_day,
+    tensor_stats,
+    save_histogram,
+    plot_saved_histograms,
     )
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
 from sbgm.training_utils import get_loss_fn, apply_cfg_dropout
@@ -98,6 +101,7 @@ class TrainingPipeline_general:
         self.lr_scheduler = lr_scheduler
 
         self.scaling = cfg['transforms']['scaling']
+        self.global_prcp_eps = cfg['transforms'].get('prcp_eps', 0.01)
 
         self.hr_var = cfg['highres']['variable']
         self.hr_scaling_method = cfg['highres']['scaling_method']
@@ -108,7 +112,22 @@ class TrainingPipeline_general:
         self.lr_scaling_methods = cfg['lowres']['scaling_methods']
         self.full_domain_dims_lr = cfg['lowres']['full_domain_dims']
         self.crop_region_lr = cfg['lowres']['cutout_domains']
-        
+
+        # Cache strings for stats lookups
+        self._dom_hr_str = f"{self.full_domain_dims_hr[0]}x{self.full_domain_dims_hr[1]}" if self.full_domain_dims_hr is not None else "full_domain"
+        self._dom_lr_str = f"{self.full_domain_dims_lr[0]}x{self.full_domain_dims_lr[1]}" if self.full_domain_dims_lr is not None else "full_domain"
+        self._crop_hr_str = '_'.join(map(str, self.crop_region_hr)) if self.crop_region_hr is not None else "no_crop"
+        self._crop_lr_str = '_'.join(map(str, self.crop_region_lr)) if self.crop_region_lr is not None else "no_crop"
+        self._stats_root = self.cfg['paths']['stats_load_dir']
+        self._hr_method_for_target = self.hr_scaling_method
+        # Assume LR scaling methods is a list aligned with lr_vars; get method for the target variable
+        if self.hr_var in self.lr_vars:
+            idx_t = self.lr_vars.index(self.hr_var)
+            self._lr_method_for_target = self.lr_scaling_methods[idx_t]
+        else:
+            self._lr_method_for_target = None  # Target variable not in LR vars
+            logger.warning(f"HR target variable '{self.hr_var}' not found in LR condition variables {self.lr_vars}. Cannot determine LR scaling method for target - residuals may not be aligned.")
+
         # inject into dicts
         self.bt_gen_key = "generated"
 
@@ -213,7 +232,8 @@ class TrainingPipeline_general:
                 crop_region_str_lr=crop_region_lr_str,
                 lr_buffer_frac=cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
                 split="all", # For now "all", but NOTE: needs to be "train" in future
-                stats_dir_root=cfg['paths']['stats_load_dir']
+                stats_dir_root=cfg['paths']['stats_load_dir'],
+                eps=self.global_prcp_eps
             )
         except Exception as e:
             logger.warning(f"[monitor] Could not build back transforms for sentinel; will skip back_transform in training. Error: {e}")
@@ -252,6 +272,7 @@ class TrainingPipeline_general:
     def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
         """
             Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
+            Ensure it is expressed in HR z-space (or HR min-max space) before using for residual EDM.
             Returns [B, 1, H, W] or raises if unavailable when predict_residual is True.
         """
         if cond_images is None:
@@ -265,8 +286,54 @@ class TrainingPipeline_general:
         idx = cond_vars.index(target_var)
         if cond_images.shape[1] <= idx:
             raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx} for variable '{target_var}'.")
-        lr_ups = cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
-        return lr_ups
+        lr_in_lr_space = cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
+
+        if self.cfg.get('edm', {}).get('baseline_space', 'hr') == 'lr':
+            logger.info(f"baseline_space requested is 'lr'; using LR baseline channel as-is in LR space for residual prediction.")
+            return lr_in_lr_space  # Already in LR space, just upsampled to HR size
+        
+        # Else, need to convert from LR space to HR space 
+        
+        # Find the LR scaling method corresponding to baseline channel
+        lr_method_for_baseline = self._lr_method_for_target 
+
+        # Ensure lr_method_for_baseline is a string
+        if lr_method_for_baseline is None:
+            raise ValueError("LR scaling method for baseline is None. Cannot proceed with lr_baseline_to_hr_zspace. Please check your configuration.")
+
+        logger.info(f"Converting LR baseline channel from LR space to HR space using lr_baseline_to_hr_zspace with LR method '{lr_method_for_baseline}' and HR method '{self.hr_scaling_method}'.")
+        # Remap using transform/back-transform stack
+        lr_in_hr_space = lr_baseline_to_hr_zspace(
+            lr_chan_norm=lr_in_lr_space,
+            # LR meta
+            lr_variable=self.hr_var,
+            lr_model=self.cfg['lowres']['model'],
+            lr_domain_str=self._dom_lr_str,
+            lr_crop_region_str=self._crop_lr_str,
+            lr_split=self.cfg['transforms'].get('scaling_split', 'train'),
+            lr_scaling_method=lr_method_for_baseline,
+            lr_buffer_frac=self.cfg['lowres'].get('buffer_frac', 0.0),
+            lr_stats_dir_root=self.cfg['paths']['stats_load_dir'],
+            # HR meta
+            hr_variable=self.hr_var,
+            hr_model=self.cfg['highres']['model'],
+            hr_domain_str=self._dom_hr_str,
+            hr_crop_region_str=self._crop_hr_str,
+            hr_split=self.cfg['transforms'].get('scaling_split', 'train'),
+            hr_scaling_method=self.hr_scaling_method,
+            hr_buffer_frac=self.cfg['highres'].get('buffer_frac', 0.0),
+            hr_stats_dir_root=self.cfg['paths']['stats_load_dir'],
+
+            eps=self.global_prcp_eps
+        )
+
+        return lr_in_hr_space
+
+    def _assert_all_finite(self, name, t):
+        if t is not None and not torch.isfinite(t).all():
+            mn = t[torch.isfinite(t)].min().item() if torch.isfinite(t).any() else float('nan')
+            mx = t[torch.isfinite(t)].max().item() if torch.isfinite(t).any() else float('nan')
+            raise ValueError(f"Input '{name}' contains non-finite values. Min: {mn}, Max: {mx}")
 
 
     def xavier_init_weights(self, m):
@@ -412,6 +479,55 @@ class TrainingPipeline_general:
             if self.edm_enabled and self.edm_predict_residual:
                 lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
 
+
+
+            # === Diagnostics checks: asserts and 
+            # Check raw inputs for NaNs or Infs
+            self._assert_all_finite('x', x)
+            self._assert_all_finite('cond_images', cond_images)
+            self._assert_all_finite('lr_ups_baseline', lr_ups_baseline)
+
+            cfg_diagnostics = self.cfg.get("diagnostics", {})
+            do_log = bool(cfg_diagnostics.get("per_batch_stats", False))
+            every = int(cfg_diagnostics.get("log_every", 100))
+
+            hr = x
+            lr_hr = lr_ups_baseline
+            # Get the lr_lr as the cond_image that corresponds to the hr_var, if available
+            if cond_images is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
+                idx_hr_in_cond = self.cfg['lowres']['condition_variables'].index(self.hr_var)
+                lr_lr = cond_images[:, idx_hr_in_cond:idx_hr_in_cond+1, :, :]  # [B, 1, H, W]
+            else:
+                lr_lr = None
+
+            residual = hr - lr_hr if (hr is not None and lr_hr is not None) else None
+            if do_log and (idx % every == 0):
+                tensor_stats(hr, "train/hr_norm")
+                if lr_hr is not None:
+                    tensor_stats(lr_hr, "train/lr_hr_norm")
+                if residual is not None:
+                    tensor_stats(residual, "train/residual_hr_space")
+                
+                # if (idx % (10 * every)) == 0:
+                #     # Log histograms less frequently
+                #     save_histogram(hr, "train/hr_norm", self.path_metrics, bins=100, range=None)
+                #     if lr_hr is not None:
+                #         save_histogram(lr_hr, "train/lr_hr_norm", self.path_metrics, bins=100, range=None)
+                #     if residual is not None:
+                #         save_histogram(residual, "train/residual_hr_space", self.path_metrics, bins=100, range=None)
+                #     if lr_lr is not None:
+                #         tensor_stats(lr_lr, "train/lr_lr_norm")
+                #         save_histogram(lr_lr, "train/lr_lr_norm", self.path_metrics, bins=100, range=None)
+
+            # OPTIONAL: Clamp warnings
+            clamp_warn = float(cfg_diagnostics.get("warn_if_abs_gt", 15.0))
+            if do_log and (idx % every == 0) and (clamp_warn > 0.0):
+                mx = float(residual.abs().amax().item()) if residual is not None else float('nan')
+                if mx > clamp_warn:
+                    logger.warning(f"[diagnostics][train] Batch {idx}: |residual| max {mx:.2f} exceeds warn_if_abs_gt {clamp_warn}. Consider residual normalization, tail clamp or loss robustification.")
+
+
+
             # # === CFG dropout (training) ===
             cfg_guidance = self.cfg_guidance
             cfg_dropout_result = apply_cfg_dropout(
@@ -455,6 +571,8 @@ class TrainingPipeline_general:
                                            sdf_cond=sdf,
                                            lr_ups=lr_ups_baseline
                                        )
+            # Make sure loss is finite
+            self._assert_all_finite('batch_loss', batch_loss)
 
 
             # === Cosine monitoring (lightweight) ===
@@ -497,52 +615,6 @@ class TrainingPipeline_general:
                         self.writer.add_scalar('monitoring/hr_lr_corr_train', hr_lr_corr_val, (current_epoch - 1) * len(dataloader) + idx)
                     
 
-            # === Extreme-prcp sentinel on ground-truth HR (optional; lightweight) ===
-            if self.extreme_enabled and (global_step % self.extreme_every_step == 0):
-                try:
-                    # x is in model space; optionally back-transform to physical mm/day
-                    x_for_check = x.detach()
-                    if self.extreme_backtransform and self.back_transforms_train is not None:
-                        # Expect a callable for HR back-transform under key 'hr'
-                        bt = self.back_transforms_train.get('hr', None)
-                        if bt is not None:
-                            if callable(bt):
-                                x_bt = bt(x_for_check.detach().cpu())
-                            else:
-                                logger.warning(f"[monitor] Back-transform object for HR is not callable and has no 'transform' method.")
-                                x_bt = x_for_check.detach().cpu()
-                        else:
-                            x_bt = x_for_check.detach().cpu()
-                    else:
-                        x_bt = x_for_check.detach().cpu()
-                    # Run helper (accepts torch or numpy)
-                    # Ensure x_bt is a torch.Tensor before passing to report_precip_extremes
-                    if not isinstance(x_bt, torch.Tensor):
-                        x_bt = torch.tensor(x_bt)
-                    check = report_precip_extremes(x_bt=x_bt, name="ground_truth_hr", cap_mm_day=self.extreme_threshold_mm)
-                    # "check" is boolean: True if any extreme values found
-                    has_extreme = check.get('has_extreme', False)
-                    n_extreme = check.get('n_extreme', 0)
-                    extreme_values = check.get('extreme_values', [])
-                    has_below_zero = check.get('has_below_zero', False)
-                    n_below_zero = check.get('n_below_zero', 0)
-                    below_zero_values = check.get('below_zero_values', [])
-
-                    if has_extreme and self.extreme_log_first_n > 0:
-                        # Extract some stats if provided
-                        mx = max(extreme_values) if isinstance(extreme_values, list) else None
-                        cnt = len(extreme_values) if isinstance(extreme_values, list) else None
-                        logger.warning(f"[monitor][train] Extreme precipitation detected at step {idx}:")
-                        logger.warning(f"               max={mx:.1f} mm/day, count={cnt}, threshold={self.extreme_threshold_mm} mm/day")
-                        self.extreme_log_first_n -= 1  # Decrement counter to log fewer next times
-
-                except Exception as e:
-                    logger.warning(f"[monitor] Could not check for extreme precipitation in training step {idx}. Error: {e}")
-
-
-            # logger.info(f"▸ Batch loss computed: {batch_loss.item():.4f}")
-            # Add anomaly detection for loss
-            # with torch.autograd.detect_anomaly():
             # Backward pass
             batch_loss.backward()
             # Update weights
@@ -769,41 +841,6 @@ class TrainingPipeline_general:
                         if self.writer is not None:
                             self.writer.add_scalar('monitoring/edm_cosine_metric_val', cos_val, (current_epoch - 1) * len(dataloader) + idx)
 
-            # === Extreme-prcp sentinel on ground-truth HR in validation (optional; lightweight) ===
-            if self.extreme_enabled and self.extreme_in_validation and (idx % self.extreme_every_step == 0):
-                try:
-                    # x is in model space; optionally back-transform to physical mm/day
-                    x_for_check = x.detach()
-                    if self.extreme_backtransform and self.back_transforms_train is not None:
-                        # Expect a callable for HR back-transform under key 'hr'
-                        hr_back_transform = self.back_transforms_train.get('hr')
-                        if hr_back_transform is not None:
-                            if callable(hr_back_transform):
-                                x_for_check = hr_back_transform(x_for_check)
-                            else:
-                                logger.warning(f"[monitor] Back-transform object for HR is not callable and has no 'transform' method.")
-                    # Run helper (accepts torch or numpy)
-                    # Ensure x_for_check is a torch.Tensor before passing to report_precip_extremes
-                    if not isinstance(x_for_check, torch.Tensor):
-                        x_for_check = torch.tensor(x_for_check)
-                    check = report_precip_extremes(x_bt=x_for_check.detach().cpu(), name="ground_truth_hr", cap_mm_day=self.extreme_threshold_mm)
-                    # "check" is boolean: True if any extreme values found
-                    has_extreme = check.get('has_extreme', False)
-                    n_extreme = check.get('n_extreme', 0)
-                    extreme_values = check.get('extreme_values', [])
-                    has_below_zero = check.get('has_below_zero', False)
-                    n_below_zero = check.get('n_below_zero', 0)
-                    below_zero_values = check.get('below_zero_values', [])
-                    if has_extreme and self.extreme_log_first_n > 0:
-                        # Extract some stats if provided
-                        mx = max(extreme_values) if isinstance(extreme_values, list) else None
-                        cnt = len(extreme_values) if isinstance(extreme_values, list) else None
-                        logger.warning(f"[monitor][val] Extreme precipitation detected at step {idx}:")
-                        logger.warning(f"               max={mx:.1f} mm/day, count={cnt}, threshold={self.extreme_threshold_mm} mm/day")
-                        self.extreme_log_first_n -= 1  # Decrement counter to log fewer next times
-                except Exception as e:
-                    logger.warning(f"[monitor] Could not check for extreme precipitation in validation step {idx}. Error: {e}")
-
             # Add batch loss to total loss
             loss += batch_loss.item()
             # Update the bar
@@ -891,7 +928,8 @@ class TrainingPipeline_general:
                             lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                             lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
                             split               = 'train',
-                            stats_dir_root      = cfg['paths']['stats_load_dir']
+                            stats_dir_root      = cfg['paths']['stats_load_dir'],
+                            eps=self.global_prcp_eps
                             )
 
         # Setup units and cmaps
@@ -979,7 +1017,15 @@ class TrainingPipeline_general:
                 gen_phys = gen_model
                 hr_phys = x_gen
 
-            # 2) Extreme sentinel and optional clamp on generated samples in physical space
+            # === Diagnostics check: physical units exceedance ===
+            if gen_phys is not None and hr_phys is not None:
+                if not isinstance(gen_phys, torch.Tensor):
+                    gen_phys = torch.tensor(gen_phys)
+                tensor_stats(gen_phys, f"eval/x_phys")
+                warn_hi = float(cfg.get('diagnostics', {}).get('warn_if_phys_gt', 300.0))
+                if float(gen_phys.max().item()) > warn_hi:
+                    logger.warning(f"[diagnostics][eval] Generated samples exceed {warn_hi} {hr_unit} in physical space. Max: {float(gen_phys.max().item()):.2f} {hr_unit}. Consider adjusting back-transform, data scaling, or adding clamping.")
+
             # TODO: Clamp gen_model in model space for injection to plotting? Maybe add clamper in sampling instead?
             try:
                 # Extreme sentinel (and optional clamp) in PHYSICAL space

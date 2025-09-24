@@ -160,7 +160,8 @@ def get_dataloader(cfg, verbose=True):
                         lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                         lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
                         split               = cfg['transforms']['scaling_split'] if 'scaling_split' in cfg['transforms'] else 'train',
-                        stats_dir_root      = cfg['paths']['stats_load_dir']
+                        stats_dir_root      = cfg['paths']['stats_load_dir'],
+                        eps                 = cfg['transforms'].get('prcp_eps', 0.01)
                         )
 
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
@@ -350,7 +351,7 @@ def get_dataloader(cfg, verbose=True):
     if persist:
         train_kwargs['prefetch_factor'] = 4  # Each worker preloads 4 batches
 
-    train_loader = DataLoader(train_dataset, **train_kwargs)
+    train_loader = DataLoader(train_dataset, **train_kwargs) # type: ignore
 
 
     val_kwargs = dict(
@@ -363,7 +364,7 @@ def get_dataloader(cfg, verbose=True):
     
     if persist:
         val_kwargs['prefetch_factor'] = 2  # Each worker preloads 2 batches
-    val_loader = DataLoader(val_dataset, **val_kwargs)
+    val_loader = DataLoader(val_dataset, **val_kwargs) # type: ignore
 
 
     gen_bs = int(cfg['data_handling']['n_gen_samples'])
@@ -471,7 +472,8 @@ def get_gen_dataloader(cfg, verbose=True):
                         lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                         lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
                         split               = cfg['transforms']['scaling_split'] if 'scaling_split' in cfg['transforms'] else 'train',
-                        stats_dir_root      = cfg['paths']['stats_load_dir']
+                        stats_dir_root      = cfg['paths']['stats_load_dir'],
+                        eps                 = cfg['transforms'].get('prcp_eps', 0.01)
                         )
 
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:

@@ -1,6 +1,6 @@
 experiment:
-  name: EDM_paper1_wCFG
-  config_name: EDM_paper1_wCFG
+  name: EDM_paper1_test # Name of the experiment
+  config_name: EDM_paper1_test
   # Date of the experiment, taken from the environment variable or set to current date
   date: ${env:EXP_DATE} # Date for the experiment, 
 
@@ -23,7 +23,7 @@ highres:
   data_size: [128, 128] # Size of the data to process
   scaling_method: log_zscore # Method for scaling the data
   full_domain_dims: [589, 789]
-  buffer_frac: 0.05
+  buffer_frac: 0.0
   cutout_domains: [170, 350, 340, 520] # [x1, x2, y1, y2], coordinates for cutout
   stationary_cutout: false # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
 
@@ -34,7 +34,7 @@ lowres:
   scaling_methods: ["zscore", "log_zscore"] # Scaling methods for low-res data
   dual_lr: false # Whether to use dual (one scaled w. global (HR+LR) statistics, one with LR stats) low-res (prcp or temp) data. When true, LR parsed in two channels, one scaled w. LR stats, one w. HR+LR stats
   lr_main_var_scale: "HR_LR" # Which statistics to use for scaling the main low-res variable (prcp or temp) when dual_lr is False ("LR": lr only, "HR": hr only, "HR_LR": both)
-  buffer_frac: 0.05
+  buffer_frac: 0.0
   data_size: [128, 128] # Size of the low-res data
   resize_factor: 1 # Factor to resize low-res data (used for testing at lower resolutions)
   cutout_domains: [170, 350, 340, 520] # [x1, x2, y1, y2], coordinates for cutout
@@ -54,7 +54,7 @@ data_handling:
   cache_size_valid: 0 # Size of the cache for validation data
   cache_size_gen: 0 # Size of the cache for test data
   num_workers: ${env:SLURM_CPUS_PER_TASK} # Number of workers for data loading
-  n_gen_samples: 3 # Number of generated samples (for visualization)
+  n_gen_samples: 8 # Number of generated samples (for visualization)
   pin_memory: true # Whether to pin memory for faster data transfer
 
 transforms:
@@ -62,6 +62,7 @@ transforms:
   scaling_split: train # Which data split to use for computing scaling statistics (train, valid, test or all)
   force_matching_scale: false # Whether to force matching scale
   sample_w_cutouts: true # Whether to sample with cutouts
+  prcp_eps: 0.01 # Small epsilon value for precipitation data to avoid log(0)
   
 
 stationary_conditions:
@@ -75,7 +76,7 @@ stationary_conditions:
     norm_min: -1 # Minimum normalization value for topography and slope
     norm_max: 1 # Maximum normalization value for topography and slope
     max_land_weight: 1.0 # Maximum weight for land in SDF
-    max_ocean_weight: 0.5 # Maximum weight for ocean in SDF
+    min_ocean_weight: 0.5 # Minimum weight for ocean in SDF
   seasonal_conditions:
     sample_w_cond_season: true # Whether to sample with seasonal conditions
     n_seasons: 4 # Number of seasons in the data
@@ -107,7 +108,7 @@ training:
   device: cuda # Device to use for training (e.g., 'cuda' or 'cpu')
   use_mixed_precision: false # Whether to use mixed precision training
   use_grad_clip: false # Whether to use gradient clipping
-  grad_clip_norm: None # Gradient clipping norm (set to None to disable)
+  grad_clip_norm: 0.0 # Gradient clipping norm (set to None to disable)
   verbose: true # Whether to print verbose output during training
   batch_size: 16 # Batch size for training
   learning_rate: 0.0002 # Learning rate for training
@@ -120,11 +121,12 @@ training:
     min_lr: 1e-6 # Minimum learning rate for the scheduler
   weight_init: true # Whether to initialize weights
   custom_weight_initializer: !!null # Custom weight initializer (if any) - currently not used, but should be 'kaiming', 'he' or 'xavier'
-  with_ema: false # Whether to use Exponential Moving Average NOTE: NEEDS TO BE IMPLEMENTED
-  eval_use_ema: false # Whether to use EMA weights for evaluation (validation and generation)
-  load_ema: false # Whether to load EMA weights
-  ema_decay: 0.9999 # Decay rate for EMA
+  with_ema: false # Whether to use Exponential Moving Average. If false, all EMA params below are ignored
+  eval_use_ema: true # Whether to use EMA weights for evaluation (validation and generation)
+  load_ema: true # Whether to load EMA weights
+  ema_decay: 0.999 # Decay rate for EMA. 0.999-0.9995 is a good range for per-step decay with batch size 16-32. Lower for smaller batches, higher for larger batches.
   weight_decay: 0.000001 # Weight decay for regularization
+  ema_warmup_steps: 2000 # Number of warmup steps for EMA
   epochs: 500 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
   sdf_weighted_loss: true # Whether to use SDF weighted loss
@@ -149,6 +151,7 @@ classifier_free_guidance:
   null_scalar_value: 0.0 # Use -1 as "null" for continuous scalar conditions (e.g. seasons as cos/sin)
   guidance_scale_max: 3.0 # Maximum scale for guidance
   sigma_weighted: true # Whether to weight guidance scale with sigma (True recommended, False for ablation)
+  drop_lr_ups_in_uncond: true # Whether to drop lr_ups in unconditional branch (True recommended, False for ablation)
 
 edm:
   enabled: true # Whether to use EDM (Elucidated Diffusion Models)
@@ -165,7 +168,8 @@ edm:
   S_noise: 1.0 # Noise parameter for EDM
   sampling_steps: 40 # Number of sampling steps for EDM (suggested: 35-50)
   predict_residual: true # Whether to predict residual from LR baseline
-  baseline_space: auto # Which z-space to use for lr_ups baseline: 'hr' | 'lr' | 'auto' (auto prefers *_hrspace if available)
+  baseline_space: hr # Which z-space to use for lr_ups baseline: 'hr' | 'lr' | 'auto' (auto prefers *_hrspace if available)  
+  drop_lr_ups_in_uncond: true # Whether to drop lr_ups in unconditional branch (True recommended, False for ablation)
 
 ve_dsm: # Default parameters for VE-DSM loss
   t_eps: 1e-3 # Small epsilon for VE-DSM
@@ -186,6 +190,18 @@ monitoring:
     wet_day_threshold_mm: 0.1 # Threshold for wet day in mm/day 
     psd_compare_to_hr: true # Whether to compare generated samples PSD to high-resolution data PSD
     quantiles_compare_to_hr: true # Whether to compare generated samples quantiles to high-resolution data quantiles
+
+diagnostics:
+  per_batch_stats: true # Whether to compute per-batch statistics
+  log_every: 100 # Frequency (in steps) to log training statistics
+  model_outputs: false # Whether to log model outputs
+  warn_if_abs_gt: 15.0 # Warn if any abs value greater than this
+  warn_if_phys_gt: 350.0 # Warn if any physical value greater than this (after back-transform)
+  save_histograms: true # Whether to save histograms of model outputs
+  histogram_bins: 200 # Number of bins for histograms
+  histogram_range: null # Range for histograms (null for automatic range)
+  histogram_every: 500 # Frequency (in steps) to save histograms
+  histogram_path: ${env:LOG_DIR}/histograms # Path to save histograms
 
   # # In-loop & epoch-level monitoring configuration NOTE: Implement instead of end_of_epoch above
   # fss:
@@ -217,6 +233,7 @@ evaluation:
   n_repeats: 3 # Number of times to repeat generation for evaluation
   plot_examples: true # Whether to plot examples of generated samples
   show_plots: false # Whether to show plots of generated samples
+  show_figs: false 
   show_ocean: false # Whether to show ocean in generated sample plots
   generation_dir: ${env:SAMPLE_DIR}/evaluations # Directory for generation outputs
   mask_plots: false # Whether to mask plots or not
@@ -226,6 +243,10 @@ evaluation:
   eval_gen_type: ['multiple']
   eval_land_only: true # Whether to evaluate on land only (mask out ocean vals)
   eval_stat_methods: ['pixel_stats', 'spatial_stats'] # Methods for evaluation statistics
+  stationary_cutout:
+    enabled: false # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
+    cutout_domains: [170, 350, 340, 520] # 
+    hr_bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for HR data (for stationary cutout)
 
   logging:
     file_level: INFO # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
