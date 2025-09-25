@@ -262,6 +262,47 @@ def compute_q95_q99_and_wet_day(
     return out
 
 
+
+@torch.no_grad() # Disable gradient computation for monitoring
+def in_loop_metrics(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None, eval_land_only: bool = False):
+    """
+        Compute a set of monitoring metrics for EDM models during training.
+        Returns a dict with keys:
+        - 'edm_cosine': Cosine similarity metric between predicted x0_hat and x0
+        - 'hr_lr_corr': Pearson correlation coefficient between predicted x0_hat and lr_ups (if lr_ups is provided)
+    """
+    if not isinstance(loss_obj, EDMLoss):
+        logger.warning("edm_cosine_metric is only defined for EDMLoss. Returning None.")
+        return None  # Metric only defined for EDMLoss
+    
+    B = x0.shape[0]
+    device = x0.device
+    dtype = x0.dtype
+
+    # Sample sigma from log-normal distribution
+    sigma = loss_obj.sample_sigma(B, device, dtype=dtype)
+    n = torch.randn_like(x0)
+    x_t = x0 + sigma.view(B, 1, 1, 1) * n
+    
+    # Model is EDMPrecondUNet, predict x0_hat
+    x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
+
+    # Flatten per-sample and compute cosine
+    cos = F.cosine_similarity(x0_hat.flatten(1), x0.flatten(1), dim=1, eps=1e-8).mean()
+
+    # Optional HR-LR correlation if lr_ups is provided
+    if eval_land_only:
+        if lsm_cond is None:
+            logger.warning("eval_land_only=True but lsm_cond is None. Cannot mask for land-only correlation. Returning NaN for hr_lr_corr.")
+            r = float('nan')
+        else:
+            r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=lsm_cond) if lr_ups is not None else float('nan')
+    else:
+        r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=None) if lr_ups is not None else float('nan')
+
+    return {'edm_cosine': float(cos), 'hr_lr_corr': float(r)}
+
+
 @torch.no_grad() # Disable gradient computation for monitoring
 def edm_cosine_metric(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None):
     """
@@ -288,45 +329,101 @@ def edm_cosine_metric(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo
     cos = F.cosine_similarity(x0_hat.flatten(1), x0.flatten(1), dim=1, eps=1e-8).mean()
     return float(cos)
 
-def _masked_corrcoef_per_sample(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        mask: torch.Tensor | None = None,
-        eps: float = 1e-8
+@torch.no_grad()
+def hr_lr_corrcoef(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None):
+    """
+        Compute the Pearson correlation coefficient between predicted x0_hat and lr_ups (upsampled low-res input).
+        Returns mean correlation over the batch.
+    """
+    if not isinstance(loss_obj, EDMLoss):
+        logger.warning("hr_lr_corrcoef is only defined for EDMLoss. Returning None.")
+        return None  # Metric only defined for EDMLoss
+    if lr_ups is None:
+        logger.warning("lr_ups is required for hr_lr_corrcoef. Returning None.")
+        return None
+
+    B = x0.shape[0]
+    device = x0.device
+    dtype = x0.dtype
+
+    # Sample sigma from log-normal distribution
+    sigma = loss_obj.sample_sigma(B, device, dtype=dtype)
+    n = torch.randn_like(x0)
+    x_t = x0 + sigma.view(B, 1, 1, 1) * n
+    
+    # Model is EDMPrecondUNet, predict x0_hat
+    with torch.no_grad():
+        x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
+
+    # Compute masked correlation coefficient per sample and average
+    r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=None)
+    return float(r)
+
+def masked_corrcoef_per_sample(
+        a: torch.Tensor, # [B, C, H, W]
+        b: torch.Tensor, # [B, C, H, W]
+        mask: torch.Tensor | None = None, # [B, 1, H, W] or [B, H, W] (bool or {0,1} float)
+        eps: float = 1e-8,
+        weighted: bool = True
 ) -> torch.Tensor:
     """
-        Mean Pearson correlation across the batch, computed per-sample over masked pixels.
-        If mask is None, uses all pixels. Ignores samples with near-zero variance.
+        Peasron r computed per-sample over masked pixels, then averaged over the batch.
+        - Ignores samples with <2 finite pixels or ~0 variance.
+        - Works for C>1 (flattens all masked pixels across channels)
+        - If weighted = True, averages with weights = number of valid pixels per sample
     """
+    a = a.detach()
+    b = b.detach()
+
+    if b.shape[1] == 1 and a.shape[1] > 1:
+        # Broadcast single-channel b to match a's channels
+        b = b.expand_as(a)
+
     B = a.shape[0]
-    vals = []
+    rs, ws = [], []
+    
     for i in range(B):
-        mi = mask[i] if mask is not None else None
-        if mi is not None:
-            # Expect land~1. If float, threshold at 0.5, then broadcast to [C,H,W]
+        mi = None
+        if mask is not None:
+            mi = mask[i]
             if mi.dtype != torch.bool:
                 mi = (mi > 0.5)
-            mi = mi.expand_as(a[i])
-            ai = a[i][mi]
-            bi = b[i][mi]
-        else:
-            ai = a[i].reshape(-1)
-            bi = b[i].reshape(-1)
+            # Broadcast to all channels
+            if mi.ndim == 3:
+                mi = mi.expand_as(a[i])
 
-        if ai.numel() < 2:
-            continue
+        ai = a[i][mi] if mi is not None else a[i].reshape(-1)
+        bi = b[i][mi] if mi is not None else b[i].reshape(-1)
 
+        # Keep only finite values
+        finite = torch.isfinite(ai) & torch.isfinite(bi)
+        ai = ai[finite]
+        bi = bi[finite]
+        n = ai.numel()
+        if n < 2:
+            continue  # Not enough valid pixels
+
+        # Standardize
         ai = ai - ai.mean()
         bi = bi - bi.mean()
-        denom = ai.std(unbiased=False) * bi.std(unbiased=False) + eps
-        corr_i = (ai * bi).mean() / denom
-        if torch.isfinite(corr_i):
-            vals.append(corr_i)
+        std_prob = ai.std(unbiased=False) * bi.std(unbiased=False)
+        if std_prob.abs() < eps:
+            continue  # Near-zero variance
 
-    if len(vals) == 0:
+        r = (ai * bi).mean() / (std_prob + eps)
+        if torch.isfinite(r):
+            rs.append(r)
+            ws.append(torch.tensor(float(n), device=r.device))
+    if not rs:
         return torch.tensor(float('nan'), device=a.device)
-    return torch.stack(vals).mean()
-
+    
+    rs = torch.stack(rs)
+    if weighted:
+        ws = torch.stack(ws)
+        r_mean = (rs * ws).sum() / (ws.sum() + eps)
+        return r_mean
+    else:
+        return rs.mean()
 
 
 def report_precip_extremes(x_bt: torch.Tensor, name: str, cap_mm_day: float = 500.0):

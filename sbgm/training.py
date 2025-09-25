@@ -36,6 +36,8 @@ from sbgm.monitoring import (
     tensor_stats,
     save_histogram,
     plot_saved_histograms,
+    hr_lr_corrcoef,
+    in_loop_metrics
     )
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
 from sbgm.training_utils import get_loss_fn, apply_cfg_dropout
@@ -301,7 +303,7 @@ class TrainingPipeline_general:
         if lr_method_for_baseline is None:
             raise ValueError("LR scaling method for baseline is None. Cannot proceed with lr_baseline_to_hr_zspace. Please check your configuration.")
 
-        logger.info(f"Converting LR baseline channel from LR space to HR space using lr_baseline_to_hr_zspace with LR method '{lr_method_for_baseline}' and HR method '{self.hr_scaling_method}'.")
+        # logger.info(f"Converting LR baseline channel from LR space to HR space using lr_baseline_to_hr_zspace with LR method '{lr_method_for_baseline}' and HR method '{self.hr_scaling_method}'.")
         # Remap using transform/back-transform stack
         lr_in_hr_space = lr_baseline_to_hr_zspace(
             lr_chan_norm=lr_in_lr_space,
@@ -575,45 +577,20 @@ class TrainingPipeline_general:
             self._assert_all_finite('batch_loss', batch_loss)
 
 
-            # === Cosine monitoring (lightweight) ===
+            # === In-loop monitoring (lightweight): cosine and HR-LR correlation ===
             monitor_cfg = self.cfg.get('monitoring', {})
             log_every = monitor_cfg.get('edm_metrics_every', 50)
             global_step = (current_epoch - 1) * len(dataloader) + idx
             edm_on = self.cfg.get('edm', {}).get('enabled', False)
 
             if edm_on and log_every > 0 and (global_step % log_every == 0):
-                cos = edm_cosine_metric(self.loss_fn, self.model, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo, lr_ups=lr_ups_baseline)
-                self.live_metrics['steps'].append(global_step)
-                self.live_metrics['edm_cosine'].append(float(cos)) # type: ignore
-                if cos is not None:
-                    pbar.set_postfix(loss=loss_sum / (idx + 1), edm_cosine=cos)
-                    if verbose:
-                        logger.info(f"→ [monitor][train] Step {idx}: EDM cosine metric: {cos:.4f}")
-                    if self.writer is not None:
-                        self.writer.add_scalar('monitoring/edm_cosine_metric_train', cos, (current_epoch - 1) * len(dataloader) + idx)
+                metrics = in_loop_metrics(loss_obj=self.loss_fn, model=self.model,
+                    x0=x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo,
+                    lr_ups=lr_ups_baseline, eval_land_only=self.eval_land_only)
 
-                # HR <-> LR alignment corr (cheap). Use lr_ups_baseline already built for residual path, else derive it here if needed
-                hr_lr_corr_val = float('nan')
-                try: 
-                    if lr_ups_baseline is None and cond_images is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
-                        lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
-                    if lr_ups_baseline is not None:
-                        # Optional land-only mask
-                        mask = None
-                        if self.eval_land_only and (lsm_hr is not None):
-                            mask = (lsm_hr >= 0.5).float()  # [B, 1, H, W]
-                        from sbgm.monitoring import _masked_corrcoef_per_sample
-                        hr_lr_corr_val = _masked_corrcoef_per_sample(x, lr_ups_baseline.expand_as(x), mask=mask).item()
-                        if verbose:
-                            logger.info(f"[monitor][train] Step {idx}: HR-LR correlation: {hr_lr_corr_val:.4f}")
-                except Exception as e:
-                    logger.warning(f"[monitor][train] Could not compute HR-LR correlation at step {idx}. Error: {e}")
-                    hr_lr_corr_val = float('nan')
-                finally:
-                    self.live_metrics['hr_lr_corr'].append(hr_lr_corr_val)
-                    if self.writer is not None:
-                        self.writer.add_scalar('monitoring/hr_lr_corr_train', hr_lr_corr_val, (current_epoch - 1) * len(dataloader) + idx)
-                    
+                self.live_metrics['steps'].append(global_step)
+                self.live_metrics['edm_cosine'].append(float(metrics.get('edm_cosine', float('nan')))) # type: ignore
+                self.live_metrics['hr_lr_corr'].append(float(metrics.get('hr_lr_corr', float('nan')))) # type: ignore
 
             # Backward pass
             batch_loss.backward()
@@ -1059,15 +1036,15 @@ class TrainingPipeline_general:
                 if not isinstance(hr_phys, torch.Tensor):
                     hr_phys = torch.tensor(hr_phys)
                 hr_phys = hr_phys.detach().cpu()
-                if lsm_hr_gen is not None:
-                    if not isinstance(lsm_hr_gen, torch.Tensor):
-                        lsm_hr_gen = torch.tensor(lsm_hr_gen)
-                    lsm_hr_gen = lsm_hr_gen.detach().cpu()
+                if lsm_gen is not None:
+                    if not isinstance(lsm_gen, torch.Tensor):
+                        lsm_gen = torch.tensor(lsm_gen)
+                    lsm_gen = lsm_gen.detach().cpu()
 
                 # Optional land-only mask at HR resolution
                 mask = None
-                if self.eval_land_only and (lsm_hr_gen is not None):
-                    mask = (lsm_hr_gen >= 0.5).to(dtype=torch.float32).detach().cpu()
+                if self.eval_land_only and (lsm_gen is not None):
+                    mask = (lsm_gen >= 0.5).to(dtype=torch.float32).detach().cpu()
 
                 # Ensure gen_phys and hr_phys are torch.Tensor
                 if not isinstance(gen_phys, torch.Tensor):
