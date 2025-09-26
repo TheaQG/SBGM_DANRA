@@ -14,6 +14,7 @@ import logging
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
+from typing import Optional
 from torch.cuda.amp import autocast, GradScaler
 
 
@@ -31,7 +32,7 @@ from sbgm.monitoring import (
     report_precip_extremes,
     compute_fss_at_scales,
     compute_psd_slope,
-    compute_q95_q99_and_wet_day,
+    compute_p95_p99_and_wet_day,
     tensor_stats,
     save_histogram,
     plot_saved_histograms,
@@ -715,7 +716,7 @@ class TrainingPipeline_general:
             # Plot in-loop timeseries occasionally
             if (self.monitor_plot_every_n_epochs > 0) and (epoch % self.monitor_plot_every_n_epochs == 0):
                 try:
-                    self._plot_live_metrics(self.path_metrics)
+                    self._plot_live_metrics(self.path_metrics, n_samples=cfg['data_handling']['n_gen_samples'])
                 except Exception as e:
                     logger.warning(f"[monitor] Could not plot live metrics at epoch {epoch}. Error: {e}")
             
@@ -1073,7 +1074,8 @@ class TrainingPipeline_general:
                 plot_fss_history(self.fss_hist, epoch_list=self.epoch_list,
                                 save_dir=self.path_metrics,
                                 filename="fss_history.png",
-                                title="FSS history" + (" (land-only)" if self.eval_land_only else ""))
+                                title="FSS history" + (" (land-only)" if self.eval_land_only else ""),
+                                n_samples=len(gen_phys))
                 # 2) PSD slope
                 psd_dict = compute_psd_slope(gen_phys, hr_bt=hr_phys if self.psd_compare_to_hr else None, mask=mask)
                 self.psd_hist.append(psd_dict)
@@ -1082,10 +1084,11 @@ class TrainingPipeline_general:
                                     epoch_list=self.epoch_list,
                                     save_dir=self.path_metrics,
                                     filename="psd_history.png",
-                                    title="PSD slope history" + (" (land-only)" if self.eval_land_only else ""))
+                                    title="PSD slope history" + (" (land-only)" if self.eval_land_only else ""),
+                                    n_samples=len(gen_phys))
 
-                # 3) Q95/Q99 + wet-day
-                q_dict = compute_q95_q99_and_wet_day(gen_phys,
+                # 3) P95/P99 + wet-day
+                q_dict = compute_p95_p99_and_wet_day(gen_phys,
                                                     hr_bt=hr_phys if self.quantiles_compare_to_hr else None,
                                                     mask=mask,
                                                     wet_threshold_mm=self.wetday_thresh)
@@ -1094,7 +1097,8 @@ class TrainingPipeline_general:
                 plot_quantiles_wetday_history(self.q_hist, epoch_list=self.epoch_list,
                                             save_dir=self.path_metrics,
                                             filename="quantiles_history.png",
-                                            title="Quantiles & wet-day history" + (" (land-only)" if self.eval_land_only else ""))
+                                            title="Quantiles & wet-day history" + (" (land-only)" if self.eval_land_only else ""),
+                                            n_samples=len(gen_phys))
             except Exception as e:
                 logger.warning(f"[monitor] Could not compute epoch-level metrics at epoch {epoch}. Error: {e}")
 
@@ -1157,11 +1161,12 @@ class TrainingPipeline_general:
 
         plt.close(fig)
 
-    def _plot_live_metrics(self, save_dir: str):
+    def _plot_live_metrics(self, save_dir: str, n_samples: Optional[int] = None):
         """
         Internal method to plot live training metrics if enabled in the configuration.
         Args:
             save_dir (str): Directory where the metrics plot will be saved.
+            n_samples (Optional[int]): Number of samples used for computing metrics, for annotation.
         """
         if len(self.live_metrics['steps']) == 0:
             return
@@ -1177,7 +1182,8 @@ class TrainingPipeline_general:
                 filename='inLoop_metrics_timeseries.png',
                 show=self.cfg['visualization'].get('show_figs', False),
                 title="In-loop training metrics (EDM cosine, HR-LR corr)",
-                land_only=self.eval_land_only
+                land_only=self.eval_land_only,
+                n_samples=n_samples
             )
             logger.info(f"→ Live metrics plot saved to {out}")
 

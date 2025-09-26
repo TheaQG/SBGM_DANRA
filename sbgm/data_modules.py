@@ -664,8 +664,55 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             self.n_samples = len(self.common_dates)
             logger.warning(f"Not enough common dates ({len(self.common_dates)}) to sample {self.n_samples} samples. Reducing n_samples to {self.n_samples}.")
 
-        if self.shuffle:
-            self.common_dates = random.sample(self.common_dates, self.n_samples)
+        # if self.shuffle:
+        #     self.common_dates = random.sample(self.common_dates, self.n_samples)
+        # === Selection policy for date list ===
+        # Default behaviour (train/val): follow self.shuffle as before. For generation split, allow fixed dates that repeat every epohc, with either sequential (subsequent) or random selection dates 
+        is_gen_split = str(self.split).lower() in ('gen', 'generation', 'test', 'inference')
+        if is_gen_split:
+            gen_cfg_root = (self.cfg or {}).get('generation', None)
+            if gen_cfg_root is not None:
+                fixed_dates = bool((gen_cfg_root or {}).get('fixed_dates', True))
+                random_dates = bool((gen_cfg_root or {}).get('random_dates', False))
+                seed = int((gen_cfg_root or {}).get('seed', 509))
+                start_index = int((gen_cfg_root or {}).get('start_index', 0))
+
+                if fixed_dates:
+                    # Build a deterministic selection once per Dataset construction
+                    if random_dates:
+                        rng = random.Random(seed)
+                        # Deterministic sample w/out replacement
+                        if self.n_samples > len(self.common_dates):
+                            logger.warning(f"Not enough common dates ({len(self.common_dates)}) to sample {self.n_samples} fixed random samples. Reducing n_samples to {len(self.common_dates)}.")
+                            self.n_samples = len(self.common_dates)
+                        self.common_dates = rng.sample(self.common_dates, self.n_samples)
+                        logger.info(f"Using {self.n_samples} fixed random dates for generation split with seed {seed}.")
+                    else:
+                        # Sequential (subsequent) block starting at start_index
+                        if start_index < 0 or start_index >= len(self.common_dates):
+                            start_index = 0
+                        end_index = start_index + self.n_samples
+                        if end_index > len(self.common_dates):
+                            logger.warning(f"[gen] start_index + n_samples exceeds available common dates. Wrapping around.")
+                            start_index = 0
+                            end_index = min(self.n_samples, len(self.common_dates))
+                        self.common_dates = self.common_dates[start_index:end_index]
+                        logger.info(f"Using N={self.n_samples} fixed sequential dates for generation split starting at index {start_index}.")
+                    # Ensure stable ordering and no per-epoch reshuffle
+                    self.shuffle = False
+                else:
+                    # Not fixed: retain legacy behaviour controlled by self.shuffle
+                    if self.shuffle:
+                        self.common_dates = random.sample(self.common_dates, self.n_samples)
+            else:
+                logger.warning(f"Generation split selected but no generation config found in cfg. Retaining legacy behaviour controlled by self.shuffle.")
+                if self.shuffle:
+                    self.common_dates = random.sample(self.common_dates, self.n_samples)
+        else:
+            # Non-generation splits keep legacy shuffle behaviour
+            if self.shuffle:
+                self.common_dates = random.sample(self.common_dates, self.n_samples)
+
         
         # Set cache for data loading - if cache_size is 0, no caching is used
         # If num_workers > 0 each worker has its own Dataset instance

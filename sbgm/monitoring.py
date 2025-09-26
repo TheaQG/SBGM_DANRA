@@ -8,7 +8,7 @@
     TODO:
         - FSS (Fractions Skill Score) implementation at 5, 10, 20 km scales
         - PSD slope metric
-        - Q95/Q99 metrics
+        - P95/P99 metrics
         - Wet-day frequency 
         - Other metrics from "Evaluating Generative Models via Precision and Recall" (Sajjadi et al. 2018)
 """
@@ -208,19 +208,19 @@ def compute_psd_slope(
 
 
 @torch.no_grad()
-def compute_q95_q99_and_wet_day(
+def compute_p95_p99_and_wet_day(
     gen_bt: torch.Tensor,
     hr_bt: torch.Tensor|None = None,
     *,
     mask:torch.Tensor|None=None,
     wet_threshold_mm: float=1.0) -> dict[str, float]:
     """
-        Compute Q95, Q99 and wet-day frequency (> wet_threshold_mm) for generated fields and (optionally) HR reference fields.
+        Compute P95, P99 and wet-day frequency (> wet_threshold_mm) for generated fields and (optionally) HR reference fields.
         Inputs can be [B,1,H,W] or [B,H,W] or numpy arrays.
         *mask* is optional and should be broadcastable to [B,1,H,W] or [B,H,W].
         Returns keys:
-        - 'gen_q95', 'gen_q99', 'gen_wet_freq'
-        - 'hr_q95', 'hr_q99', 'hr_wet_freq' (if hr_bt is provided)
+        - 'gen_p95', 'gen_p99', 'gen_wet_freq'
+        - 'hr_p95', 'hr_p99', 'hr_wet_freq' (if hr_bt is provided)
     """
     def _prep(t):
         if t is None:
@@ -248,16 +248,16 @@ def compute_q95_q99_and_wet_day(
         flat_np = flat_np[~np.isnan(flat_np)]
         if flat_np.size == 0:
             return float('nan'), float('nan'), float('nan')
-        q95 = float(np.percentile(flat_np, 95))
-        q99 = float(np.percentile(flat_np, 99))
+        p95 = float(np.percentile(flat_np, 95))
+        p99 = float(np.percentile(flat_np, 99))
         wet_freq = float(np.mean(flat_np > wet_threshold_mm))
-        return q95, q99, wet_freq
+        return p95, p99, wet_freq
     
-    q95g, q99g, wfg = _metrics(G, M)
-    out = {'gen_q95': q95g, 'gen_q99': q99g, 'gen_wet_freq': wfg}
+    p95g, p99g, wfg = _metrics(G, M)
+    out = {'gen_p95': p95g, 'gen_p99': p99g, 'gen_wet_freq': wfg}
     if H is not None:
-        q95h, q99h, wfh = _metrics(H, M)
-        out.update({'hr_q95': q95h, 'hr_q99': q99h, 'hr_wet_freq': wfh})
+        p95h, p99h, wfh = _metrics(H, M)
+        out.update({'hr_p95': p95h, 'hr_p99': p99h, 'hr_wet_freq': wfh})
 
     return out
 

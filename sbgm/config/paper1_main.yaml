@@ -251,6 +251,12 @@ evaluation:
     hr_bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for HR data (for stationary cutout)
     lr_bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for LR data (for stationary cutout)
 
+generation:
+  fixed_dates: true # Whether to use same fixed dates every epoch for generation
+  random_dates: true # Whether to use random dates for generation (either random or sequential)
+  start_index: 0 # Start index for fixed dates
+  seed: 504 # Random seed for fixed dates
+
   logging:
     file_level: INFO # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     console_level: WARNING # Console logging level

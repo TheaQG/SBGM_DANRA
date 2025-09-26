@@ -199,41 +199,86 @@ def plot_sample(sample,
         else:
             title = f"{key}"
 
-        # If dual-LR (C=2, H, W), show two side-by-side panels in the same cell
+        # If dual-LR (C=2, H, W), add an extra axis to show the second channel
         if isinstance(img_data, (torch.Tensor, np.ndarray)):
             arr = img_data.detach().cpu().numpy() if isinstance(img_data, torch.Tensor) else img_data
             if arr.ndim == 3 and arr.shape[0] == 2:
-                # Clear the main axis and plit it into two inset axes
-                ax.set_frame_on(False)
-                ax.set_xticks([]); ax.set_yticks([])
-                # Left and right halves
-                left_ax = ax.inset_axes([0, 0, 0.48, 1])
-                right_ax = ax.inset_axes([0.52, 0, 0.48, 1])
+                # Create a GridSpec to hold two subplots side by side
+                gs = GridSpec(1, 2, figure=fig, wspace=0.1)
+                ax1 = fig.add_subplot(gs[0, 0])
+                ax2 = fig.add_subplot(gs[0, 1])
 
-                left_img, _ = _to_imshow_image(arr[0], prefer_channel=0)
-                right_img, _ = _to_imshow_image(arr[1], prefer_channel=0)
+                # First channel
+                img2d_1, _ = _to_imshow_image(arr[0], prefer_channel=0)
+                im1 = ax1.imshow(img2d_1, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
+                ax1.set_title(f"{title} (ch 1)", fontsize=10)
+                ax1.set_xticks([])
+                ax1.set_yticks([])
 
-                # Get new vmin/vmax for each half
-                if force_matching_scale and global_min is not None and global_max is not None:
-                    l_vmin = global_min.get(key, np.nanmin(left_img)) # get min from dict or compute from data
-                    l_vmax = global_max.get(key, np.nanmax(left_img)) # get max from dict or compute from data
-                    r_vmin = global_min.get(key, np.nanmin(right_img)) # get min from dict or compute from data
-                    r_vmax = global_max.get(key, np.nanmax(right_img)) # get max from dict or compute from data
-                else:
-                    l_vmin, l_vmax = np.nanmin(left_img), np.nanmax(left_img)
-                    r_vmin, r_vmax = np.nanmin(right_img), np.nanmax(right_img)
+                # Second channel
+                img2d_2, _ = _to_imshow_image(arr[1], prefer_channel=0)
+                im2 = ax2.imshow(img2d_2, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
+                ax2.set_title(f"{title} (ch 2)", fontsize=10)
+                ax2.set_xticks([])
+                ax2.set_yticks([])
 
-                left_ax.imshow(left_img, cmap=cmap, vmin=l_vmin, vmax=l_vmax, interpolation='nearest', origin='lower')
-                right_ax.imshow(right_img, cmap=cmap, vmin=r_vmin, vmax=r_vmax, interpolation='nearest', origin='lower')
-                left_ax.set_title(f"{title} (ch0)", fontsize=8)
-                right_ax.set_title(f"{title} (ch1)", fontsize=8)
-                left_ax.set_xticks([]); left_ax.set_yticks([])
-                right_ax.set_xticks([]); right_ax.set_yticks([])
+                # Optionally overlay LSM contour on both channels if applicable
+                if overlay_lsm_contour and ((key.endswith('_hr') or key.endswith('_hr_original')) or
+                                            (key.endswith('_lr') or key.endswith('_lr_original'))):
+                    mask_key = "lsm_hr" if ("lsm_hr" in sample and sample["lsm_hr"] is not None) else None
+                    if mask_key is not None:
+                        m = sample[mask_key]
+                        m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
+                        try:
+                            # Ensure float and pick a single transition level between land(1)/ocean(0)
+                            m = m.astype(float, copy=False)
+                            ax1.contour(m, levels=[0.5], colors='white', linewidths=0.8)
+                            ax2.contour(m, levels=[0.5], colors='white', linewidths=0.8)
+                        except Exception as e:
+                            logger.warning(f"Could not overlay LSM contour on {key}: {e}")
 
-                # Optionally add small labels at top-right of each mini-plot
-                # left_ax.text(0.98, 0.02, "HR+LR z", ha='right', va='bottom', transform=left_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
-                # right_ax.text(0.98, 0.02, "LR z", ha='right', va='bottom', transform=right_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
-                continue # Skip the rest of the loop to avoid double-plotting
+                # Add colorbars to both subplots
+                cbar1 = fig.colorbar(im1, ax=ax1, orientation='vertical', fraction=0.046, pad=0.04)
+                cbar2 = fig.colorbar(im2, ax=ax2, orientation='vertical', fraction=0.046, pad=0.04)
+                # Optionally add boxplots to both subplots
+                _add_colorbar_and_boxplot(fig, ax1, im1, arr[0], boxplot=True)
+                _add_colorbar_and_boxplot(fig, ax2, im2, arr[1], boxplot=True)
+                continue  # Move to next key after handling dual-channel
+        # if isinstance(img_data, (torch.Tensor, np.ndarray)):
+        #     arr = img_data.detach().cpu().numpy() if isinstance(img_data, torch.Tensor) else img_data
+        #     if arr.ndim == 3 and arr.shape[0] == 2:
+        #         # Clear the main axis and plit it into two inset axes
+        #         ax.set_frame_on(False)
+        #         ax.set_xticks([]); ax.set_yticks([])
+        #         # Left and right halves
+        #         left_ax = ax.inset_axes([0, 0, 0.48, 1])
+        #         right_ax = ax.inset_axes([0.52, 0, 0.48, 1])
+
+        #         left_img, _ = _to_imshow_image(arr[0], prefer_channel=0)
+        #         right_img, _ = _to_imshow_image(arr[1], prefer_channel=0)
+
+        #         # Get new vmin/vmax for each half
+        #         if force_matching_scale and global_min is not None and global_max is not None:
+        #             l_vmin = global_min.get(key, np.nanmin(left_img)) # get min from dict or compute from data
+        #             l_vmax = global_max.get(key, np.nanmax(left_img)) # get max from dict or compute from data
+        #             r_vmin = global_min.get(key, np.nanmin(right_img)) # get min from dict or compute from data
+        #             r_vmax = global_max.get(key, np.nanmax(right_img)) # get max from dict or compute from data
+        #         else:
+        #             l_vmin, l_vmax = np.nanmin(left_img), np.nanmax(left_img)
+        #             r_vmin, r_vmax = np.nanmin(right_img), np.nanmax(right_img)
+
+        #         left_ax.imshow(left_img, cmap=cmap, vmin=l_vmin, vmax=l_vmax, interpolation='nearest', origin='lower')
+        #         right_ax.imshow(right_img, cmap=cmap, vmin=r_vmin, vmax=r_vmax, interpolation='nearest', origin='lower')
+        #         left_ax.set_title(f"{title} (ch0)", fontsize=8)
+        #         right_ax.set_title(f"{title} (ch1)", fontsize=8)
+        #         left_ax.set_xticks([]); left_ax.set_yticks([])
+        #         right_ax.set_xticks([]); right_ax.set_yticks([])
+
+        #         # Optionally add small labels at top-right of each mini-plot
+        #         # left_ax.text(0.98, 0.02, "HR+LR z", ha='right', va='bottom', transform=left_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
+        #         # right_ax.text(0.98, 0.02, "LR z", ha='right', va='bottom', transform=right_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
+        #         continue # Skip the rest of the loop to avoid double-plotting
+
 
         # Fallback: single-channel or anything else -> regular imshow
         img2d, _ = _to_imshow_image(img_data, prefer_channel=0)
@@ -750,6 +795,7 @@ def plot_live_training_metrics(
         hr_lr_corr: List[float],
         *,
         save_dir: str,
+        n_samples: Optional[int] = None,
         filename: str = "live_metrics.png",
         show: bool = False,
         title: str | None = None,
@@ -761,6 +807,10 @@ def plot_live_training_metrics(
     title = title or "Live Training Metrics"
     if land_only:
         title += " (land only)"
+
+    if n_samples is not None:
+        title = f"{title} (n={n_samples} samples)"
+        
     fig, ax = plt.subplots(figsize=(8, 5))
     steps_np = np.asarray(steps, dtype=float)
     if len(steps_np) == 0:
@@ -831,6 +881,7 @@ def plot_fss_history(
     epoch_list: Optional[List[int]] = None,
     *,
     save_dir: str,
+    n_samples: Optional[int] = None,
     filename: str = "fss_history.png",
     title: str = "FSS over epochs",
     show: bool = False,
@@ -858,6 +909,9 @@ def plot_fss_history(
         ok = np.isfinite(y)
         if ok.any():
             ax.plot(epochs[ok], y[ok], label=s, lw=2)
+
+    if n_samples is not None:
+        title = f"{title} (n={n_samples} samples)"
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel("FSS")
@@ -915,6 +969,7 @@ def plot_psd_slope_history(
     epoch_list: Optional[List[int]] = None,
     *,
     save_dir: str,
+    n_samples: Optional[int] = None,
     filename: str = "psd_slope_history.png",
     title: str = "PSD slope over epochs",
     show: bool = False,
@@ -939,6 +994,9 @@ def plot_psd_slope_history(
     ln2 = []
     if np.isfinite(hr).any():
         ln2 = ax1.plot(epochs, hr, label="β_hr", lw=2)
+
+    if n_samples is not None:
+        title = f"{title} (n={n_samples} samples)"
 
     ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Slope β")
@@ -975,11 +1033,11 @@ def plot_quantiles_wetday_epoch(
     show: bool = False,
 ):
     """
-    Grouped bar chart for Q95, Q99, wet-day freq (gen vs HR if available).
-    Expected keys: 'gen_q95','gen_q99','gen_wet_freq' and optionally 'hr_*'
+    Grouped bar chart for P95, P99, wet-day freq (gen vs HR if available).
+    Expected keys: 'gen_p95','gen_p99','gen_wet_freq' and optionally 'hr_*'
     """
-    keys = [("q95", "gen_q95", "hr_q95"),
-            ("q99", "gen_q99", "hr_q99"),
+    keys = [("p95", "gen_p95", "hr_p95"),
+            ("p99", "gen_p99", "hr_p99"),
             ("wetfreq", "gen_wet_freq", "hr_wet_freq")]
     labels = []
     gen_vals, hr_vals = [], []
@@ -1012,12 +1070,13 @@ def plot_quantiles_wetday_history(
     epoch_list: Optional[List[int]] = None,
     *,
     save_dir: str,
+    n_samples: Optional[int] = None,
     filename: str = "quantiles_wetday_history.png",
-    title: str = "Q95/Q99/Wet-day over epochs",
+    title: str = "P95/P99/Wet-day over epochs",
     show: bool = False,
 ):
     """
-    Line plots for Q95/Q99/wet-day across epochs (gen and HR where available).
+    Line plots for P95/P99/wet-day across epochs (gen and HR where available).
     """
     if not q_hist:
         logger.warning("[plot] plot_quantiles_wetday_history: empty history; skipping.")
@@ -1034,8 +1093,8 @@ def plot_quantiles_wetday_history(
         return g, h
 
     series = [
-        ("Q95", "gen_q95", "hr_q95"),
-        ("Q99", "gen_q99", "hr_q99"),
+        ("P95", "gen_p95", "hr_p95"),
+        ("P99", "gen_p99", "hr_p99"),
         ("Wet-day freq", "gen_wet_freq", "hr_wet_freq"),
     ]
 
@@ -1058,6 +1117,9 @@ def plot_quantiles_wetday_history(
     axes[2].set_xlabel("Epoch")
     axes[0].set_ylabel("Value")
     axes[0].legend(loc="best")
+
+    if n_samples is not None:
+        title = f"{title} (n={n_samples} samples)"
 
     fig.suptitle(title)
     fig.tight_layout()
