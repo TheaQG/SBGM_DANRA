@@ -264,12 +264,13 @@ def compute_q95_q99_and_wet_day(
 
 
 @torch.no_grad() # Disable gradient computation for monitoring
-def in_loop_metrics(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None, eval_land_only: bool = False):
+def in_loop_metrics(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None, eval_land_only: bool = False, land_mask=None):
     """
         Compute a set of monitoring metrics for EDM models during training.
         Returns a dict with keys:
         - 'edm_cosine': Cosine similarity metric between predicted x0_hat and x0
         - 'hr_lr_corr': Pearson correlation coefficient between predicted x0_hat and lr_ups (if lr_ups is provided)
+
     """
     if not isinstance(loss_obj, EDMLoss):
         logger.warning("edm_cosine_metric is only defined for EDMLoss. Returning None.")
@@ -287,77 +288,127 @@ def in_loop_metrics(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_c
     # Model is EDMPrecondUNet, predict x0_hat
     x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
 
-    # Flatten per-sample and compute cosine
-    cos = F.cosine_similarity(x0_hat.flatten(1), x0.flatten(1), dim=1, eps=1e-8).mean()
+    if land_mask is not None:
+        mask_use = land_mask
+    else:
+        mask_use = lsm_cond # Use lsm_cond as land mask if available
+        logger.warning("land_mask is None. Using lsm_cond as land mask for eval_land_only metrics. Ensure lsm_cond is a valid land mask.")
 
-    # Optional HR-LR correlation if lr_ups is provided
+
     if eval_land_only:
+        cos = masked_cosine_similarity(x0_hat, x0, mask=mask_use, weighted=True) 
+        # Optional HR-LR correlation if lr_ups is provided
         if lsm_cond is None:
             logger.warning("eval_land_only=True but lsm_cond is None. Cannot mask for land-only correlation. Returning NaN for hr_lr_corr.")
             r = float('nan')
         else:
             r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=lsm_cond) if lr_ups is not None else float('nan')
     else:
+        cos = masked_cosine_similarity(x0_hat, x0, mask=None, weighted=False)
         r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=None) if lr_ups is not None else float('nan')
 
     return {'edm_cosine': float(cos), 'hr_lr_corr': float(r)}
 
 
-@torch.no_grad() # Disable gradient computation for monitoring
-def edm_cosine_metric(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None):
-    """
-    Compute the cosine similarity metric for EDM models.
-    Similarity metric between predicted x0_hat and x0 for EDM.
-    """
-    if not isinstance(loss_obj, EDMLoss):
-        logger.warning("edm_cosine_metric is only defined for EDMLoss. Returning None.")
-        return None  # Metric only defined for EDMLoss
+# @torch.no_grad() # Disable gradient computation for monitoring
+# def edm_cosine_metric(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None, sdf_cond=None):
+#     """
+#     Compute the cosine similarity metric for EDM models.
+#     Similarity metric between predicted x0_hat and x0 for EDM.
+#     """
+#     if not isinstance(loss_obj, EDMLoss):
+#         logger.warning("edm_cosine_metric is only defined for EDMLoss. Returning None.")
+#         return None  # Metric only defined for EDMLoss
     
-    B = x0.shape[0]
-    device = x0.device
-    dtype = x0.dtype
+#     B = x0.shape[0]
+#     device = x0.device
+#     dtype = x0.dtype
 
-    # Sample sigma from log-normal distribution
-    sigma = loss_obj.sample_sigma(B, device, dtype=dtype)
-    n = torch.randn_like(x0)
-    x_t = x0 + sigma.view(B, 1, 1, 1) * n
+#     # Sample sigma from log-normal distribution
+#     sigma = loss_obj.sample_sigma(B, device, dtype=dtype)
+#     n = torch.randn_like(x0)
+#     x_t = x0 + sigma.view(B, 1, 1, 1) * n
     
-    # Model is EDMPrecondUNet, predict x0_hat
-    x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
+#     # Model is EDMPrecondUNet, predict x0_hat
+#     x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
 
-    # Flatten per-sample and compute cosine
-    cos = F.cosine_similarity(x0_hat.flatten(1), x0.flatten(1), dim=1, eps=1e-8).mean()
-    return float(cos)
+#     # Flatten per-sample and compute cosine
+#     cos = F.cosine_similarity(x0_hat.flatten(1), x0.flatten(1), dim=1, eps=1e-8).mean()
+#     return float(cos)
+
+# @torch.no_grad()
+# def hr_lr_corrcoef(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None):
+#     """
+#         Compute the Pearson correlation coefficient between predicted x0_hat and lr_ups (upsampled low-res input).
+#         Returns mean correlation over the batch.
+#     """
+#     if not isinstance(loss_obj, EDMLoss):
+#         logger.warning("hr_lr_corrcoef is only defined for EDMLoss. Returning None.")
+#         return None  # Metric only defined for EDMLoss
+#     if lr_ups is None:
+#         logger.warning("lr_ups is required for hr_lr_corrcoef. Returning None.")
+#         return None
+
+#     B = x0.shape[0]
+#     device = x0.device
+#     dtype = x0.dtype
+
+#     # Sample sigma from log-normal distribution
+#     sigma = loss_obj.sample_sigma(B, device, dtype=dtype)
+#     n = torch.randn_like(x0)
+#     x_t = x0 + sigma.view(B, 1, 1, 1) * n
+    
+#     # Model is EDMPrecondUNet, predict x0_hat
+#     with torch.no_grad():
+#         x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
+
+#     # Compute masked correlation coefficient per sample and average
+#     r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=None)
+#     return float(r)
+
+
 
 @torch.no_grad()
-def hr_lr_corrcoef(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_cond=None, y=None, lr_ups=None):
+def masked_cosine_similarity(x_pred: torch.Tensor, x_true: torch.Tensor,
+                             mask: torch.Tensor | None = None,
+                             eps: float = 1e-8,
+                             weighted: bool = True) -> torch.Tensor:
     """
-        Compute the Pearson correlation coefficient between predicted x0_hat and lr_ups (upsampled low-res input).
-        Returns mean correlation over the batch.
+    x_pred, x_true: [B, C, H, W]
+    mask: [B, 1, H, W] or [B, H, W] or [1, H, W] or [H, W]; 1/True = land
+    returns: scalar mean across batch (weighted by valid pixels if weighted=True)
     """
-    if not isinstance(loss_obj, EDMLoss):
-        logger.warning("hr_lr_corrcoef is only defined for EDMLoss. Returning None.")
-        return None  # Metric only defined for EDMLoss
-    if lr_ups is None:
-        logger.warning("lr_ups is required for hr_lr_corrcoef. Returning None.")
-        return None
+    if mask is None:
+        return F.cosine_similarity(x_pred.flatten(1), x_true.flatten(1), dim=1, eps=eps).mean()
 
-    B = x0.shape[0]
-    device = x0.device
-    dtype = x0.dtype
+    # normalize mask shape & type
+    if mask.ndim == 2:
+        mask = mask[None, None]                 # [1,1,H,W]
+    elif mask.ndim == 3:
+        mask = mask[:, None]                    # [B,1,H,W]
+    mask = (mask > 0.5) if mask.dtype != torch.bool else mask
+    m = mask.to(x_pred.dtype)                   # float 0/1
+    if m.shape[0] != x_pred.shape[0]:
+        m = m.expand(x_pred.shape[0], 1, *x_pred.shape[-2:])
+    m = m.expand_as(x_pred)                     # [B,C,H,W]
 
-    # Sample sigma from log-normal distribution
-    sigma = loss_obj.sample_sigma(B, device, dtype=dtype)
-    n = torch.randn_like(x0)
-    x_t = x0 + sigma.view(B, 1, 1, 1) * n
-    
-    # Model is EDMPrecondUNet, predict x0_hat
-    with torch.no_grad():
-        x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
+    # cosine = (x·y)/(||x||·||y||) but only over land pixels
+    num   = (x_pred * x_true * m).flatten(1).sum(dim=1)
+    normx = torch.sqrt((x_pred.pow(2) * m).flatten(1).sum(dim=1) + eps)
+    normy = torch.sqrt((x_true.pow(2) * m).flatten(1).sum(dim=1) + eps)
+    cos_i = num / (normx * normy + eps)         # [B]
 
-    # Compute masked correlation coefficient per sample and average
-    r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=None)
-    return float(r)
+    # samples with no land pixels → NaN, drop them
+    valid_pix = m.flatten(1).sum(dim=1)         # [B]
+    finite = torch.isfinite(cos_i) & (valid_pix > 0)
+    if not finite.any():
+        return torch.tensor(float('nan'), device=x_pred.device)
+
+    if weighted:
+        w = valid_pix[finite]
+        return (cos_i[finite] * w).sum() / (w.sum() + eps)
+    else:
+        return cos_i[finite].mean()
 
 def masked_corrcoef_per_sample(
         a: torch.Tensor, # [B, C, H, W]

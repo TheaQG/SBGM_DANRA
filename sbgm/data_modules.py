@@ -541,6 +541,30 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.hr_model = hr_model
         self.hr_scaling_method = hr_scaling_method
 
+        # ========= Dual-LR/main LR scaling preferences =========
+        self.lr_main_var_scale = (cfg['lowres'].get('lr_main_var_scale', 'HR') if cfg is not None and 'lowres' in cfg else 'HR')
+        fall_back_method = 'log_zscore' if self.hr_variable in ['prcp', 'tp', 'cape'] else 'zscore'
+        self.lr_main_var_scale_method = (cfg['lowres'].get('lr_main_var_scale_method', fall_back_method) if cfg is not None and 'lowres' in cfg else fall_back_method)
+
+        # Name used in stats files for combined HR+LR statistics (fallback to HR if missing)
+        self.combined_stats_model_name = (cfg['lowres'].get('combined_stats_model_name', 'DANRA_ERA5') if cfg is not None and 'lowres' in cfg else 'DANRA_ERA5')
+
+        # Identify the "main" LR condition (matching the HR target variable, if existing)
+        self.main_lr_cond = None
+        if self.hr_variable in self.lr_conditions:
+            self.main_lr_cond = self.hr_variable
+        else:
+            # Common alias pairs for mapping HR var to LR names
+            alias_pairs = [('prcp', 'tp'), ('tp', 'prcp'), ('temp', 't2m'), ('t2m', 'temp')]
+            for hr_name, lr_alias in alias_pairs:
+                if self.hr_variable == hr_name and lr_alias in self.lr_conditions:
+                    self.main_lr_cond = lr_alias
+                    logger.info(f"Main LR condition for HR variable '{self.hr_variable}' set to '{self.main_lr_cond}' using alias mapping.")
+                    break
+        if self.main_lr_cond is None:
+            logger.warning(f"Could not identify a main LR condition matching HR variable '{self.hr_variable}'. Dual-LR logic will be skipped; using standard per-condition scaling.")
+
+
         # Global epsilon for log scaling to avoid log(0)
         self.glob_prcp_epsilon = cfg['transforms'].get('prcp_eps', 0.01) if cfg is not None else 0.01
         
@@ -662,25 +686,146 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
             for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
                 logger.info(f"LR condition: {cond_var}, scaling method: {trans_type}")
-                transform_list = [
+                # Common prefix for all LR transforms
+                prefix = [
                     SafeToTensor(),
                     ResizeTensor(self.lr_size_reduced)
                 ]
+                eps_val = self.glob_prcp_epsilon if cond_var in ['prcp', 'tp', 'cape'] else 0.0
 
-                transform_list.append(get_transforms_from_stats(
-                    variable=cond_var,
-                    model=self.lr_model,
-                    domain_str=domain_str_lr,
-                    crop_region_str=crop_region_lr_str,
-                    scaling_split=scaling_split,
-                    transform_type=trans_type,
-                    buffer_frac=cfg['lowres'].get('buffer_frac', 0.5) if cfg is not None else 0.5,
-                    stats_file_path=stats_load_dir,
-                    eps=self.glob_prcp_epsilon if cond_var in ['prcp', 'tp'] else 0.0,
+                # Is this the main LR condition matching the HR variable?
+                is_main = (self.main_lr_cond is not None and cond_var == self.main_lr_cond)
 
-                ))
-                self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
+                if is_main and self.dual_lr:
+                    # Build TWO channels: (A) combined HR+LR stats (fallback to HR if missing), (B) standard LR-only stats
 
+                    # (A) Combined HR+LR stats
+                    try: 
+                        t_combined = transforms.Compose(prefix + [
+                            get_transforms_from_stats(
+                                variable=cond_var,
+                                model=self.combined_stats_model_name, # TODO: Should be recalculated in stats module and named DANRA_ERA5
+                                domain_str=domain_str_lr,
+                                crop_region_str=crop_region_lr_str,
+                                scaling_split=scaling_split,
+                                transform_type=trans_type,
+                                buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                stats_file_path=stats_load_dir,
+                                eps=eps_val,
+                            )
+                        ])
+                        logger.info(f"Using combined HR+LR stats '{self.combined_stats_model_name}' for dual LR main channel A of condition '{cond_var}'")
+                    except Exception as e:
+                        logger.warning(f"Failed to load combined HR+LR '{self.combined_stats_model_name}' for condition '{cond_var}'. Falling back to HR stats for channel A. Error: {e}")
+                        t_combined = transforms.Compose(prefix + [
+                            get_transforms_from_stats(
+                                variable=cond_var,
+                                model=self.hr_model,
+                                domain_str=domain_str_lr,
+                                crop_region_str=crop_region_lr_str,
+                                scaling_split=scaling_split,
+                                transform_type=trans_type,
+                                buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                stats_file_path=stats_load_dir,
+                                eps=eps_val,
+                            )
+                        ])
+                    # (B) Standard LR-only stats
+                    t_lr_only = transforms.Compose(prefix + [
+                        get_transforms_from_stats(
+                            variable=cond_var,
+                            model=self.lr_model,
+                            domain_str=domain_str_lr,
+                            crop_region_str=crop_region_lr_str,
+                            scaling_split=scaling_split,
+                            transform_type=trans_type,
+                            buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                            stats_file_path=stats_load_dir,
+                            eps=eps_val,
+                        )
+                    ])
+
+                    # Wrap into a callable that returns a stacked 2-channel tensor
+                    self.lr_transforms_dict[cond_var] = DualLRTransform(t_combined, t_lr_only)
+                    logger.info(f"Dual-LR transform set for main condition '{cond_var}': returning 2-channels [combined, LR-only].")
+                elif is_main and not self.dual_lr:
+                    # Single channel, but choose statistics source as per lr_main_var_scale
+                    scale_mode = str(self.lr_main_var_scale).upper()
+                    if scale_mode == 'HR':
+                        stats_model = self.hr_model
+                        ds, cr = domain_str_hr, crop_region_hr_str
+                    elif scale_mode == 'LR':
+                        stats_model = self.lr_model
+                        ds, cr = domain_str_lr, crop_region_lr_str
+                    else: # Combined 'HR_LR' by default
+                        stats_model = self.combined_stats_model_name
+                        ds, cr = domain_str_lr, crop_region_lr_str # NOTE: Need to consider with different domain sizes
+                    try:
+                        transform_list = prefix + [
+                            get_transforms_from_stats(
+                                variable=cond_var,
+                                model=stats_model,
+                                domain_str=ds,
+                                crop_region_str=cr,
+                                scaling_split=scaling_split,
+                                transform_type=trans_type,
+                                buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                stats_file_path=stats_load_dir,
+                                eps=eps_val,
+                            )
+                        ]
+                        logger.info(f"Main LR condition '{cond_var}' scaled using '{scale_mode}' stats from model '{stats_model}'.")
+                    except Exception as e:
+                        # Fallbacks: combined -> HR, otherwise LR
+                        if scale_mode == 'HR_LR':
+                            logger.warning(f"Combined stats '{stats_model}' not found for main condition '{cond_var}'. Falling back to HR stats. Error: {e}")
+                            transform_list = prefix + [
+                                get_transforms_from_stats(
+                                    variable=cond_var,
+                                    model=self.hr_model,
+                                    domain_str=domain_str_hr,
+                                    crop_region_str=crop_region_hr_str,
+                                    scaling_split=scaling_split,
+                                    transform_type=trans_type,
+                                    buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                    stats_file_path=stats_load_dir,
+                                    eps=eps_val,
+                                )
+                            ]
+                        else:
+                            logger.warning(f"Requested stats '{stats_model}' not found for main condition '{cond_var}'. Falling back to LR stats. Error: {e}")
+                            transform_list = prefix + [
+                                get_transforms_from_stats(
+                                    variable=cond_var,
+                                    model=self.lr_model,
+                                    domain_str=domain_str_lr,
+                                    crop_region_str=crop_region_lr_str,
+                                    scaling_split=scaling_split,
+                                    transform_type=trans_type,
+                                    buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                    stats_file_path=stats_load_dir,
+                                    eps=eps_val,
+                                )
+                            ]
+                    self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
+                else:
+                    # Not main condition - standard single-channel LR-only stats
+                    transform_list = prefix + [
+                        get_transforms_from_stats(
+                            variable=cond_var,
+                            model=self.lr_model,
+                            domain_str=domain_str_lr,
+                            crop_region_str=crop_region_lr_str,
+                            scaling_split=scaling_split,
+                            transform_type=trans_type,
+                            buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                            stats_file_path=stats_load_dir,
+                            eps=eps_val,
+                        )
+                    ]
+                    self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
+
+                    
             # 2. Set HR target transform
             hr_transform_list = [
                 SafeToTensor(),

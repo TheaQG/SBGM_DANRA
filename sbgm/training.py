@@ -29,14 +29,12 @@ from sbgm.plotting_utils import (
     )
 from sbgm.monitoring import (
     report_precip_extremes,
-    edm_cosine_metric,
     compute_fss_at_scales,
     compute_psd_slope,
     compute_q95_q99_and_wet_day,
     tensor_stats,
     save_histogram,
     plot_saved_histograms,
-    hr_lr_corrcoef,
     in_loop_metrics
     )
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
@@ -812,12 +810,12 @@ class TrainingPipeline_general:
                 monitor_cfg = self.cfg.get('monitoring', {})
                 log_every = monitor_cfg.get('edm_metrics_every', 50)
                 if edm_on and log_every > 0 and (idx % log_every == 0):
-                    cos_val = edm_cosine_metric(self.loss_fn, model_eval, x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo, lr_ups=lr_ups_baseline)
-                    if cos_val is not None:
-                        if verbose:
-                            logger.info(f"→ [monitor][val] Step {idx}: EDM cosine metric: {cos_val:.4f}")
-                        if self.writer is not None:
-                            self.writer.add_scalar('monitoring/edm_cosine_metric_val', cos_val, (current_epoch - 1) * len(dataloader) + idx)
+                    metrics = in_loop_metrics(loss_obj=self.loss_fn, model=self.model,
+                        x0=x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo,
+                        lr_ups=lr_ups_baseline, eval_land_only=self.eval_land_only)
+                    if verbose and metrics is not None:
+                        logger.info(f"→ [monitor][val] Step {idx}: EDM cosine metric: {metrics.get('edm_cosine', float('nan')):.4f}")
+                        logger.info(f"→ [monitor][val] Step {idx}: HR-LR corr: {metrics.get('hr_lr_corr', float('nan')):.4f}")
 
             # Add batch loss to total loss
             loss += batch_loss.item()
@@ -1178,7 +1176,8 @@ class TrainingPipeline_general:
                 save_dir=self.path_metrics,
                 filename='inLoop_metrics_timeseries.png',
                 show=self.cfg['visualization'].get('show_figs', False),
-                title="In-loop training metrics (EDM cosine, HR-LR corr)"
+                title="In-loop training metrics (EDM cosine, HR-LR corr)",
+                land_only=self.eval_land_only
             )
             logger.info(f"→ Live metrics plot saved to {out}")
 

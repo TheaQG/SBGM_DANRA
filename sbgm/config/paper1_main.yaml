@@ -37,6 +37,7 @@ lowres:
   scaling_methods: ["zscore", "log_zscore"] # Scaling methods for low-res data
   dual_lr: false # Whether to use dual (one scaled w. global (HR+LR) statistics, one with LR stats) low-res (prcp or temp) data. When true, LR parsed in two channels, one scaled w. LR stats, one w. HR+LR stats
   lr_main_var_scale: "HR_LR" # Which statistics to use for scaling the main low-res variable (prcp or temp) when dual_lr is False ("LR": lr only, "HR": hr only, "HR_LR": both)
+  lr_main_var_scale_method: "log_zscore" # Which scaling method to use for the main low-res variable (prcp or temp) when dual_lr is False
   buffer_frac: 0.0
   data_size: [128, 128] # Size of the low-res data
   resize_factor: 1 # Factor to resize low-res data (used for testing at lower resolutions)
@@ -103,6 +104,7 @@ visualization:
   force_matching_scale: true # Whether to force matching scale in visualization
   add_boxplot_per_panel: true # Whether to add boxplot per panel in visualization
   add_boxplot_summary: true # Whether to add summary boxplot in visualization
+  plot_dual_lr_channel: 0 # What LR channel to plot when dual_lr is True (0 or 1)
   # summary_boxplot_keys: # <-- optional; overrides default [generated, hr, matching-lr]
   #   - generated
   #   - prcp_hr

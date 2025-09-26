@@ -17,6 +17,49 @@ from sbgm.variable_utils import get_units, get_cmaps, get_cmap_for_variable
 logger = logging.getLogger(__name__)
 
 
+# --- Robust conversion for imshow ---
+import numpy as _np
+import torch as _torch
+
+def _to_imshow_image(arr, prefer_channel: int = 0):
+    """
+    Return (img, was_rgb) where `img` is suitable for plt.imshow.
+      - 2D → as is
+      - 3D (H,W,3|4) → RGB(A)
+      - 3D (C,H,W) → pick channel `prefer_channel` (or squeeze if C==1)
+      - torch.Tensor → to cpu().numpy()
+    """
+    if isinstance(arr, _torch.Tensor):
+        arr = arr.detach().cpu().numpy()
+    arr = _np.asarray(arr)
+
+    if arr.ndim == 2:
+        return arr, False
+
+    if arr.ndim == 3:
+        H, W = arr.shape[-2], arr.shape[-1]
+        # RGB(A) as (H,W,3|4)
+        if arr.shape[0] == H and arr.shape[1] == W and arr.shape[-1] in (3, 4):
+            return arr, True
+        # Channel-first (C,H,W)
+        if arr.shape[0] in (1, 2, 3, 4):
+            C = arr.shape[0]
+            if C == 1:
+                return arr[0], False
+            ch = max(0, min(prefer_channel, C - 1))
+            return arr[ch], False
+        # Generic fallback for (H,W,C)
+        if arr.shape[-1] in (3, 4) and arr.shape[0] == H and arr.shape[1] == W:
+            return arr, True
+
+    # Last resort: squeeze singletons or take first slice
+    squeezed = _np.squeeze(arr)
+    if squeezed.ndim == 2:
+        return squeezed, False
+    view = squeezed.reshape((-1, squeezed.shape[-2], squeezed.shape[-1]))[0]
+    return view, False
+
+
 def plot_sample(sample,
                 cfg,
                 figsize=(15, 4)):
@@ -131,28 +174,7 @@ def plot_sample(sample,
             vmin = np.nanmin(img_data)
             vmax = np.nanmax(img_data)
 
-        # Plot the image 
-        im = ax.imshow(img_data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
-
-        # ax.invert_yaxis()  # Invert y-axis to match the original image orientation
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-        # Optionally overlay the LSM contour to visually verify alignment
-        if overlay_lsm_contour and ((key.endswith('_hr') or key.endswith('_hr_original')) or
-                                    (key.endswith('_lr') or key.endswith('_lr_original'))):
-            mask_key = "lsm_hr" if ("lsm_hr" in sample and sample["lsm_hr"] is not None) else None
-            if mask_key is not None:
-                m = sample[mask_key]
-                m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
-                try:
-                    # Ensure float and pick a single transition level between land(1)/ocean(0)
-                    m = m.astype(float, copy=False)
-                    ax.contour(m, levels=[0.5], colors='white', linewidths=0.8)
-                except Exception as e:
-                    logger.warning(f"Could not overlay LSM contour on {key}: {e}")
-
-        # Set column title
+        # Title logic
         base = None
 
         if key.endswith('_hr'):
@@ -176,6 +198,66 @@ def plot_sample(sample,
                 title = f"{key}"
         else:
             title = f"{key}"
+
+        # If dual-LR (C=2, H, W), show two side-by-side panels in the same cell
+        if isinstance(img_data, (torch.Tensor, np.ndarray)):
+            arr = img_data.detach().cpu().numpy() if isinstance(img_data, torch.Tensor) else img_data
+            if arr.ndim == 3 and arr.shape[0] == 2:
+                # Clear the main axis and plit it into two inset axes
+                ax.set_frame_on(False)
+                ax.set_xticks([]); ax.set_yticks([])
+                # Left and right halves
+                left_ax = ax.inset_axes([0, 0, 0.48, 1])
+                right_ax = ax.inset_axes([0.52, 0, 0.48, 1])
+
+                left_img, _ = _to_imshow_image(arr[0], prefer_channel=0)
+                right_img, _ = _to_imshow_image(arr[1], prefer_channel=0)
+
+                # Get new vmin/vmax for each half
+                if force_matching_scale and global_min is not None and global_max is not None:
+                    l_vmin = global_min.get(key, np.nanmin(left_img)) # get min from dict or compute from data
+                    l_vmax = global_max.get(key, np.nanmax(left_img)) # get max from dict or compute from data
+                    r_vmin = global_min.get(key, np.nanmin(right_img)) # get min from dict or compute from data
+                    r_vmax = global_max.get(key, np.nanmax(right_img)) # get max from dict or compute from data
+                else:
+                    l_vmin, l_vmax = np.nanmin(left_img), np.nanmax(left_img)
+                    r_vmin, r_vmax = np.nanmin(right_img), np.nanmax(right_img)
+
+                left_ax.imshow(left_img, cmap=cmap, vmin=l_vmin, vmax=l_vmax, interpolation='nearest', origin='lower')
+                right_ax.imshow(right_img, cmap=cmap, vmin=r_vmin, vmax=r_vmax, interpolation='nearest', origin='lower')
+                left_ax.set_title(f"{title} (ch0)", fontsize=8)
+                right_ax.set_title(f"{title} (ch1)", fontsize=8)
+                left_ax.set_xticks([]); left_ax.set_yticks([])
+                right_ax.set_xticks([]); right_ax.set_yticks([])
+
+                # Optionally add small labels at top-right of each mini-plot
+                # left_ax.text(0.98, 0.02, "HR+LR z", ha='right', va='bottom', transform=left_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
+                # right_ax.text(0.98, 0.02, "LR z", ha='right', va='bottom', transform=right_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
+                continue # Skip the rest of the loop to avoid double-plotting
+
+        # Fallback: single-channel or anything else -> regular imshow
+        img2d, _ = _to_imshow_image(img_data, prefer_channel=0)
+        im = ax.imshow(img2d, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
+
+        # ax.invert_yaxis()  # Invert y-axis to match the original image orientation
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Optionally overlay the LSM contour to visually verify alignment
+        if overlay_lsm_contour and ((key.endswith('_hr') or key.endswith('_hr_original')) or
+                                    (key.endswith('_lr') or key.endswith('_lr_original'))):
+            mask_key = "lsm_hr" if ("lsm_hr" in sample and sample["lsm_hr"] is not None) else None
+            if mask_key is not None:
+                m = sample[mask_key]
+                m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
+                try:
+                    # Ensure float and pick a single transition level between land(1)/ocean(0)
+                    m = m.astype(float, copy=False)
+                    ax.contour(m, levels=[0.5], colors='white', linewidths=0.8)
+                except Exception as e:
+                    logger.warning(f"Could not overlay LSM contour on {key}: {e}")
+
+
         ax.set_title(title, fontsize=10)
 
 
@@ -318,6 +400,12 @@ def plot_samples_and_generated(
     add_boxplot_per_panel = bool(cfg_vis.get('add_boxplot_per_panel', True))
     add_boxplot_summary = bool(cfg_vis.get('add_boxplot_summary', False))
     summary_boxplot_keys = cfg_vis.get('summary_boxplot_keys', None)  # list of keys for summary boxplot column
+
+    plot_dual_lr_channel = 0
+    try: 
+        plot_dual_lr_channel = int(cfg_vis.get('plot_dual_lr_channel', 0))
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------ utils
     def to_numpy(x):
@@ -546,7 +634,8 @@ def plot_samples_and_generated(
             if img_data.ndim == 3 and img_data.shape[0] == 1:
                 img_data = img_data.squeeze(0)
 
-            im = ax.imshow(img_data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
+            img2d, _ = _to_imshow_image(img_data, prefer_channel=plot_dual_lr_channel)
+            im = ax.imshow(img2d, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
             ax.invert_yaxis()
             ax.set_xticks([])
             ax.set_yticks([])
@@ -587,7 +676,7 @@ def plot_samples_and_generated(
             
             # ========= Add per-panel boxplot if requested next to colorbar =========
             if key.endswith(("generated", "_hr", "_lr", "_hr_original", "_lr_original")) and add_boxplot_per_panel:
-                _add_colorbar_and_boxplot(fig, ax, im, img_data, boxplot=True, ylim=(vmin, vmax))
+                _add_colorbar_and_boxplot(fig, ax, im, img2d, boxplot=True, ylim=(vmin, vmax))
             else:
                 # Still add a colorbar but no boxplot for non-variable maps / extras
                 divide = make_axes_locatable(ax)
@@ -596,7 +685,7 @@ def plot_samples_and_generated(
             
             # ========= Collect for the summary boxplot if requested =========
             if add_boxplot_summary and key in row_summary_keys:
-                vals = _finite_flat(img_data)
+                vals = _finite_flat(img2d)
                 if vals.size:
                     if key == gen_key:
                         label = hr_key.replace('_hr', ' gen')
@@ -635,6 +724,7 @@ def plot_samples_and_generated(
                     
             else:
                 axd.axis('off')
+    fig.text(0.5, 0.01, f"Dual-LR plotting: channel {plot_dual_lr_channel} (if applicable) (ch0~HR z-space, ch1~LR z-space)", ha='center', fontsize=8, va='bottom', color='gray')
     # Tighten layout
     fig.tight_layout()
 
@@ -663,11 +753,14 @@ def plot_live_training_metrics(
         filename: str = "live_metrics.png",
         show: bool = False,
         title: str | None = None,
+        land_only: bool = False
 ):
     """
         Line plots for lightweight in-loop metrics collected over steps.
     """
     title = title or "Live Training Metrics"
+    if land_only:
+        title += " (land only)"
     fig, ax = plt.subplots(figsize=(8, 5))
     steps_np = np.asarray(steps, dtype=float)
     if len(steps_np) == 0:
