@@ -59,291 +59,184 @@ def _to_imshow_image(arr, prefer_channel: int = 0):
     view = squeezed.reshape((-1, squeezed.shape[-2], squeezed.shape[-1]))[0]
     return view, False
 
-
-def plot_sample(sample,
-                cfg,
-                figsize=(15, 4)):
+def plot_sample(sample, cfg, figsize=(15, 4)):
     """
-        Plot a single sample (dictionary from the dataset class) in a consistent layout
-        
-        Expected keys in sample:
-            - HR image: f"{var}_hr" (and optionally f"{var}_hr_original")
-            - LR condition(s): keys ending with "_lr" (and optionally "_lr_original")
-            - HR mask for ocean masking: "lsm_hr" (used only for HR images)
-            - Extra keys (e.g. geo variables) if provided via extra keys
-
-        Parameters:
-            - sample: Dictionary containing the sample
-            - cfg: Configuration dictionary containing model and variable information
-            - figsize: Tuple for figure size
-
-        Returns:
-            - fig: The matplotlib Figure object
+    Plot a single sample in a consistent layout.
+    - Dual-LR tensors [2,H,W] are expanded into two separate axes (ch0, ch1).
+    - Optional lock of vmin/vmax across the dual pair via cfg['visualization']['dual_lr_lock_scale'].
     """
-    # Extract parameters from cfg
+    # === cfg bits
     hr_model = cfg['highres']['model']
     hr_units, lr_units = get_units(cfg)
     lr_model = cfg['lowres']['model']
     var = cfg['highres']['variable']
-    show_ocean = cfg['visualization']['show_ocean']
-    force_matching_scale = cfg['visualization']['force_matching_scale']
-    global_min = cfg['highres']['scaling_params'] if 'scaling_params' in cfg['highres'] else None
-    global_max = cfg['highres']['scaling_params'] if 'scaling_params' in cfg['highres'] else None
-    extra_keys = cfg['stationary_conditions']['geographic_conditions']['geo_variables']
+    show_ocean = cfg['visualization'].get('show_ocean', True)
+    force_matching_scale = cfg['visualization'].get('force_matching_scale', False)
+    global_min = cfg['highres'].get('scaling_params', None)
+    global_max = cfg['highres'].get('scaling_params', None)
+    extra_keys = cfg.get('stationary_conditions', {}).get('geographic_conditions', {}).get('geo_variables', None)
     hr_cmap, lr_cmap_dict = get_cmaps(cfg)
     default_lr_cmap = 'inferno'
     extra_cmap_dict = {"topo": "terrain", "sdf": "coolwarm", "lsm": "binary"}
 
-    # === Insert visualization options from cfg if available ===
+    # visualization options
     cfg_vis = cfg.get('visualization', {}) if isinstance(cfg, dict) else {}
     overlay_lsm_contour = bool(cfg_vis.get('overlay_lsm_contour', False))
+    dual_lr_lock_scale = bool(cfg_vis.get('dual_lr_lock_scale', True))  # NEW
 
-    # Build list of keys for "variable" images:
+    # Build items
     hr_key = f"{var}_hr"
-    # Find LR keys from sample (assume keys ending with '_lr'): sort alphabetically for consistency
     lr_keys = sorted([k for k in sample.keys() if k.endswith('_lr')])
 
-    # Scaled keys: HR and LR images
-    scaled_keys = [hr_key] + lr_keys
-    # Original keys: If available, ending with '_original'
-    original_keys = []
-    for key in scaled_keys:
-        orig_key = key + "_original"
-        if orig_key in sample:
-            original_keys.append(orig_key)
-    # Combing: extra keys (e.g. geo) will be appended later
-    plot_keys = scaled_keys + original_keys
+    # plot_items: (key, ch_idx) where ch_idx=None means single; 0/1 selects channel from [2,H,W]
+    plot_items = []
+
+    # HR
+    plot_items.append((hr_key, None))
+
+    # LR scaled keys: expand dual tensors
+    for k in lr_keys:
+        arr = sample.get(k)
+        if torch.is_tensor(arr):
+            is_dual = (arr.ndim == 3 and arr.shape[0] == 2)
+        else:
+            a = np.asarray(arr) if arr is not None else None
+            is_dual = (a is not None and a.ndim == 3 and a.shape[0] == 2)
+        if is_dual:
+            plot_items.extend([(k, 0), (k, 1)])
+        else:
+            plot_items.append((k, None))
+
+    # Originals
+    for base_k in [hr_key] + lr_keys:
+        orig_k = base_k + "_original"
+        if orig_k in sample:
+            arr = sample.get(orig_k)
+            if torch.is_tensor(arr):
+                is_dual = (arr.ndim == 3 and arr.shape[0] == 2)
+            else:
+                a = np.asarray(arr) if arr is not None else None
+                is_dual = (a is not None and a.ndim == 3 and a.shape[0] == 2)
+            if is_dual:
+                plot_items.extend([(orig_k, 0), (orig_k, 1)])
+            else:
+                plot_items.append((orig_k, None))
+
+    # Extras
     if extra_keys is not None:
-        plot_keys += extra_keys
+        for ek in extra_keys:
+            plot_items.append((ek, None))
 
-    n_keys = len(plot_keys)
-
-    # Create subplots in one row (one column per key)
-    fig, axs = plt.subplots(1, n_keys, figsize=figsize)
-    fig.suptitle(f"Sample from train dataset, {var} (HR: {hr_model}, LR: {lr_model})", fontsize=16)
-    # Ensure axs is iterable (if only one subplot, wrap in list)
-    if n_keys == 1:
+    n = len(plot_items)
+    fig, axs = plt.subplots(1, n, figsize=figsize)
+    if n == 1:
         axs = np.array([axs])
+    fig.suptitle(f"Sample from train dataset, {var} (HR: {hr_model}, LR: {lr_model})", fontsize=16)
 
-    # Loop over each key and plot
-    for idx, key in enumerate(plot_keys):
-        ax = axs[idx]
+    # Helper: compute joint vmin/vmax for a dual pair
+    def _joint_limits_for_pair(key, ch_idx, img2d_cur):
+        if not dual_lr_lock_scale:
+            return None
+        other = sample[key]
+        other = other.detach().cpu().numpy() if torch.is_tensor(other) else np.asarray(other)
+        if other.ndim != 3 or other.shape[0] < 2:
+            return None
+        other2d = other[1 - ch_idx].squeeze()
+        # mask ocean for HR keys (not typical here, but harmless)
+        return (float(np.nanmin([np.nanmin(img2d_cur), np.nanmin(other2d)])),
+                float(np.nanmax([np.nanmax(img2d_cur), np.nanmax(other2d)])))
+
+    for i, (key, ch_idx) in enumerate(plot_items):
+        ax = axs[i]
         if key not in sample or sample[key] is None:
-            ax.axis('off')
-            continue
+            ax.axis('off'); continue
 
-        # Get the image data; if a tensor, convert to np array
-        img_data = sample[key]
-        if torch.is_tensor(img_data):
-            img_data = img_data.squeeze().cpu().numpy()
-        img_data = _squeeze_geo_value(img_data, key)
+        data = sample[key]
+        arr = data.detach().cpu() if torch.is_tensor(data) else torch.as_tensor(data)  # torch for uniform ops
+        if ch_idx is not None and arr.ndim == 3 and arr.shape[0] > ch_idx:
+            arr = arr[ch_idx]
+        img = arr.squeeze().numpy()
 
-        # For HR images (keys ending with '_hr' or '_hr_original'), if show_ocean is False, apply masking using lsm_hr
-        if not show_ocean and (key.endswith("_hr") or key.endswith("_hr_original")):
-            if "lsm_hr" in sample and sample["lsm_hr"] is not None:
-                mask = sample["lsm_hr"].squeeze().cpu().numpy()
-                # Assume mask values below 1 indicates ocean - set pixels to NaN
-                img_data = np.where(mask < 1, np.nan, img_data)
+        # mask ocean for HR images
+        if not show_ocean and (key.endswith("_hr") or key.endswith("_hr_original")) and ("lsm_hr" in sample):
+            m = sample["lsm_hr"]
+            m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
+            img = np.where(m < 1, np.nan, img)
 
-        # Determine the colormap based on the key:
+        # choose cmap
         if key.endswith('_hr') or key.endswith('_hr_original'):
             cmap = hr_cmap
         elif key.endswith('_lr') or key.endswith('_lr_original'):
-            # Remove suffix to get the base condition name
-            base = None
-            if key.endswith('_lr'):
-                base = key[:-3]
-            elif key.endswith('_lr_original'):
-                base = key[:-12]
-            if lr_cmap_dict is not None and base is not None and base in lr_cmap_dict:
-                cmap = lr_cmap_dict[base]
-            else:
-                cmap = default_lr_cmap
+            base = key[:-3] if key.endswith('_lr') else key[:-12]
+            cmap = lr_cmap_dict.get(base, default_lr_cmap) if lr_cmap_dict is not None else default_lr_cmap
         else:
-            # For extra keys, use the provided cmap_dict or default to 'viridis'
-            if extra_cmap_dict is not None and key in extra_cmap_dict:
-                cmap = extra_cmap_dict[key]
+            cmap = extra_cmap_dict.get(key, 'viridis')
+
+        # limits
+        if force_matching_scale and isinstance(global_min, dict) and isinstance(global_max, dict):
+            vmin = global_min.get(key, np.nanmin(img))
+            vmax = global_max.get(key, np.nanmax(img))
+        elif (key.endswith('_lr') or key.endswith('_lr_original')) and (ch_idx is not None):
+            joint = _joint_limits_for_pair(key, ch_idx, img)
+            if joint is not None:
+                vmin, vmax = joint
             else:
-                cmap = 'viridis' # Default colormap for extra keys
-
-        # Determine vmin and vmax: if force_matching_scale is True and dicts are provided, use them, otherwise compute from data
-        if force_matching_scale and global_min is not None and global_max is not None:
-            vmin = global_min.get(key, np.nanmin(img_data)) # get min from dict or compute from data
-            vmax = global_max.get(key, np.nanmax(img_data)) # get max from dict or compute from data
+                vmin, vmax = np.nanmin(img), np.nanmax(img)
         else:
-            vmin = np.nanmin(img_data)
-            vmax = np.nanmax(img_data)
+            vmin, vmax = np.nanmin(img), np.nanmax(img)
 
-        # Title logic
-        base = None
-
+        # title
         if key.endswith('_hr'):
             title = f"HR {hr_model} ({var})\nscaled"
         elif key.endswith('_hr_original'):
             title = f"HR {hr_model} ({var})\noriginal [{hr_units}]"
         elif key.endswith('_lr'):
-            base = key[:-3]
-            title = f"LR {lr_model} ({base})\nscaled"
+            base = key[:-3]; suffix = f" (ch {ch_idx})" if ch_idx is not None else ""
+            title = f"LR {lr_model} ({base})\nscaled{suffix}"
         elif key.endswith('_lr_original'):
-            base = key[:-12]
-            title = f"LR {lr_model} ({base})\noriginal [{lr_units[lr_keys.index(base)]}]"
+            base = key[:-12]; suffix = f" (ch {ch_idx})" if ch_idx is not None else ""
+            unit = lr_units[lr_keys.index(base)] if base in lr_keys else '—'
+            title = f"LR {lr_model} ({base})\noriginal [{unit}]{suffix}"
         elif extra_keys is not None and key in extra_keys:
-            if key == "topo":
-                title = f"Topography"
-            elif key == "sdf":
-                title = f"SDF"
-            elif key == "lsm":
-                title = f"Land/Sea Mask"
-            else:
-                title = f"{key}"
+            title = "Topography" if key == "topo" else ("SDF" if key == "sdf" else ("Land/Sea Mask" if key == "lsm" else key))
         else:
-            title = f"{key}"
+            title = key
 
-        # If dual-LR (C=2, H, W), add an extra axis to show the second channel
-        if isinstance(img_data, (torch.Tensor, np.ndarray)):
-            arr = img_data.detach().cpu().numpy() if isinstance(img_data, torch.Tensor) else img_data
-            if arr.ndim == 3 and arr.shape[0] == 2:
-                # Create a GridSpec to hold two subplots side by side
-                gs = GridSpec(1, 2, figure=fig, wspace=0.1)
-                ax1 = fig.add_subplot(gs[0, 0])
-                ax2 = fig.add_subplot(gs[0, 1])
+        # draw
+        im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_title(title, fontsize=10)
 
-                # First channel
-                img2d_1, _ = _to_imshow_image(arr[0], prefer_channel=0)
-                im1 = ax1.imshow(img2d_1, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
-                ax1.set_title(f"{title} (ch 1)", fontsize=10)
-                ax1.set_xticks([])
-                ax1.set_yticks([])
-
-                # Second channel
-                img2d_2, _ = _to_imshow_image(arr[1], prefer_channel=0)
-                im2 = ax2.imshow(img2d_2, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
-                ax2.set_title(f"{title} (ch 2)", fontsize=10)
-                ax2.set_xticks([])
-                ax2.set_yticks([])
-
-                # Optionally overlay LSM contour on both channels if applicable
-                if overlay_lsm_contour and ((key.endswith('_hr') or key.endswith('_hr_original')) or
-                                            (key.endswith('_lr') or key.endswith('_lr_original'))):
-                    mask_key = "lsm_hr" if ("lsm_hr" in sample and sample["lsm_hr"] is not None) else None
-                    if mask_key is not None:
-                        m = sample[mask_key]
-                        m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
-                        try:
-                            # Ensure float and pick a single transition level between land(1)/ocean(0)
-                            m = m.astype(float, copy=False)
-                            ax1.contour(m, levels=[0.5], colors='white', linewidths=0.8)
-                            ax2.contour(m, levels=[0.5], colors='white', linewidths=0.8)
-                        except Exception as e:
-                            logger.warning(f"Could not overlay LSM contour on {key}: {e}")
-
-                # Add colorbars to both subplots
-                cbar1 = fig.colorbar(im1, ax=ax1, orientation='vertical', fraction=0.046, pad=0.04)
-                cbar2 = fig.colorbar(im2, ax=ax2, orientation='vertical', fraction=0.046, pad=0.04)
-                # Optionally add boxplots to both subplots
-                _add_colorbar_and_boxplot(fig, ax1, im1, arr[0], boxplot=True)
-                _add_colorbar_and_boxplot(fig, ax2, im2, arr[1], boxplot=True)
-                continue  # Move to next key after handling dual-channel
-        # if isinstance(img_data, (torch.Tensor, np.ndarray)):
-        #     arr = img_data.detach().cpu().numpy() if isinstance(img_data, torch.Tensor) else img_data
-        #     if arr.ndim == 3 and arr.shape[0] == 2:
-        #         # Clear the main axis and plit it into two inset axes
-        #         ax.set_frame_on(False)
-        #         ax.set_xticks([]); ax.set_yticks([])
-        #         # Left and right halves
-        #         left_ax = ax.inset_axes([0, 0, 0.48, 1])
-        #         right_ax = ax.inset_axes([0.52, 0, 0.48, 1])
-
-        #         left_img, _ = _to_imshow_image(arr[0], prefer_channel=0)
-        #         right_img, _ = _to_imshow_image(arr[1], prefer_channel=0)
-
-        #         # Get new vmin/vmax for each half
-        #         if force_matching_scale and global_min is not None and global_max is not None:
-        #             l_vmin = global_min.get(key, np.nanmin(left_img)) # get min from dict or compute from data
-        #             l_vmax = global_max.get(key, np.nanmax(left_img)) # get max from dict or compute from data
-        #             r_vmin = global_min.get(key, np.nanmin(right_img)) # get min from dict or compute from data
-        #             r_vmax = global_max.get(key, np.nanmax(right_img)) # get max from dict or compute from data
-        #         else:
-        #             l_vmin, l_vmax = np.nanmin(left_img), np.nanmax(left_img)
-        #             r_vmin, r_vmax = np.nanmin(right_img), np.nanmax(right_img)
-
-        #         left_ax.imshow(left_img, cmap=cmap, vmin=l_vmin, vmax=l_vmax, interpolation='nearest', origin='lower')
-        #         right_ax.imshow(right_img, cmap=cmap, vmin=r_vmin, vmax=r_vmax, interpolation='nearest', origin='lower')
-        #         left_ax.set_title(f"{title} (ch0)", fontsize=8)
-        #         right_ax.set_title(f"{title} (ch1)", fontsize=8)
-        #         left_ax.set_xticks([]); left_ax.set_yticks([])
-        #         right_ax.set_xticks([]); right_ax.set_yticks([])
-
-        #         # Optionally add small labels at top-right of each mini-plot
-        #         # left_ax.text(0.98, 0.02, "HR+LR z", ha='right', va='bottom', transform=left_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
-        #         # right_ax.text(0.98, 0.02, "LR z", ha='right', va='bottom', transform=right_ax.transAxes, fontsize=7, bbox=dict(facecolor='white', alpha=0.5, lw=0))
-        #         continue # Skip the rest of the loop to avoid double-plotting
-
-
-        # Fallback: single-channel or anything else -> regular imshow
-        img2d, _ = _to_imshow_image(img_data, prefer_channel=0)
-        im = ax.imshow(img2d, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
-
-        # ax.invert_yaxis()  # Invert y-axis to match the original image orientation
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-        # Optionally overlay the LSM contour to visually verify alignment
+        # optional land/sea contour
         if overlay_lsm_contour and ((key.endswith('_hr') or key.endswith('_hr_original')) or
                                     (key.endswith('_lr') or key.endswith('_lr_original'))):
-            mask_key = "lsm_hr" if ("lsm_hr" in sample and sample["lsm_hr"] is not None) else None
-            if mask_key is not None:
-                m = sample[mask_key]
-                m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
+            if "lsm_hr" in sample and sample["lsm_hr"] is not None:
+                m = sample["lsm_hr"]
+                # m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
                 try:
-                    # Ensure float and pick a single transition level between land(1)/ocean(0)
-                    m = m.astype(float, copy=False)
-                    ax.contour(m, levels=[0.5], colors='white', linewidths=0.8)
+                    # ax.contour(lsm_data, levels=[0.5], colors='white', linewidths=0.5)
+                    ax.contour(m.astype(float, copy=False), levels=[0.5], colors='white', linewidths=0.8)
                 except Exception as e:
-                    logger.warning(f"Could not overlay LSM contour on {key}: {e}")
+                    logger.warning(f"LSM contour failed on {key}: {e}")
 
-
-        ax.set_title(title, fontsize=10)
-
-
-
-        # Create an axes divider to add a colorbar and (for variable images) a boxplot
+        # colorbar + boxplot (same layout you had)
         divider = make_axes_locatable(ax)
-        if key.endswith('_hr') or key.endswith('_lr') or key.endswith('_hr_original') or key.endswith('_lr_original'):
+        if key.endswith(('_hr', '_lr', '_hr_original', '_lr_original')):
             bax = divider.append_axes("right", size="10%", pad=0.1)
             cax = divider.append_axes("right", size="5%", pad=0.1)
-            # Boxplot settings
-            flierprops = dict(marker='o', markerfacecolor='none', markersize=2,
-                              linestyle='None', markeredgecolor='darkgreen', alpha=0.4)
-            medianprops = dict(linestyle='-', linewidth=2, color='black')
-            meanpointprops = dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick')
-            # Exclude Nans.
-            if torch.is_tensor(img_data):
-                mask = ~torch.isnan(img_data) # type: ignore
-                img_bp = img_data[mask].flatten().cpu().numpy()
-            else:
-                mask = ~np.isnan(img_data)
-                img_bp = img_data[mask].flatten()
-            if len(img_bp) > 0:
-                bax.boxplot(img_bp,
-                            vert=True,
-                            widths=2,
-                            showmeans=True,
-                            meanprops=meanpointprops,
-                            flierprops=flierprops,
-                            medianprops=medianprops,)
-            bax.set_xticks([])
-            bax.set_yticks([])
-            bax.set_frame_on(False)
+            vals = img[np.isfinite(img)].ravel()
+            if vals.size > 0:
+                flierprops = dict(marker='o', markerfacecolor='none', markersize=2,
+                                  linestyle='None', markeredgecolor='darkgreen', alpha=0.4)
+                medianprops = dict(linestyle='-', linewidth=2, color='black')
+                meanprops = dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick')
+                bax.boxplot(vals, vert=True, widths=2, showmeans=True,
+                            meanprops=meanprops, flierprops=flierprops, medianprops=medianprops)
+            bax.set_xticks([]); bax.set_yticks([]); bax.set_frame_on(False)
         else:
-            # For extra keys, just add a colorbar
             cax = divider.append_axes("right", size="5%", pad=0.1)
-            bax = None
-
         fig.colorbar(im, cax=cax, orientation='vertical')
 
     fig.tight_layout()
-
     return fig, axs
 
 
@@ -810,7 +703,7 @@ def plot_live_training_metrics(
 
     if n_samples is not None:
         title = f"{title} (n={n_samples} samples)"
-        
+
     fig, ax = plt.subplots(figsize=(8, 5))
     steps_np = np.asarray(steps, dtype=float)
     if len(steps_np) == 0:

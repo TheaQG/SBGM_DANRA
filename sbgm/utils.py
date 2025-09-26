@@ -341,7 +341,7 @@ def extract_samples(samples, device=None):
     #     logger.warning(f'Multiple HR images found. Using the first one: {hr_keys[0]}')
     
     # Classifier (if available)
-    classifier = samples.get('classifier', None)
+    classifier = samples.get('classifier', samples.get('seasons'))
     if classifier is not None:
         classifier = classifier.to(device, non_blocking=True)#.float()
 

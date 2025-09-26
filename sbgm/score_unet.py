@@ -311,6 +311,14 @@ class Encoder(ResNet):
             bias=False)
 
         # If conditional, set the label embedding layer from the number of classes to the time embedding size
+        # A tiny MLP from R^2 -> R^time_embedding
+        temporal_dim = int(self.time_embedding)
+        self.temporal_emb = nn.Sequential(
+            nn.Linear(2, temporal_dim),
+            nn.SiLU(),
+            nn.Linear(temporal_dim, temporal_dim)
+        )
+        
         if num_classes is not None:
             self.num_classes = num_classes
             self.label_emb = nn.Embedding(num_classes + 1, self.time_embedding)
@@ -320,26 +328,12 @@ class Encoder(ResNet):
         #delete unwanted layers, i.e. maxpool(=self.maxpool), fully connected layer(=self.fc) and average pooling(=self.avgpool
         del self.maxpool, self.fc, self.avgpool
 
-        
-        
-    # def pos_encoding(self, t, channels):
-    #     inv_freq = 1.0 / (
-    #         1000
-    #         ** (torch.arange(0, channels, 2).float() / channels)
-    #     )
-    #     inv_freq = inv_freq.to(self.device)
-    #     t = t.to(self.device)
-
-
-    #     pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
-    #     pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
-    #     pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
-    #     return pos_enc
 
     def forward(self,  # type: ignore
                 x:torch.Tensor, 
                 t:torch.Tensor, 
                 y:Optional[torch.Tensor]=None, 
+                doy_vec:Optional[torch.Tensor]=None,
                 cond_img:Optional[torch.Tensor]=None, 
                 lsm_cond:Optional[torch.Tensor]=None, 
                 topo_cond:Optional[torch.Tensor]=None
@@ -398,14 +392,21 @@ class Encoder(ResNet):
             t = t.unsqueeze(-1).type(torch.float)
             # t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
             t = self.sinusoidal_embedding(t.view(-1)) # Use the sinusoidal embedding instead of the positional encoding (to align with Decoder)
-    
-        #t = self.sinusoidal_embedding(t)
-        # Add the label embedding to the time embedding
-        if y is not None and hasattr(self, "label_emb"):
-            t += self.label_emb(y)
-        #logger.debug('\n Time embedding type: ', t.dtype, '\n')
+
+        # y can be categorical (Long) OR temporal vector (Float with last dim==2)
+        if y is not None:
+            if y.dtype in (torch.long, torch.int64, torch.int32):
+                if hasattr(self, 'label_emb'):
+                    t = t + self.label_emb(y.to(dev))
+            else:
+                # Treat as continuous; accept [B,2] or [B,1,2]
+                ycont = y.to(dev)
+                if ycont.dim() > 2:
+                    ycont = ycont.view(ycont.shape[0], -1)
+                assert ycont.shape[-1] == 2, f"Expected 2D continuous labels, got shape {tuple(ycont.shape)}."
+                t = t + self.temporal_emb(ycont)
+
         # Prepare fmap1, the first feature map, by applying the first convolutional layer to the input x
-        
         fmap1 = self.conv1(x)
         # Project the time embedding onto fmap1
         t_emb = self.time_projection_layers[0](t)

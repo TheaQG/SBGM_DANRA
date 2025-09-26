@@ -35,7 +35,7 @@ lowres:
   full_domain_dims: [589, 789]
   condition_variables: ["temp", "prcp"] # Variables for conditioning
   scaling_methods: ["zscore", "log_zscore"] # Scaling methods for low-res data
-  dual_lr: false # Whether to use dual (one scaled w. global (HR+LR) statistics, one with LR stats) low-res (prcp or temp) data. When true, LR parsed in two channels, one scaled w. LR stats, one w. HR+LR stats
+  dual_lr: true # Whether to use dual (one scaled w. global (HR+LR) statistics, one with LR stats) low-res (prcp or temp) data. When true, LR parsed in two channels, one scaled w. LR stats, one w. HR+LR stats
   lr_main_var_scale: "HR_LR" # Which statistics to use for scaling the main low-res variable (prcp or temp) when dual_lr is False ("LR": lr only, "HR": hr only, "HR_LR": both)
   lr_main_var_scale_method: "log_zscore" # Which scaling method to use for the main low-res variable (prcp or temp) when dual_lr is False
   buffer_frac: 0.0
@@ -86,6 +86,8 @@ stationary_conditions:
     min_ocean_weight: 0.5 # Minimum weight for ocean in SDF
   seasonal_conditions:
     sample_w_cond_season: true # Whether to sample with seasonal conditions
+    use_sin_cos_embedding: true # Whether to use sin/cos embedding for seasonal conditions
+    use_leap_years: true # Whether to account for leap years in seasonal conditions
     n_seasons: 4 # Number of seasons in the data
     
 

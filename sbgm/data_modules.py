@@ -1221,32 +1221,40 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
                 sample_dict[geo] = geo_data
 
-        # Check if conditional sampling on season (or monthly/daily) is used
+        use_sincos = bool(self.cfg.get('stationary_conditions', {}).get('seasonal_conditions', {}).get('use_sin_cos_embedding', True)) if self.cfg is not None else True
+        use_leap = bool(self.cfg.get('stationary_conditions', {}).get('seasonal_conditions', {}).get('use_leap_years', True)) if self.cfg is not None else True
+        
         if self.conditional_seasons:
-            # Determine class from filename
-            if self.n_classes is not None:
-                # Seasonal condittion
-                if self.n_classes == 4:
-                    dateObj = DateFromFile(hr_file_name)
-                    classifier = dateObj.determine_season()
-                # Monthly condition
-                elif self.n_classes == 12:
-                    dateObj = DateFromFile(hr_file_name)
-                    classifier = dateObj.determine_month()
-                # Daily condition
-                elif self.n_classes == 366:
-                    dateObj = DateFromFile(hr_file_name)
-                    classifier = dateObj.determine_day()
-                else:
-                    raise ValueError('n_classes must be 4, 12 or 365')
+            dateObj = DateFromFile(hr_file_name)
+
+            if use_sincos:
+                # Leap-aware day-of-year sin-cos embedding
+                doy = dateObj.determine_day() # 1 to 366
+                is_leap = DateFromFile.is_leap_year(dateObj.year) if use_leap else False
+                nday = 366 if is_leap else 365
+                theta = 2.0 * np.pi * float(doy - 1) / float(nday)  # -1 to make doy zero-based
+                seasons = torch.tensor([np.sin(theta), np.cos(theta)], dtype=torch.float32) # shape [2]
+                sample_dict['seasons'] = seasons
             else:
-                logger.warning("n_classes is not provided, using date as classifier. This will default to daily condition.")
-                # If n_classes is not provided, use the date as a classifier
-                dateObj = DateFromFile(hr_file_name)
-                classifier = dateObj.determine_month()  # Default to daily condition if n_classes is not specified
-            # Convert classifier to tensor
-            classifier = torch.tensor(classifier, dtype=torch.long)
-            sample_dict['classifier'] = classifier
+                # Categorical fall back 
+                if self.n_classes is not None:
+                    # Seasonal condittion
+                    if self.n_classes == 4:
+                        classifier = dateObj.determine_season()
+                    # Monthly condition
+                    elif self.n_classes == 12:
+                        classifier = dateObj.determine_month()
+                    # Daily condition
+                    elif self.n_classes == 366:
+                        classifier = dateObj.determine_day()
+                    else:
+                        raise ValueError('n_classes must be 4, 12 or 365/366')
+                else:
+                    logger.warning("n_classes is not provided, using date as classifier. This will default to daily condition.")
+                    # If n_classes is not provided, use the date as a classifier
+                    classifier = dateObj.determine_month()  # Default to daily condition if n_classes is not specified
+                # Convert classifier to tensor
+                sample_dict['classifier'] = torch.tensor(classifier, dtype=torch.long)
         # else:
             # A batch cannot contain None, so if no classifier is used, don't add it to the sample_dict
             
