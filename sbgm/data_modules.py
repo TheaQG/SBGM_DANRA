@@ -3,7 +3,6 @@
     The dataset can be used for training and testing the SBGM_SD model.
 
     TODO:
-        - Training data statistics instead of global statistics for scaling (lines 569, 602)
         - Add static sampling (no crop + shift) option (fixed cutout)
         - Add multiple cutout domains (Northern Germany, Poland, Netherlands etc.)
         - Add option for Day-Of-Year conditional sampling
@@ -195,7 +194,7 @@ def find_rand_points(rect, crop_size):
         - rect (list or tuple): [x1, x2, y1, y2] rectangle to crop from
         - crop_size (tuple): (crop_width, crop_height) size of the desired crop
     Output:
-        - point (list): [x1_new, x2_new, y1_new, y2_new] random crop region
+        - point (list): [x1_new, x2_new, y1_new, y2_new] random crop region (slice as [y1: y2, x1: x2])
 
     Raises: 
         - ValueError if crop_size is larger than the rectangle
@@ -316,6 +315,34 @@ class ResizeTensor:
         return x.squeeze(0) # → [C, H, W] or [1, H, W] depending on input
 
 
+# === Helper transform for dual-LR logic ===
+class DualLRTransform:
+    """
+        Callable transform that applies two independent transform pipelines to the same LR numpy array/tensor
+        and returns a 2-channel tensor [2, H, W] by stacking the results along the channel dimension.
+    """
+
+    def __init__(self, transform_a, transform_b):
+        self.ta = transform_a
+        self.tb = transform_b
+    def __call__(self, x):
+        a = self.ta(x)
+        b = self.tb(x)
+        if isinstance(a, np.ndarray):
+            a = torch.tensor(a)
+        if isinstance(b, np.ndarray):
+            b = torch.tensor(b)
+        if a.ndim == 2:
+            a = a.unsqueeze(0) # [1, H, W]
+        if b.ndim == 2:
+            b = b.unsqueeze(0) # [1, H, W]
+        # Ensure dtype and device alignment
+        if a.dtype != b.dtype:
+            b = b.to(a.dtype)
+        if a.device != b.device:
+            b = b.to(a.device)
+        return torch.cat([a, b], dim=0) # [2, H, W]
+
 
 def list_all_keys(zgroup):
     all_keys = []
@@ -419,7 +446,11 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 scale:bool = True,                  # Whether to scale data to new interval
                 save_original:bool = False,         # Whether to save original data
                 conditional_seasons:bool = False,   # Whether to use seasonal conditional sampling
-                n_classes:Optional[int] = None                # Number of classes for conditional sampling
+                n_classes:Optional[int] = None,                # Number of classes for conditional sampling
+                fixed_cutout_hr: bool = False,         # Whether to use a fixed cutout (no random sampling)
+                fixed_cutout_lr: bool = False,         # Whether to use a fixed cutout (no random sampling)
+                fixed_hr_bounds: Optional[list] = None,  # Fixed cutout bounds for HR data (if fixed_cutout=True)
+                fixed_lr_bounds: Optional[list] = None,  # Fixed cutout bounds for LR data (if fixed_cutout=True)
                 ):                          
         '''
         Initializes the dataset.
@@ -464,12 +495,15 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.lr_data_size = lr_data_size
         self.lr_cutout_domains = lr_cutout_domains
         
+        self.lr_cutout_name = cfg['lowres'].get('cutout_name', 'custom') if cfg is not None and 'lowres' in cfg else 'custom'
+
         # Check whether lr_cutout_domains are parsed as a list or tuple - even if 'None' - and set correctly to None if not
         if isinstance(self.lr_cutout_domains, list) or isinstance(self.lr_cutout_domains, tuple):
             if len(self.lr_cutout_domains) == 0 or (len(self.lr_cutout_domains) == 1 and str(self.lr_cutout_domains[0]).lower() == 'none'):
                 self.lr_cutout_domains = None
             else:
                 self.lr_cutout_domains = self.lr_cutout_domains
+        
         
         # Specify target LR size (if different from HR size)
         self.target_lr_size = self.lr_data_size if self.lr_data_size is not None else self.hr_data_size
@@ -524,14 +558,55 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # Save other parameters
         self.shuffle = shuffle
         self.cutouts = cutouts
-        self.cutout_domains = cutout_domains
+        self.hr_cutout_domains = cutout_domains
+        self.hr_cutout_name = cfg['highres'].get('cutout_name', 'custom') if cfg is not None and 'highres' in cfg else 'custom'
         self.sdf_weighted_loss = sdf_weighted_loss
         self.scale = scale
         self.save_original = save_original
         self.conditional_seasons = conditional_seasons
         self.n_classes = n_classes
         self.n_samples_w_cutouts = self.n_samples if n_samples_w_cutouts is None else n_samples_w_cutouts
-        
+
+        # ========= Fixed crop (stationary) knob =========
+        self.fixed_cutout_hr = fixed_cutout_hr
+        self.fixed_cutout_lr = fixed_cutout_lr
+
+        self.fixed_hr_bounds = fixed_hr_bounds
+        self.fixed_lr_bounds = fixed_lr_bounds
+
+        # If fixed cutout is True, fixed bounds must be provided and set up
+        if self.fixed_cutout_hr:
+            # Make sure that fixed_hr_bounds is provided and valid - if not, set fixed_cutout_hr to False
+            if self.fixed_hr_bounds is None or len(self.fixed_hr_bounds) != 4:
+                self.fixed_hr_bounds = None
+                self.fixed_cutout_hr = False
+                logger.warning('Fixed cutout for HR is set to True, but fixed_hr_bounds is not provided or invalid. Setting fixed_cutout_hr to False.')
+            else:
+                # Check that the bounds are valid
+                if (self.fixed_hr_bounds[1] - self.fixed_hr_bounds[0] != self.hr_data_size[1]) or (self.fixed_hr_bounds[3] - self.fixed_hr_bounds[2] != self.hr_data_size[0]):
+                    raise ValueError('Fixed HR cutout bounds are not valid. They must match the HR data size.')
+                else:
+                    logger.info(f'Using fixed cutout for HR with bounds: {self.fixed_hr_bounds}')
+        else:
+            self.fixed_hr_bounds = None
+            logger.info('Not using fixed cutout for HR.')
+
+        if self.fixed_cutout_lr:
+            # Make sure that fixed_lr_bounds is provided and valid - if not, set fixed_cutout_lr to False
+            if self.fixed_lr_bounds is None or len(self.fixed_lr_bounds) != 4:
+                self.fixed_lr_bounds = None
+                self.fixed_cutout_lr = False
+                logger.warning('Fixed cutout for LR is set to True, but fixed_lr_bounds is not provided or invalid. Setting fixed_cutout_lr to False.')
+            else:
+                # Check that the bounds are valid
+                if (self.fixed_lr_bounds[1] - self.fixed_lr_bounds[0] != self.target_lr_size[1]) or (self.fixed_lr_bounds[3] - self.fixed_lr_bounds[2] != self.target_lr_size[0]):
+                    raise ValueError('Fixed LR cutout bounds are not valid. They must match the target LR data size.')
+                else:
+                    logger.info(f'Using fixed cutout for LR with bounds: {self.fixed_lr_bounds}')
+        else:
+            self.fixed_lr_bounds = None
+            logger.info('Not using fixed cutout for LR.')
+
         # Build file maps based on the date in the file name      
         # Open main (HR) zarr group, and get HR file keys (pure filenames)
         self.zarr_group_img = zarr.open_group(hr_variable_dir_zarr, mode='r')
@@ -578,8 +653,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             self.lr_transforms_dict = {}
             domain_str_hr = f"{cfg['highres']['full_domain_dims'][0]}x{cfg['highres']['full_domain_dims'][1]}" if cfg is not None else f"{self.hr_data_size[0]}x{self.hr_data_size[1]}"
             domain_str_lr = f"{cfg['lowres']['full_domain_dims'][0]}x{cfg['lowres']['full_domain_dims'][1]}" if cfg is not None else f"{self.target_lr_size[0]}x{self.target_lr_size[1]}"
-            crop_region_hr = cfg['highres']['cutout_domains'] if (cfg is not None and self.cutouts and self.cutout_domains is not None) else "full"
-            crop_region_hr_str = '_'.join(map(str, crop_region_hr)) # if (cfg is not None and self.cutouts and self.cutout_domains is not None) else "full"
+            crop_region_hr = cfg['highres']['cutout_domains'] if (cfg is not None and self.cutouts and self.hr_cutout_domains is not None) else "full"
+            crop_region_hr_str = '_'.join(map(str, crop_region_hr)) # if (cfg is not None and self.cutouts and self.hr_cutout_domains is not None) else "full"
             crop_region_lr = cfg['lowres']['cutout_domains'] if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
             crop_region_lr_str = '_'.join(map(str, crop_region_lr)) # if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
             scaling_split = self.scaling_split
@@ -672,6 +747,137 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         '''
         return len(self.common_dates)
 
+    def _domains_equivalent(self, a, b, name_a, name_b):
+        """ Return Tru if two cutout-domain specs are semantically equivalent.
+        """
+        if a is None or b is None:
+            return False
+        
+        try:
+            if list(a) == list(b):
+                if name_a != name_b:
+                    logger.warning(f"{name_a} and {name_b} are different but have the same cutout domains: {a}. Assuming not equivalent.")
+                    return False
+                return True
+            return False
+        except Exception as e:
+            if a == b:
+                if name_a != name_b:
+                    logger.warning(f"{name_a} and {name_b} are different but have the same cutout domains: {a}. Assuming not equivalent.")
+                    return False
+                return True
+            return False
+        
+    @staticmethod
+    def _map_point_to_size(point, src_size, dst_size):
+        """
+            Map a crop point [x1, x2, y1, y2] from src_size=(H,W) by scale factors.
+            Always returns integers, preserving order [x1_new, x2_new, y1_new, y2_new].
+        """
+        if src_size == dst_size:
+            return point
+        sx = dst_size[1] / float(src_size[1]) # Width scale factor
+        sy = dst_size[0] / float(src_size[0]) # Height scale factor
+        x1 = int(round(point[0] * sx))
+        x2 = int(round(point[1] * sx))
+        y1 = int(round(point[2] * sy))
+        y2 = int(round(point[3] * sy))
+        return [x1, x2, y1, y2]
+    
+    @staticmethod
+    def _valid_bounds(b):
+        return (b is not None) and hasattr(b, '__len__') and (len(b) == 4) 
+
+    def _compute_crop_points(self):
+        """
+            Decide (hr_point, lr_point) with independent fixed-cutout knobs. Based on HR and LR ROI domains. (ROI = region of interest)
+
+            Conventions:
+            - Points are [x1, x2, y1, y2] in pixel indices on their *native* grids.
+            - Slicing is [y1:y2, x1:x2] elsewhere in the code.
+            - self.hr_data_size = (H_hr, W_hr); self.target_lr_size = (H_lr, W_lr).
+
+            Priority:
+            1) If fixed_cutout_hr==True and fixed_hr_bounds valid:
+                hr_point = fixed_hr_bounds
+                lr_point = (fixed_lr_bounds if fixed_cutout_lr and valid) else map HR→LR (or same if no lr_data_size)
+                return
+            2) Else if fixed_cutout_lr==True and fixed_lr_bounds valid:
+                lr_point = fixed_lr_bounds
+                hr_point = map LR→HR  (co-locate if domains align)  # preferred
+                            (else fall back to HR random if HR domain truly unrelated)
+                return
+            3) Else if cutouts==False:
+                return (None, None)
+            4) Else (random HR crop):
+                hr_point = random from HR cutout domain
+                lr_point = map HR→LR if LR domain equivalent/unspecified, else random from LR domain
+                return
+        """
+        # ----- Case 1: HR is fixed (authoritative), LR follows
+        if self.fixed_cutout_hr and self._valid_bounds(self.fixed_hr_bounds):
+            hr_point = [int(v) for v in self.fixed_hr_bounds]  # authoritative HR ROI # type: ignore
+
+            # LR decision
+            if self.lr_data_size is None:
+                lr_point = hr_point  # same indices if LR uses HR grid/size
+            else:
+                if self.fixed_cutout_lr and self._valid_bounds(self.fixed_lr_bounds):
+                    lr_point = [int(v) for v in self.fixed_lr_bounds] # authoritative LR ROI # type: ignore
+                else:
+                    # co-locate LR by mapping HR→LR
+                    lr_point = self._map_point_to_size(hr_point, self.hr_data_size, self.target_lr_size)
+            return hr_point, lr_point
+
+        # Warn once if HR was requested fixed but bounds invalid
+        if self.fixed_cutout_hr and not self._valid_bounds(self.fixed_hr_bounds):
+            logger.warning(f"fixed_cutout_hr=True but fixed_hr_bounds invalid: {self.fixed_hr_bounds}. "
+                        "HR will not be fixed; proceeding with LR/normal policy.")
+
+        # ----- Case 2: LR is fixed (authoritative), HR follows
+        if self.fixed_cutout_lr and self._valid_bounds(self.fixed_lr_bounds):
+            lr_point = [int(v) for v in self.fixed_lr_bounds]  # authoritative LR ROI # type: ignore
+
+            # Prefer to co-locate HR by mapping LR→HR when domains are equivalent/unspecified.
+            # If LR domain is clearly unrelated to HR domain, fall back to HR random (to avoid nonsense mapping).
+            domains_same = self._domains_equivalent(self.lr_cutout_domains, self.hr_cutout_domains,
+                                                    self.lr_cutout_name, self.hr_cutout_name)
+            if domains_same or (self.lr_cutout_domains is None):
+                hr_point = self._map_point_to_size(lr_point, self.target_lr_size, self.hr_data_size)
+            else:
+                # HR domain differs materially; choose a valid HR crop instead of blind mapping
+                if not self.cutouts:
+                    hr_point = None
+                else:
+                    hr_point = find_rand_points(self.hr_cutout_domains, self.hr_data_size)
+                    # NOTE: If you *want* forced co-location even for different named domains,
+                    # replace the line above with the mapping call and accept possible mismatch.
+            return hr_point, lr_point
+
+        # Warn once if LR was requested fixed but bounds invalid
+        if self.fixed_cutout_lr and not self._valid_bounds(self.fixed_lr_bounds):
+            logger.warning(f"fixed_cutout_lr=True but fixed_lr_bounds invalid: {self.fixed_lr_bounds}. "
+                        "LR will not be fixed; proceeding with HR/normal policy.")
+
+        # ----- Case 3: No cutouts → full domain (points unused)
+        if not self.cutouts:
+            return None, None
+
+        # ----- Case 4: Random HR crop, LR follows policy
+        hr_point = find_rand_points(self.hr_cutout_domains, self.hr_data_size)
+
+        if self.lr_data_size is None:
+            lr_point = hr_point
+        else:
+            domains_same = self._domains_equivalent(self.lr_cutout_domains, self.hr_cutout_domains,
+                                                    self.lr_cutout_name, self.hr_cutout_name)
+            if (self.lr_cutout_domains is None) or domains_same:
+                lr_point = self._map_point_to_size(hr_point, self.hr_data_size, self.target_lr_size)
+            else:
+                lr_point = find_rand_points(self.lr_cutout_domains, self.target_lr_size)
+
+        return hr_point, lr_point
+
     def _addToCache(self, idx:int, data):
         '''
             Add item to cache. 
@@ -707,28 +913,17 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             if cached is not None:
                 return cached
 
+        sample_dict = {}
         # Get the common date corresponding to the index
         date = self.common_dates[idx]
-        sample_dict = {}
+        sample_dict['date'] = date
 
-        # Determine crop region, if cutouts are used
-        if self.cutouts:
-            # hr_point is computed using HR cutout domain and HR data size
-            hr_point = find_rand_points(self.cutout_domains, self.hr_data_size)
-            if self.lr_data_size is not None:
-                # If a separate LR cutout domain is provided, use it
-                if self.lr_cutout_domains is not None:
-                    lr_point = find_rand_points(self.lr_cutout_domains, self.lr_data_size)
-                else:
-                    # Otherwise default to the same cutout point as HR
-                    lr_point = hr_point
-            else:
-                # If no LR data size is provided, use the same cutout point as HR
-                lr_point = hr_point
-        else:
-            # If cutouts are not used, set points to None and use full domain
-            hr_point = None
-            lr_point = None
+
+        # Determine crop region, centralized policy
+        hr_point, lr_point = self._compute_crop_points()
+        # Add a bit of logging
+        logger.debug(f"Index {idx}, date {date}, hr_point {hr_point}, lr_point {lr_point}")
+        
 
         # Look up HR file using the common date
         hr_file_name = self.hr_file_map[date]
@@ -747,8 +942,9 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             
             # Crop LR data using lr_point if cutouts are enabled and lr_point is not None
             if self.cutouts and data is not None and lr_point is not None:
-                # lr_point is in format [x1, x2, y1, y2] - for slicing, use [y1:y2, x1:x2]
+                # lr_point is in format [x1, x2, y1, y2]
                 data = data[lr_point[0]:lr_point[1], lr_point[2]:lr_point[3]]
+                logger.debug(f"Cropped {cond} data to shape {data.shape} using lr_point {lr_point}")
             # logger.debug(f"Data shape for {cond}: {data.shape if data is not None else None}")
                 
             # If save_original is True, save original conditional data
@@ -773,6 +969,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
         if self.cutouts and (hr is not None) and (hr_point is not None):
             hr = hr[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
+            logger.debug(f"Cropped HR data to shape {hr.shape} using hr_point {hr_point}")
         if self.save_original and (hr is not None):
             sample_dict[f"{self.hr_variable}_hr_original"] = hr.clone()
         if hr is not None:
@@ -870,7 +1067,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 sample_dict['sdf'] = sdf
             else:
                 raise ValueError("lsm_hr must be provided for SDF computation if sdf_weighted_loss is True")
-            
+
         # Attach cutout points for reference
         if self.cutouts:
             sample_dict['hr_points'] = hr_point

@@ -936,9 +936,9 @@ def diffusion_coeff(t, sigma, device = None):
     diff_coeff = diff_coeff.to(t.device)
     return diff_coeff
 
-# sigma_marg =  25.0#@param {'type':'number'}
-# marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma_marg)
-# diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma_marg)
+sigma_marg =  25.0#@param {'type':'number'}
+marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma_marg)
+diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma_marg)
 
 # def loss_fn(model,
 #             x,

@@ -1,6 +1,6 @@
 experiment:
-  name: EDM_paper1_test # Name of the experiment
-  config_name: EDM_paper1_test
+  name: EDM_paper1_LSMdebug2 # Name of the experiment
+  config_name: EDM_paper1_LSMdebug2
   # Date of the experiment, taken from the environment variable or set to current date
   date: ${env:EXP_DATE} # Date for the experiment, 
 
@@ -25,7 +25,10 @@ highres:
   full_domain_dims: [589, 789]
   buffer_frac: 0.0
   cutout_domains: [170, 350, 340, 520] # [x1, x2, y1, y2], coordinates for cutout
-  stationary_cutout: false # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
+  cutout_name: danra # Name of the cutout (for when wanting North Atlantic later, HR and LR cutouts can be different)
+  stationary_cutout: # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
+    enabled: false # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
+    bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for HR data (for stationary cutout)
 
 lowres:
   model: ERA5 # Model type for low-resolution data
@@ -38,7 +41,10 @@ lowres:
   data_size: [128, 128] # Size of the low-res data
   resize_factor: 1 # Factor to resize low-res data (used for testing at lower resolutions)
   cutout_domains: [170, 350, 340, 520] # [x1, x2, y1, y2], coordinates for cutout
-  stationary_cutout: false # Whether to use a stationary cutout or random crop from cutout domain
+  cutout_name: danra # Name of the cutout (for when wanting North Atlantic later, HR and LR cutouts can be different). If HR and LR cutouts are the same, they will be co-located
+  stationary_cutout: # Whether to use a stationary cutout or random crop from cutout domain
+    enabled: false # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
+    bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for HR data (for stationary cutout)
 
 sampler:
   sampler_type: edm_sampler #pc_sampler # Type of sampler to use
@@ -92,8 +98,15 @@ visualization:
   show_figs: false # Whether to show figures during visualization
   show_both_orig_scaled: false # Whether to show both original and scaled data
   show_geo: true # Whether to show geographic information
-  show_ocean: true # Whether to show ocean data
-  force_matching_scale: false # Whether to force matching scale in visualization
+  show_ocean: false # Whether to show ocean data
+  overlay_lsm_contour: true # Whether to overlay contour on initial plot (can be added to other plots if needed)
+  force_matching_scale: true # Whether to force matching scale in visualization
+  add_boxplot_per_panel: true # Whether to add boxplot per panel in visualization
+  add_boxplot_summary: true # Whether to add summary boxplot in visualization
+  # summary_boxplot_keys: # <-- optional; overrides default [generated, hr, matching-lr]
+  #   - generated
+  #   - prcp_hr
+  #   - prcp_lr
 
 
 model:
@@ -104,11 +117,11 @@ model:
 
 
 training:
-  seed: 31 # Random seed for reproducibility
+  seed: 504 # Random seed for reproducibility
   device: cuda # Device to use for training (e.g., 'cuda' or 'cpu')
   use_mixed_precision: false # Whether to use mixed precision training
   use_grad_clip: false # Whether to use gradient clipping
-  grad_clip_norm: 0.0 # Gradient clipping norm (set to None to disable)
+  grad_clip_norm: 0.0 # Gradient clipping norm (sset to None to disable)
   verbose: true # Whether to print verbose output during training
   batch_size: 16 # Batch size for training
   learning_rate: 0.0002 # Learning rate for training
@@ -203,26 +216,12 @@ diagnostics:
   histogram_every: 500 # Frequency (in steps) to save histograms
   histogram_path: ${env:LOG_DIR}/histograms # Path to save histograms
 
-  # # In-loop & epoch-level monitoring configuration NOTE: Implement instead of end_of_epoch above
-  # fss:
-  #   scales_km: [5, 10, 20]      # FSS neighborhood radii (km)
-  #   pixel_km: 2.5               # Grid spacing (km per pixel)
-  # wetday_threshold_mm: 0.1       # For wet-day frequency
-  # psd_compare_to_hr: true        # Compare PSD slope to HR targets
-  # quantiles_compare_to_hr: true  # Compare Q95/Q99 to HR targets
-  # extreme_prcp:
-  #   back_transform: true         # Back-transform generated to physical units before sentinel
-  #   threshold_mm: 200.0          # Flag values above this (mm/day)
-  #   clamp_in_generation: true    # Clamp generated physical values if extreme
-  #   clamp_max_mm: 200.0          # Clamp ceiling (mm/day)
-
-
 evaluation:
   n_gen_samples: 1 # Number of samples to generate
   n_steps: 35 # Number of generation steps
   batch_size: 8 # Batch size for generation
   device: cpu # Device to use for generation (e.g., 'cuda' or 'cpu')
-  seed: 31 # Random seed for generation
+  seed: 504 # Random seed for generation
   gen_type: ['multiple', 'single', 'repeated'] # Type of generation to perform, 
   save_samples: true # Whether to save generated samples
   save_path_generation: ${env:SAMPLE_DIR}/generated_samples.npz # Path to save generated samples
@@ -244,9 +243,11 @@ evaluation:
   eval_land_only: true # Whether to evaluate on land only (mask out ocean vals)
   eval_stat_methods: ['pixel_stats', 'spatial_stats'] # Methods for evaluation statistics
   stationary_cutout:
-    enabled: false # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
+    hr_enabled: true # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
+    lr_enabled: true # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
     cutout_domains: [170, 350, 340, 520] # 
     hr_bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for HR data (for stationary cutout)
+    lr_bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for LR data (for stationary cutout)
 
   logging:
     file_level: INFO # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)

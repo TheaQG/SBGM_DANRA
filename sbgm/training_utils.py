@@ -6,7 +6,8 @@ import logging
 
 import numpy as np
 
-from torch.utils.data import DataLoader
+
+from torch.utils.data import DataLoader, Subset, SequentialSampler
 from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, CosineAnnealingLR
 from functools import partial
@@ -21,8 +22,21 @@ from sbgm.special_transforms import build_back_transforms_from_stats
 
 
 
+
 # # Set up logging
 logger = logging.getLogger(__name__)
+
+# Deterministic seeding for DataLoader workers (generation
+_def_base_seed = 1234
+
+def _worker_init_fn(worker_id):
+    import random as _random
+    import numpy as _np
+    seed = _def_base_seed + worker_id
+    _random.seed(seed)
+    _np.random.seed(seed)
+    torch.manual_seed(seed)
+    
 
 def _get(cfg, path, default=None):
     """
@@ -203,6 +217,17 @@ def get_dataloader(cfg, verbose=True):
     cutout_domains = tuple(cfg['highres']['cutout_domains']) if cfg['highres']['cutout_domains'] is not None else (170, 350, 340, 520)
     lr_cutout_domains = tuple(cfg['lowres']['cutout_domains']) if cfg['lowres']['cutout_domains'] is not None else (170, 350, 340, 520)
 
+    # Check if cutouts stationary for training or generation
+    stationary_cutout_hr = bool(cfg['highres'].get('stationary_cutout', {}).get('enabled', False))
+    hr_bounds = cfg['highres'].get('stationary_cutout', {}).get('hr_bounds', None)
+    stationary_cutout_lr = bool(cfg['lowres'].get('stationary_cutout', {}).get('enabled', False))
+    lr_bounds = cfg['lowres'].get('stationary_cutout', {}).get('lr_bounds', None)
+    
+    stationary_cutout_gen_hr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('hr_enabled', False))
+    hr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('hr_bounds', None)
+    stationary_cutout_gen_lr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('lr_enabled', False))
+    lr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('lr_bounds', None)
+
     # Setup conditional seasons (classification)
     if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season']:
         n_seasons = cfg['stationary_conditions']['seasonal_conditions']['n_seasons']
@@ -268,6 +293,10 @@ def get_dataloader(cfg, verbose=True):
                             lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
                             lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
                             resize_factor=cfg['lowres']['resize_factor'],
+                            fixed_cutout_hr=stationary_cutout_hr,
+                            fixed_hr_bounds=hr_bounds,
+                            fixed_cutout_lr=stationary_cutout_lr,
+                            fixed_lr_bounds=lr_bounds,
     )
 
     val_dataset = DANRA_Dataset_cutouts_ERA5_Zarr(
@@ -301,6 +330,10 @@ def get_dataloader(cfg, verbose=True):
                             lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
                             lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
                             resize_factor=cfg['lowres']['resize_factor'],
+                            fixed_cutout_hr=stationary_cutout_hr,
+                            fixed_hr_bounds=hr_bounds,
+                            fixed_cutout_lr=stationary_cutout_lr,
+                            fixed_lr_bounds=lr_bounds,
     )
 
     gen_dataset = DANRA_Dataset_cutouts_ERA5_Zarr(
@@ -322,7 +355,7 @@ def get_dataloader(cfg, verbose=True):
                             topo_full_domain=data_topo,
                             cfg = cfg,
                             split = "gen",
-                            shuffle=True,
+                            shuffle=False,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
                             cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
                             n_samples_w_cutouts=n_samples_gen,
@@ -334,6 +367,10 @@ def get_dataloader(cfg, verbose=True):
                             lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
                             lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
                             resize_factor=cfg['lowres']['resize_factor'],
+                            fixed_cutout_hr=stationary_cutout_gen_hr,
+                            fixed_hr_bounds=hr_bounds_gen,
+                            fixed_cutout_lr=stationary_cutout_gen_lr,
+                            fixed_lr_bounds=lr_bounds_gen,
                             )
     # Setup dataloaders
     raw_workers = int(cfg['data_handling'].get('num_workers', 0) or 0)
@@ -368,12 +405,23 @@ def get_dataloader(cfg, verbose=True):
 
 
     gen_bs = int(cfg['data_handling']['n_gen_samples'])
+    # Take the first gen_bs samples deterministically
+    fixed_ids = list(range(min(gen_bs, len(gen_dataset))))
+    gen_subset = Subset(gen_dataset, fixed_ids)
+
+    base_seed = int(cfg['evaluation'].get('seed', _def_base_seed))
+    g = torch.Generator()
+    g.manual_seed(base_seed)
     gen_loader = DataLoader(
-        gen_dataset,
+        gen_subset,
         batch_size              = gen_bs,
         shuffle                 = False,
+        sampler                 = SequentialSampler(gen_subset),
         num_workers             = 0, #max(2, num_workers // 4),
-        drop_last               = (len(gen_dataset) % gen_bs) != 0,)
+        worker_init_fn          = _worker_init_fn,
+        generator               = g,
+        drop_last               = False,
+        )
 
 
     # Print dataset information
@@ -382,7 +430,7 @@ def get_dataloader(cfg, verbose=True):
     logger.info(f"Validation dataset: {len(val_dataset)} samples")
     logger.info(f"Generation dataset: {len(gen_dataset)} samples\n")
     logger.info(f"Batch size: {cfg['training']['batch_size']}")
-    logger.info(f"Number of workers: {cfg['data_handling']['num_workers']}\n")
+    logger.info(f"Number of workers: {int(cfg['data_handling']['num_workers'])}\n")
     
     # Return the dataloaders
     return train_loader, val_loader, gen_loader
@@ -515,6 +563,11 @@ def get_gen_dataloader(cfg, verbose=True):
     cutout_domains = tuple(cfg['highres']['cutout_domains']) if cfg['highres']['cutout_domains'] is not None else (170, 350, 340, 520)
     lr_cutout_domains = tuple(cfg['lowres']['cutout_domains']) if cfg['lowres']['cutout_domains'] is not None else (170, 350, 340, 520)
 
+    stationary_cutout_gen_hr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('hr_enabled', False))
+    hr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('hr_bounds', None)
+    stationary_cutout_gen_lr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('lr_enabled', False))
+    lr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('lr_bounds', None)
+
     # Setup conditional seasons (classification)
     if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season']:
         n_seasons = cfg['stationary_conditions']['seasonal_conditions']['n_seasons']
@@ -547,7 +600,7 @@ def get_gen_dataloader(cfg, verbose=True):
                             topo_full_domain=data_topo,
                             cfg = cfg,
                             split = "gen",
-                            shuffle=True,
+                            shuffle=False,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
                             cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
                             n_samples_w_cutouts=n_samples_gen,
@@ -559,15 +612,29 @@ def get_gen_dataloader(cfg, verbose=True):
                             lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
                             lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
                             resize_factor=cfg['lowres']['resize_factor'],
+                            fixed_cutout_hr=stationary_cutout_gen_hr,
+                            fixed_hr_bounds=hr_bounds_gen,
+                            fixed_cutout_lr=stationary_cutout_gen_lr,
+                            fixed_lr_bounds=lr_bounds_gen,
                             )
     # Setup dataloaders
     gen_bs = int(cfg['data_handling']['n_gen_samples'])
+    fixed_ids = list(range(min(gen_bs, len(gen_dataset))))
+    gen_subset = Subset(gen_dataset, fixed_ids)
+
+    base_seed = int(cfg['data_handling'].get('seed', _def_base_seed))
+    g = torch.Generator()
+    g.manual_seed(base_seed)
+
     gen_loader = DataLoader(
-        gen_dataset,
+        gen_subset,
         batch_size              = gen_bs,
         shuffle                 = False,
+        sampler                 = SequentialSampler(gen_subset),
         num_workers             = 0, 
-        drop_last               = (len(gen_dataset) % gen_bs) != 0,
+        worker_init_fn          = _worker_init_fn,
+        generator               = g,
+        drop_last               = False,
     )
 
     # Print dataset information

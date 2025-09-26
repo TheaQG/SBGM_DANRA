@@ -260,6 +260,7 @@ class TrainingPipeline_general:
         self.fss_hist: list[dict] = []
         self.psd_hist: list[dict] = []
         self.q_hist: list[dict] = []
+        self.epoch_list = []
 
         # Monitoring configuration
         cfg_mon__end_of_epoch = moncfg.get('end_of_epoch', {})
@@ -916,6 +917,12 @@ class TrainingPipeline_general:
         p_bar = tqdm.tqdm(gen_dataloader, desc=f"Generating samples for epoch {epoch}", unit="batch") # type: ignore
         # Iterate through batches in dataloader
         for idx, samples in enumerate(p_bar):
+            # Get dates for titles
+            if 'date' in samples and isinstance(samples['date'], (list, tuple)) and len(samples['date']) > 0:
+                dates = samples['date']
+            else:
+                dates = None
+
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
             x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
@@ -1060,15 +1067,22 @@ class TrainingPipeline_general:
                     thr_mm=self.fss_threshold_mm
                 )
                 self.fss_hist.append(fss_dict)
+
+                # Keep track of epochs for x-axis
+                self.epoch_list.append(epoch)
+
                 # Plot only history, not per-epoch
-                plot_fss_history(self.fss_hist, save_dir=self.path_metrics,
+                plot_fss_history(self.fss_hist, epoch_list=self.epoch_list,
+                                save_dir=self.path_metrics,
                                 filename="fss_history.png",
                                 title="FSS history" + (" (land-only)" if self.eval_land_only else ""))
                 # 2) PSD slope
                 psd_dict = compute_psd_slope(gen_phys, hr_bt=hr_phys if self.psd_compare_to_hr else None, mask=mask)
                 self.psd_hist.append(psd_dict)
                 # Plot only history, not per-epoch
-                plot_psd_slope_history(self.psd_hist, save_dir=self.path_metrics,
+                plot_psd_slope_history(self.psd_hist, 
+                                    epoch_list=self.epoch_list,
+                                    save_dir=self.path_metrics,
                                     filename="psd_history.png",
                                     title="PSD slope history" + (" (land-only)" if self.eval_land_only else ""))
 
@@ -1079,7 +1093,8 @@ class TrainingPipeline_general:
                                                     wet_threshold_mm=self.wetday_thresh)
                 self.q_hist.append(q_dict)
                 # Plot only history, not per-epoch
-                plot_quantiles_wetday_history(self.q_hist, save_dir=self.path_metrics,
+                plot_quantiles_wetday_history(self.q_hist, epoch_list=self.epoch_list,
+                                            save_dir=self.path_metrics,
                                             filename="quantiles_history.png",
                                             title="Quantiles & wet-day history" + (" (land-only)" if self.eval_land_only else ""))
             except Exception as e:
@@ -1093,7 +1108,8 @@ class TrainingPipeline_general:
                     generated=gen_model, 
                     cfg=cfg,
                     transform_back_bf_plot=cfg['visualization']['transform_back_bf_plot'],
-                    back_transforms=back_transforms
+                    back_transforms=back_transforms,
+                    dates=dates,
                 )
                 if cfg['visualization']['save_figs']:
                     fig.savefig(os.path.join(self.path_figures, f'epoch_{epoch}_generatedSamples.png'),

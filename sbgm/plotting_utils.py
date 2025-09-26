@@ -51,6 +51,10 @@ def plot_sample(sample,
     default_lr_cmap = 'inferno'
     extra_cmap_dict = {"topo": "terrain", "sdf": "coolwarm", "lsm": "binary"}
 
+    # === Insert visualization options from cfg if available ===
+    cfg_vis = cfg.get('visualization', {}) if isinstance(cfg, dict) else {}
+    overlay_lsm_contour = bool(cfg_vis.get('overlay_lsm_contour', False))
+
     # Build list of keys for "variable" images:
     hr_key = f"{var}_hr"
     # Find LR keys from sample (assume keys ending with '_lr'): sort alphabetically for consistency
@@ -128,10 +132,25 @@ def plot_sample(sample,
             vmax = np.nanmax(img_data)
 
         # Plot the image 
-        im = ax.imshow(img_data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
-        ax.invert_yaxis()  # Invert y-axis to match the original image orientation
+        im = ax.imshow(img_data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
+
+        # ax.invert_yaxis()  # Invert y-axis to match the original image orientation
         ax.set_xticks([])
         ax.set_yticks([])
+
+        # Optionally overlay the LSM contour to visually verify alignment
+        if overlay_lsm_contour and ((key.endswith('_hr') or key.endswith('_hr_original')) or
+                                    (key.endswith('_lr') or key.endswith('_lr_original'))):
+            mask_key = "lsm_hr" if ("lsm_hr" in sample and sample["lsm_hr"] is not None) else None
+            if mask_key is not None:
+                m = sample[mask_key]
+                m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
+                try:
+                    # Ensure float and pick a single transition level between land(1)/ocean(0)
+                    m = m.astype(float, copy=False)
+                    ax.contour(m, levels=[0.5], colors='white', linewidths=0.8)
+                except Exception as e:
+                    logger.warning(f"Could not overlay LSM contour on {key}: {e}")
 
         # Set column title
         base = None
@@ -202,392 +221,55 @@ def plot_sample(sample,
 
 
 
-def plot_sample_with_boxplot(
-        hr: Union[np.ndarray, dict], # Expecting a 2D array or dict with multiple days
-        lr: Optional[Union[np.ndarray, dict]] = None,
-        gen: Optional[Union[np.ndarray, dict]] = None,
-        variable: str = "Variable",
-        hr_model: str = "HR Model",
-        lr_model: Optional[str] = None,
-        gen_model: Optional[str] = None,
-        dates: Optional[Union[str, list]] = None,
-        save_path: Optional[str] = None,
-        show: bool = False,
-        cmap_default: str = "viridis",
-        combine_into_grid: bool = False,
-        n_rows_max: int = 5,
-    ):
-    """
-        Plots HR, LR and generated images side-by-side with boxplots adjacent to each image.
-        Accepts either single arrays or dicts + dates for multiple days.
-        If combine_into_grid is True, multiple dates will be plotted in a grid layout in a single figure.
-        - If hr is a dict and date is a list -> loop throuhg each date
-        - If hr is a dict and date is a single str -> lookup that date once
-        - If hr is a NumPy array, date is ignored
-    """
-
-    if save_path is None:
-        save_path = f"./comparison/{variable}/"
-
-    # Get cmap for variable if possible
-    try:
-        cmap_default = get_cmap_for_variable(variable)
-    except ValueError:
-        pass
-
-    # === MULTIPLE DAYS ===
-    if isinstance(dates, list):
-        # === IF COMBINING INTO GRID PLOT IN ONE FIGURE ===
-        if combine_into_grid:
-            dates = dates[:n_rows_max]
-            fields = [('Gen', gen), (f'{hr_model}', hr), (f'{lr_model}', lr)]
-            fields = [(name, f) for name, f in fields if f is not None]
-            n_fields = len(fields)
-            n_rows = len(dates)
-
-            fig = plt.figure(figsize=(5 * n_fields * 1.5, 3.5 * n_rows))
-            gs = GridSpec(n_rows, n_fields * 2, width_ratios=[4, 1] * n_fields, figure=fig)
-
-            for row_idx, d in enumerate(dates):
-                row_data = []
-                for label, dataset in fields:
-                    if isinstance(dataset, dict) and d in dataset:
-                        row_data.append((label, dataset[d]))
-                    else:
-                        row_data.append((label, None))
-
-                vmin = min(np.min(x[1]) for x in row_data if x[1] is not None)
-                vmax = max(np.max(x[1]) for x in row_data if x[1] is not None)
-
-                for i, (label, data) in enumerate(row_data):
-                    ax_img = fig.add_subplot(gs[row_idx, i * 2])
-                    if data is not None:
-                        # Ensure data is a NumPy array before plotting
-                        if isinstance(data, dict):
-                            logger.warning(f"Cannot plot dictionary for label '{label}'. Skipping.")
-                            ax_img.set_title(f"{label} (invalid data type)")
-                            ax_img.axis('off')
-                            continue
-                        if not isinstance(data, np.ndarray):
-                            data = np.array(data)
-                        # Set date title to only be date (not time)
-                        try:
-                            d_title = d.split(' ')[0] if ' ' in d else d
-                        except Exception as e:
-                            logger.warning(f"Error extracting date title from '{d}': {e}")
-                            d_title = d
-                        
-                        im = ax_img.imshow(data, cmap=cmap_default, vmin=vmin, vmax=vmax)
-                        ax_img.set_title(f"{label} ({d_title})", fontsize=10)
-                        ax_img.axis('off')
-                        ax_img.invert_yaxis()  # Invert y-axis to match the original image orientation
-                        plt.colorbar(im, ax=ax_img, shrink=0.8)
-                    else:
-                        ax_img.set_title(f"{label} (missing)")
-                        ax_img.axis('off')
-
-                    ax_box = fig.add_subplot(gs[row_idx, i * 2 + 1])
-                    if data is not None:
-                        ax_box.boxplot(
-                                data.flatten(),
-                                vert=True,
-                                widths=1,
-                                showmeans=True,
-                                meanprops=dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick'),
-                                flierprops=dict(marker='o', markerfacecolor='none', markersize=2, linestyle='None', markeredgecolor='darkgreen', alpha=0.4),
-                                medianprops=dict(linestyle='-', linewidth=2, color='black'),
-                                patch_artist=True,
-                                )
-
-                    # ax_box.set_title("Box", fontsize=8)
-                    ax_box.set_xticks([])
-                    ax_box.tick_params(axis='y', labelsize=6)
-                    ax_box.set_frame_on(False)
-
-
-            fig.suptitle(f"{variable} | Multiple Dates", fontsize=16)
-            fig.tight_layout()
-            if save_path:
-                os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                path = os.path.join(save_path, f"{variable}_{hr_model}_vs_{lr_model}_boxplot__qualitative_visual.png")
-                plt.savefig(path, dpi=300, bbox_inches='tight')
-            if show:
-                plt.show()
-            plt.close()
-            return  # Don't fall through to single plot
-
-        # === IF NOT COMBINING, PLOT EACH DATE SEPARATELY IN MULTIPLE FIGURES ===
-        for d in dates:
-            plot_sample_with_boxplot(
-                hr=hr, lr=lr, gen=gen,
-                variable=variable,
-                hr_model=hr_model,
-                lr_model=lr_model,
-                gen_model=gen_model,
-                dates=d,
-                save_path=os.path.join(save_path, f"{variable}_{d}_boxplot__qualitative_visual.png") if save_path else None,
-                show=show,
-                cmap_default=cmap_default
-            )
-        return 
-
-    # === DICTIONARY LOOKUP ===
-    if isinstance(hr, dict):
-        if dates not in hr:
-            logger.warning(f"Date '{dates}' not found in HR data dictionary. Skipping plot.")
-            return
-        hr = hr[dates]
-        lr = lr.get(dates) if lr and isinstance(lr, dict) else None
-        gen = gen.get(dates) if gen and isinstance(gen, dict) else None
-
-    # === SINGLE PLOT ===
-
-    fields = [('HR', hr, hr_model)]
-    if gen is not None:
-        fields.insert(0, ('Generated', gen, gen_model if gen_model else "Gen Model"))
-    if lr is not None:
-        fields.append(('LR', lr, lr_model if lr_model else "LR Model"))
-
-    n_fields = len(fields)
-    fig = plt.figure(figsize=(5 * n_fields * 1.5, 5)) # 5 for each image, 1.5 for boxplot
-    gs = GridSpec(1, n_fields * 2, width_ratios=[4, 1] * n_fields, figure=fig)
-
-    vmin = min(np.nanmin(f[1]) for f in fields if isinstance(f[1], np.ndarray))
-    vmax = max(np.nanmax(f[1]) for f in fields if isinstance(f[1], np.ndarray))
-
-
-    for i, (label, data, model) in enumerate(fields):
-        if data is None:
-            continue
-        if not isinstance(data, np.ndarray):
-            data = np.array(data)
-        ax_img = fig.add_subplot(gs[0, i * 2])
-        im = ax_img.imshow(data, cmap=cmap_default, vmin=vmin, vmax=vmax)
-        ax_img.set_title(f"{label} ({model})", fontsize=14)
-        ax_img.axis('off')
-        ax_img.invert_yaxis()  # Invert y-axis to match the original image orientation
-
-        cbar = plt.colorbar(im, ax=ax_img, shrink=0.8)
-        cbar.ax.tick_params(labelsize=8)
-
-        ax_box = fig.add_subplot(gs[0, i * 2 + 1])
-        ax_box.boxplot(data.flatten(), vert=True, patch_artist=True,
-                          boxprops=dict(facecolor='lightblue', color='blue'),
-                          medianprops=dict(color='red'),
-                          flierprops=dict(marker='o', markerfacecolor='none', markersize=5, markeredgecolor='blue', alpha=0.5))
-        ax_box.set_xticks([])
-        ax_box.tick_params(axis='y', labelsize=8)
-
-
-    suptitle = f"{variable} | {dates}" if dates else variable
-    fig.suptitle(suptitle, fontsize=16)
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Plot saved to {save_path}")
-    if show:
-        plt.show()
-    plt.close()
-    
-    return 
-
-
-def plot_samples(samples, cfg, n_samples_threshold=3, figsize=(15, 8)):
-    """
-    Plot a batch of samples (provided as a list of sample dictionaries) in a grid where each row is a sample and
-    each column corresponds to a particular key (e.g., HR, LR, originals, geo).
-    
-    If the number of samples exceeds n_samples_threshold, only the first n_samples_threshold will be plotted.
-    
-    Parameters:
-      - sample_list: List of sample dictionaries.
-      - cfg: Configuration dictionary containing model and variable information.
-      - figsize: Overall figure size.
-      
-    Returns:
-      - fig: The matplotlib Figure object.
-    """
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-    # Extract configuration for plotting
-    hr_model = cfg['highres']['model']
-    lr_model = cfg['lowres']['model']
-    var = cfg['highres']['variable']
-    hr_units, lr_units = get_units(cfg)
-    hr_cmap, lr_cmap_dict = get_cmaps(cfg)
-    default_lr_cmap = 'viridis'
-    extra_cmap_dict = {"topo": "terrain", "lsm": "binary", "sdf": "coolwarm"}
-    show_ocean = cfg.get('visualization', {}).get('show_ocean', False)
-    force_matching_scale = cfg.get('visualization', {}).get('force_matching_scale', True)
-    global_min = cfg.get('visualization', {}).get('global_min', None)
-    global_max = cfg.get('visualization', {}).get('global_max', None)
-    extra_keys = cfg.get('visualization', {}).get('extra_keys', None)
-
-
-    # If single batch dict is passed, unpack it to a list
-    if isinstance(samples, dict):
-        # Figure out batch size from first tensor we find:
-        batch_size = None
-        for v in samples.values():
-            if torch.is_tensor(v):
-                batch_size = v.shape[0]
-                break
-            if isinstance(v, list) and all(torch.is_tensor(x) for x in v):
-                batch_size = len(v)
-                break
-        if batch_size is None:
-            raise ValueError("No tensor found in the sample dictionary to determine batch size.")
-        
-        sample_list = []
-        for i in range(batch_size):
-            single = {}
-            for k, v in samples.items():
-                if torch.is_tensor(v):
-                    # Slice tensor on batch dim
-                    single[k] = v[i]
-                elif isinstance(v, (list, tuple)) and len(v) == batch_size:
-                    # Truly per-sample list
-                    single[k] = v[i]
-                else:
-                    # Some constant list or metadata: leave as-is
-                    single[k] = v
-            sample_list.append(single)
+def _finite_flat(arr):
+    """Return finite values flattened (NaNs masked out)"""
+    if arr is None:
+        return np.empty((0,), dtype=float)
+    # Ensure NumPy array (avoid torch boolean indexing deprecation)
+    if torch.is_tensor(arr):
+        arr = arr.detach().cpu().numpy()
     else:
-        sample_list = samples
+        arr = np.asarray(arr)
+    mask = np.isfinite(arr)
+    return arr[mask].ravel()
 
-    # logger.info(f"Plotting first {n_samples_threshold} samples out of {len(sample_list)} provided.")
-    sample_list = sample_list[:n_samples_threshold]
-    
-    # Construct the keys:
-    # HR key is "var_hr" (e.g., "prcp_hr")
-    hr_key = f"{var}_hr"
-    # Assume LR keys end with '_lr'
-    lr_keys = sorted([key for key in sample_list[0].keys() if key.endswith('_lr')])
-    scaled_keys = [hr_key] + lr_keys
+def _add_colorbar_and_boxplot(fig, ax, im, img_data, *, boxplot=True, ylim=None):
+    """
+        Attach a boxplot (left) and a colorbar (right) to an image axis using axes_divider.
+        The boxplot is vertical, minimal styling and hides ticks/frames.
+    """
+    divider = make_axes_locatable(ax)
+    # order: [ax | boxplot | colorbar]
+    bax = divider.append_axes("right", size="10%", pad=0.1) if boxplot else None
+    cax = divider.append_axes("right", size="5%", pad=0.1)
 
-    # Determine original keys if available.
-    original_keys = []
-    for key in scaled_keys:
-        orig_key = key + "_original"
-        if orig_key in sample_list[0]:
-            original_keys.append(orig_key)
-    
-    # Build final list of keys. Append extra keys if provided.
-    plot_keys = scaled_keys + original_keys
-    if extra_keys is not None:
-        plot_keys += extra_keys
+    fig.colorbar(im, cax=cax, orientation='vertical')
 
-    num_samples = len(sample_list)
-    num_keys = len(plot_keys)
-
-    # Create a grid with rows = number of samples and columns = number of keys
-    fig, axs = plt.subplots(num_samples, num_keys, figsize=figsize)
-    # Set figure title 
-    fig.suptitle(f"Sample images for {var} (HR: {hr_model} and LR: {lr_model})", fontsize=16)
-    if num_samples == 1:
-        axs = np.expand_dims(axs, axis=0)
-    if num_keys == 1:
-        axs = np.expand_dims(axs, axis=1)
-
-    for row, sample in enumerate(sample_list):
-        for col, key in enumerate(plot_keys):
-            ax = axs[row, col]
-            if key not in sample or sample[key] is None:
-                ax.axis('off')
-                continue
-            # Retrieve image data
-            img_data = sample[key]
-            if torch.is_tensor(img_data):
-                img_data = img_data.squeeze().cpu().numpy()
-            img_data = _squeeze_geo_value(img_data, key)
-            # For HR images mask out ocean using lsm_hr if needed.
-            if not show_ocean and (key.endswith('_hr') or key.endswith('_hr_original')):
-                if "lsm_hr" in sample and sample["lsm_hr"] is not None:
-                    mask = sample["lsm_hr"].squeeze().cpu().numpy()
-                    img_data = np.where(mask < 1, np.nan, img_data)
-            # Determine color limits.
-            if force_matching_scale and global_min is not None and global_max is not None:
-                vmin = global_min.get(key, np.nanmin(img_data))
-                vmax = global_max.get(key, np.nanmax(img_data))
-            else:
-                vmin, vmax = np.nanmin(img_data), np.nanmax(img_data)
-            # Choose colormap:
-            if key.endswith('_hr') or key.endswith('_hr_original'):
-                cmap = hr_cmap
-            elif key.endswith('_lr') or key.endswith('_lr_original'):
-                if key.endswith('_lr'):
-                    base = key[:-3]
-                else:
-                    base = key[:-12]
-                if lr_cmap_dict is not None and base in lr_cmap_dict:
-                    cmap = lr_cmap_dict[base]
-                else:
-                    cmap = default_lr_cmap
-            else:
-                if extra_cmap_dict is not None and key in extra_cmap_dict:
-                    cmap = extra_cmap_dict[key]
-                else:
-                    cmap = 'viridis'
-            im = ax.imshow(img_data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
-            ax.invert_yaxis()
-            ax.set_xticks([])
-            ax.set_yticks([])
-            divider = make_axes_locatable(ax)
-            # For keys that correspond to variable fields, add a boxplot next to the colorbar.
-            if key.endswith('_hr') or key.endswith('_lr') or key.endswith('_hr_original') or key.endswith('_lr_original'):
-                bax = divider.append_axes("right", size="10%", pad=0.1)
-                cax = divider.append_axes("right", size="5%", pad=0.1)
-                flierprops = dict(marker='o', markerfacecolor='none', markersize=2,
-                                  linestyle='none', markeredgecolor='darkgreen', alpha=0.4)
-                medianprops = dict(linestyle='-', linewidth=2, color='black')
-                meanpointprops = dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick')
-                img_flat = img_data[~np.isnan(img_data)].flatten()
-                if len(img_flat) > 0:
-                    bax.boxplot(img_flat,
-                                vert=True,
-                                widths=2,
-                                patch_artist=True,
-                                showmeans=True,
-                                meanprops=meanpointprops,
-                                medianprops=medianprops,
-                                flierprops=flierprops)
-                bax.set_xticks([])
-                bax.set_yticks([])
-                bax.set_frame_on(False)
-            else:
-                cax = divider.append_axes("right", size="5%", pad=0.1)
-            fig.colorbar(im, cax=cax)
-
-            base = None
-
-
-            # Set column title (only for top row)
-            if row == 0:
-                if key.endswith('_hr'):
-                    title = f"HR {hr_model} ({var})\nscaled"
-                elif key.endswith('_hr_original'):
-                    title = f"HR {hr_model} ({var})\noriginal [{hr_units}]"
-                elif key.endswith('_lr'):
-                    base = key[:-3]
-                    title = f"LR {lr_model} ({base})\nscaled"
-                elif key.endswith('_lr_original'):
-                    base = key[:-12]
-                    title = f"LR {lr_model} ({base})\noriginal [{lr_units[lr_keys.index(base)]}]"
-                elif extra_keys is not None and key in extra_keys:
-                    if key == "topo":
-                        title = f"Topography"
-                    elif key == "sdf":
-                        title = f"SDF"
-                    elif key == "lsm":
-                        title = f"Land/Sea Mask"
-                    else:
-                        title = f"{key}"
-                else:
-                    title = f"{key}"
-                ax.set_title(title, fontsize=10)
-    fig.tight_layout()
-    return fig, axs
-
+    if boxplot and bax is not None:
+        vals = _finite_flat(img_data)
+        if vals.size:
+            bax.boxplot(vals,
+                        vert=True,
+                        widths=0.9,
+                        showmeans=True,
+                        meanprops=dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick'),
+                        flierprops=dict(marker='o', markerfacecolor='none', markersize=2, linestyle='None', markeredgecolor='darkgreen', alpha=0.4),
+                        medianprops=dict(linestyle='-', linewidth=2, color='black'),
+            )
+            if ylim is not None:
+                try:
+                    y0, y1 = float(ylim[0]), float(ylim[1])
+                    if np.isfinite([y0, y1]).all() and y1 > y0:
+                        bax.set_ylim(y0, y1)
+                except Exception as e:
+                    logger.warning(f"Could not set boxplot ylim {ylim}: {e}")
+                    pass
+            # Cosmetic cleanup
+            bax.set_xticks([])
+            bax.set_yticks([])
+            bax.set_frame_on(False)
+        else:
+            bax.axis('off')
 
 
 def plot_samples_and_generated(
@@ -595,10 +277,11 @@ def plot_samples_and_generated(
         generated,
         cfg,
         *,
+        dates: Optional[List[str]] = None,
         transform_back_bf_plot=False,
         back_transforms=None,
-        n_samples_threshold=3,
-        figsize=(15, 8),
+        n_samples_threshold=5,
+        figsize=(15, 15),
 ):
     """
     Like ``plot_samples`` but adds an extra left-most column with “Generated”
@@ -624,13 +307,17 @@ def plot_samples_and_generated(
     hr_cmap, lr_cmap_dict = get_cmaps(cfg)
     default_lr_cmap = 'viridis'
     extra_cmap_dict = {"topo": "terrain", "lsm": "binary", "sdf": "coolwarm"}
-    show_ocean = cfg.get('visualization', {}).get('show_ocean', False)
-    force_matching_scale = cfg.get('visualization', {}).get('force_matching_scale', True)
-    global_min = cfg.get('visualization', {}).get('global_min', None)
-    global_max = cfg.get('visualization', {}).get('global_max', None)
-    extra_keys = cfg.get('visualization', {}).get('extra_keys', None)
-    scaling = cfg.get('visualization', {}).get('scaling', True)
-
+    
+    cfg_vis = cfg.get('visualization', {})
+    show_ocean = cfg_vis.get('show_ocean', False)
+    force_matching_scale = cfg_vis.get('force_matching_scale', True)
+    global_min = cfg_vis.get('global_min', None)
+    global_max = cfg_vis.get('global_max', None)
+    extra_keys = cfg_vis.get('extra_keys', None)
+    scaling = cfg_vis.get('scaling', True)
+    add_boxplot_per_panel = bool(cfg_vis.get('add_boxplot_per_panel', True))
+    add_boxplot_summary = bool(cfg_vis.get('add_boxplot_summary', False))
+    summary_boxplot_keys = cfg_vis.get('summary_boxplot_keys', None)  # list of keys for summary boxplot column
 
     # ------------------------------------------------------------------ utils
     def to_numpy(x):
@@ -652,8 +339,41 @@ def plot_samples_and_generated(
             elif k not in back_transforms:
                 logger.info(f"No inverse transformation found for key: {k}")
         return arr
-    # logger.info(f'Samples: {samples}')
-    # logger.info(f'Generated: {generated}')
+    
+    def _prep_for_limits(sample_dict, key):
+        """Prep image like in plotting (inverse, mask, squeeze) for consistent vlim calc"""
+        if key is None or key not in sample_dict or sample_dict[key] is None:
+            return None
+        arr = to_numpy(sample_dict[key]).squeeze()
+        arr = _squeeze_geo_value(arr, key)
+        arr = maybe_inverse(key, arr)
+        if not show_ocean and key in {gen_key, hr_key, f"{hr_key}_original"}:
+            if "lsm_hr" in sample_dict and sample_dict["lsm_hr"] is not None:
+                mask = to_numpy(sample_dict["lsm_hr"]).squeeze()
+                arr = np.where(mask < 1, np.nan, arr)
+        if arr.ndim == 3 and arr.shape[0] == 1:
+            arr = arr.squeeze(axis=0)
+        return arr
+    
+    def _finite_minmax(arrs):
+        """Compute global min/max over a list of arrays, ignoring NaNs."""
+        vals = []
+        for a in arrs:
+            if a is None:
+                continue
+            if torch.is_tensor(a):
+                a = a.detach().cpu().numpy()
+            else:
+                a = np.asarray(a)
+            af = a[np.isfinite(a)]
+            if af.size:
+                vals.append(af)
+        if not vals:
+            return None, None
+        all_vals = np.concatenate(vals)
+        return float(np.nanmin(all_vals)), float(np.nanmax(all_vals))
+
+
     # -------------------------------------------------------- unpack samples
     if isinstance(samples, dict):              # turn single batch-dict → list
         B = None
@@ -705,6 +425,8 @@ def plot_samples_and_generated(
     # --------------------------------------------------- assemble key order
     hr_key = f"{var}_hr"
     lr_keys = sorted(k for k in sample_list[0] if k.endswith("_lr"))
+    # Decide which LR key to use for matching (if any)
+    matching_lr_key = f"{var}_lr" if f"{var}_lr" in lr_keys else None
     original_keys = [k + "_original"
                      for k in (hr_key, *lr_keys)
                      if k + "_original" in sample_list[0]]
@@ -713,17 +435,37 @@ def plot_samples_and_generated(
     if extra_keys:
         plot_keys.extend(extra_keys)
 
-    # ----------------------------------------------------------- colourlims
-    if force_matching_scale and global_min is not None and global_max is not None:
-        # share HR limits with generated if user hasn’t provided any
-        global_min.setdefault(gen_key, global_min.get(hr_key))
-        global_max.setdefault(gen_key, global_max.get(hr_key))
 
+    # -------------------------------------------------- Pooled colourlims (per sample)
+    per_row_vlims = None
+    if not (force_matching_scale and global_min is not None and global_max is not None):
+        per_row_vlims = []
+        for sd in sample_list:
+            arrs = []
+            arrs.append(_prep_for_limits(sd, gen_key))
+            arrs.append(_prep_for_limits(sd, hr_key))
+            if matching_lr_key is not None:
+                arrs.append(_prep_for_limits(sd, matching_lr_key))
+            vmin_row, vmax_row = _finite_minmax(arrs)
+            # Fallback: if empty (all-NaN), compute from HR only
+            if vmin_row is None or vmax_row is None:
+                hr_only = _prep_for_limits(sd, hr_key)
+                vmin_row, vmax_row = _finite_minmax([hr_only])
+            per_row_vlims.append( (vmin_row, vmax_row) )
+
+            
     # -------------------------------------------------------------- figure
     n_rows, n_cols = len(sample_list), len(plot_keys)
     fig, axs = plt.subplots(n_rows, n_cols, figsize=figsize)
-    fig.suptitle(f"Generated vs. data – {var}  "
-                 f"(HR {hr_model} / LR {lr_model})", fontsize=16)
+
+    # If requested, add a summary boxplot column, rebuild figure with +1 column to the right
+    if add_boxplot_summary:
+        plt.close(fig)
+        n_rows, n_cols = len(sample_list), len(plot_keys) + 1
+        fig, axs = plt.subplots(n_rows, n_cols, figsize=figsize)
+        summary_col_idx = n_cols - 1
+    else:
+        summary_col_idx = None
 
     # Ensure axs is always 2D
     if n_rows == 1 and n_cols == 1:
@@ -734,61 +476,88 @@ def plot_samples_and_generated(
         axs = axs[:, np.newaxis]
 
     fig.suptitle(f"Generated vs. conditions – {var} (HR {hr_model} / LR {lr_model}) ")
-    
-    # --------------------------------------------------------- draw images
+
     for r, sample in enumerate(sample_list):
+        # For the summary column, collect distributions here:
+        summary_vals = [] # list of (label, values)
+        # If user provided explicit keys for the summary boxplot, use those; else default gen + HR + (matching LR)
+
+        if summary_boxplot_keys is not None:
+            row_summary_keys = [k for k in summary_boxplot_keys if k in sample]
+        else:
+            row_summary_keys = [gen_key, hr_key]
+            if matching_lr_key is not None:
+                row_summary_keys.append(matching_lr_key)
+            row_summary_keys = [k for k in row_summary_keys if k in sample]
+
         for c, key in enumerate(plot_keys):
             ax = axs[r, c]
             if key not in sample or sample[key] is None:
-                ax.axis("off")
+                ax.axis('off')
                 continue
-            
-            # # Print key and shape for debugging
-            # logger.info(f"Key: {key}")
-            # logger.info(f"Shape: {sample[key].shape}")
-
-            img = to_numpy(sample[key]).squeeze()
-            img = _squeeze_geo_value(img, key)
-            img = maybe_inverse(key, img)
+            # Add date if provided as y-axis label on first column
+            if c == 0 and dates is not None and r < len(dates):
+                date_str = str(dates[r])
+                if date_str:
+                    ax.set_ylabel(date_str, fontsize=10)
 
 
-            # mask ocean for HR & generated columns
+            # ========= Retrieve image data =========
+            img_data = to_numpy(sample[key]).squeeze()
+            img_data = _squeeze_geo_value(img_data, key)
+            img_data = maybe_inverse(key, img_data)
+
+            # For HR images mask out ocean using lsm_hr if needed. TODO: Allow user to specify mask key?
             if not show_ocean and key in {gen_key, hr_key, f"{hr_key}_original"}:
                 if "lsm_hr" in sample and sample["lsm_hr"] is not None:
                     mask = to_numpy(sample["lsm_hr"]).squeeze()
-                    img = np.where(mask < 1, np.nan, img)
+                    img_data = np.where(mask < 1, np.nan, img_data)
+            # For matching LR image, also apply HR mask if needed. NOTE: Should full LR be shown, but only masked in boxplot?
+            if (not show_ocean) and (matching_lr_key is not None) and (key == matching_lr_key):
+                if "lsm_hr" in sample and sample["lsm_hr"] is not None:
+                    mask = to_numpy(sample["lsm_hr"]).squeeze()
+                    img_data = np.where(mask < 1, np.nan, img_data)
 
-            # choose colormap
+            # cmap selection
             if key in {gen_key, hr_key, f"{hr_key}_original"}:
                 cmap = hr_cmap
-            elif key.endswith("_lr") or key.endswith("_lr_original"):
-                base = key.replace("_lr", "").replace("_lr_original", "")
+            elif key.endswith('_lr') or key.endswith('_lr_original'):
+                base = key.replace('_lr', '').replace('_lr_original', '')
                 cmap = (lr_cmap_dict or {}).get(base, default_lr_cmap)
             else:
-                cmap = (extra_cmap_dict or {}).get(key, "viridis")
+                cmap = (extra_cmap_dict or {}).get(key, 'viridis')
 
+            # vmin/vmax 
             if force_matching_scale and global_min is not None and global_max is not None:
-                vmin = global_min.get(key, np.nanmin(img))
-                vmax = global_max.get(key, np.nanmax(img))
+                vmin = global_min.get(key, np.nanmin(img_data)) if isinstance(global_min, dict) else global_min
+                vmax = global_max.get(key, np.nanmax(img_data)) if isinstance(global_max, dict) else global_max
             else:
-                vmin, vmax = np.nanmin(img), np.nanmax(img)
+                use_row_pool = (key == gen_key) or (key == hr_key) or (matching_lr_key is not None and key == matching_lr_key)
+                if use_row_pool and per_row_vlims is not None:
+                    vmin, vmax = per_row_vlims[r]
+                    # If degenerate or non-finite, fallback to per-image
+                    if (vmin is None) or (vmax is None) or (not np.isfinite([vmin, vmax]).all()):
+                        vmin, vmax = np.nanmin(img_data), np.nanmax(img_data)
+                else:
+                    vmin, vmax = np.nanmin(img_data), np.nanmax(img_data)
+                
 
-            # Check dimensions of image. if (1, dim, dim), squeeze
-            if img.ndim == 3 and img.shape[0] == 1:
-                img = img.squeeze(0)
+            # Ensure 2D
+            if img_data.ndim == 3 and img_data.shape[0] == 1:
+                img_data = img_data.squeeze(0)
 
-            im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax,
-                           interpolation="nearest")
+            im = ax.imshow(img_data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
             ax.invert_yaxis()
             ax.set_xticks([])
             ax.set_yticks([])
 
-            # colour-bar
-            div = make_axes_locatable(ax)
-            cax = div.append_axes("right", size="5%", pad=0.05)
-            fig.colorbar(im, cax=cax)
+            # ========= If LR conditions, add LSM contour =========
+            # Specifically NOT the HR lsm, if we change LR geographical domain
+            if key.endswith('_lr') and "lsm" in sample and sample["lsm"] is not None and bool(cfg_vis.get('overlay_lsm_contour', True)):
+                lsm_data = to_numpy(sample["lsm"]).squeeze()
+                ax.contour(lsm_data, levels=[0.5], colors='white', linewidths=0.5)
 
-            # column headers
+            # ========= column headers (title logic) =========
             if r == 0:
                 if scaling:
                     if transform_back_bf_plot and back_transforms and key in back_transforms:
@@ -812,10 +581,63 @@ def plot_samples_and_generated(
                         **{k: f"LR {lr_model} ({k[:-3]})\nno scaling [{lr_units[lr_keys.index(k[:-3])] if k[:-3] in lr_keys else 'unknown'}]" for k in lr_keys},
                         **{k: f"LR {lr_model}" for k in lr_keys},
                     }
-                
-                ax.set_title(titles.get(key, key), fontsize=9)
 
+
+                ax.set_title(titles.get(key, key), fontsize=9)
+            
+            # ========= Add per-panel boxplot if requested next to colorbar =========
+            if key.endswith(("generated", "_hr", "_lr", "_hr_original", "_lr_original")) and add_boxplot_per_panel:
+                _add_colorbar_and_boxplot(fig, ax, im, img_data, boxplot=True, ylim=(vmin, vmax))
+            else:
+                # Still add a colorbar but no boxplot for non-variable maps / extras
+                divide = make_axes_locatable(ax)
+                cax = divide.append_axes("right", size="5%", pad=0.1)
+                fig.colorbar(im, cax=cax, orientation='vertical')
+            
+            # ========= Collect for the summary boxplot if requested =========
+            if add_boxplot_summary and key in row_summary_keys:
+                vals = _finite_flat(img_data)
+                if vals.size:
+                    if key == gen_key:
+                        label = hr_key.replace('_hr', ' gen')
+                    elif key == hr_key:
+                        label = hr_key.replace('_hr', ' hr')
+                    elif key.endswith('_lr'):
+                        label = key.replace('_lr', ' lr')
+                    else:
+                        label = key
+                    summary_vals.append((label, vals))
+            # End of column loop 
+
+        # ========= Draw the summary column for this row, if requested ========
+        if add_boxplot_summary and summary_col_idx is not None:
+            axd = axs[r, summary_col_idx]
+            axd.clear()
+            if summary_vals:
+                labels, data = zip(*summary_vals)
+                axd.boxplot(data, vert=True, widths=0.7, showmeans=True,
+                            meanprops=dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick'),
+                            flierprops=dict(marker='o', markerfacecolor='none', markersize=2, linestyle='None', markeredgecolor='darkgreen', alpha=0.35),
+                            medianprops=dict(linestyle='-', linewidth=1.2, color='black'),
+                )
+                
+                axd.tick_params(axis='y', labelsize=8)
+                # Only add x-ticks  on last row
+                if r == n_rows - 1:
+                    axd.set_xticks(range(1, len(labels) + 1))
+                    axd.set_xticklabels(labels, rotation=45, ha='right', fontsize=7)
+                else:
+                    axd.set_xticks([])
+                # Only add title on first row
+                if r == 0:
+                    axd.set_title("Pixel distribution summary", fontsize=9)
+                axd.set_frame_on(False)
+                    
+            else:
+                axd.axis('off')
+    # Tighten layout
     fig.tight_layout()
+
     return fig, axs
 
 
@@ -913,6 +735,7 @@ def plot_fss_epoch(
 
 def plot_fss_history(
     fss_hist: List[Dict[str, float]],
+    epoch_list: Optional[List[int]] = None,
     *,
     save_dir: str,
     filename: str = "fss_history.png",
@@ -929,7 +752,11 @@ def plot_fss_history(
     # Collect all scales
     scales = sorted({k for d in fss_hist for k in d.keys()},
                     key=lambda k: float(k.replace("km", "")) if "km" in k else float("inf"))
-    epochs = np.arange(1, len(fss_hist) + 1)
+
+    if epoch_list is not None and len(epoch_list) == len(fss_hist):
+        epochs = np.asarray(epoch_list, dtype=float)
+    else:
+        epochs = np.arange(1, len(fss_hist) + 1)
 
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     for s in scales:
@@ -992,6 +819,7 @@ def plot_psd_slope_epoch(
 
 def plot_psd_slope_history(
     psd_hist: List[Dict[str, float]],
+    epoch_list: Optional[List[int]] = None,
     *,
     save_dir: str,
     filename: str = "psd_slope_history.png",
@@ -1005,7 +833,10 @@ def plot_psd_slope_history(
         logger.warning("[plot] plot_psd_slope_history: empty history; skipping.")
         return
 
-    epochs = np.arange(1, len(psd_hist) + 1, dtype=float)
+    if epoch_list is not None and len(epoch_list) == len(psd_hist):
+        epochs = np.asarray(epoch_list, dtype=float)
+    else:
+        epochs = np.arange(1, len(psd_hist) + 1, dtype=float)
     gen = np.array([d.get("psd_slope_gen", np.nan) for d in psd_hist], dtype=float)
     hr  = np.array([d.get("psd_slope_hr", np.nan) for d in psd_hist], dtype=float)
     delta = np.array([d.get("psd_slope_delta", np.nan) for d in psd_hist], dtype=float)
@@ -1085,6 +916,7 @@ def plot_quantiles_wetday_epoch(
 
 def plot_quantiles_wetday_history(
     q_hist: List[Dict[str, float]],
+    epoch_list: Optional[List[int]] = None,
     *,
     save_dir: str,
     filename: str = "quantiles_wetday_history.png",
@@ -1098,7 +930,10 @@ def plot_quantiles_wetday_history(
         logger.warning("[plot] plot_quantiles_wetday_history: empty history; skipping.")
         return
 
-    epochs = np.arange(1, len(q_hist) + 1, dtype=float)
+    if epoch_list is not None and len(epoch_list) == len(q_hist):
+        epochs = np.asarray(epoch_list, dtype=float)
+    else:
+        epochs = np.arange(1, len(q_hist) + 1, dtype=float)
 
     def _series(gk, hk):
         g = np.array([d.get(gk, np.nan) for d in q_hist], dtype=float)
@@ -1137,3 +972,394 @@ def plot_quantiles_wetday_history(
     if show:
         plt.show()
     plt.close(fig)
+
+
+
+
+
+
+# def plot_sample_with_boxplot(
+#         hr: Union[np.ndarray, dict], # Expecting a 2D array or dict with multiple days
+#         lr: Optional[Union[np.ndarray, dict]] = None,
+#         gen: Optional[Union[np.ndarray, dict]] = None,
+#         variable: str = "Variable",
+#         hr_model: str = "HR Model",
+#         lr_model: Optional[str] = None,
+#         gen_model: Optional[str] = None,
+#         dates: Optional[Union[str, list]] = None,
+#         save_path: Optional[str] = None,
+#         show: bool = False,
+#         cmap_default: str = "viridis",
+#         combine_into_grid: bool = False,
+#         n_rows_max: int = 5,
+#     ):
+#     """
+#         Plots HR, LR and generated images side-by-side with boxplots adjacent to each image.
+#         Accepts either single arrays or dicts + dates for multiple days.
+#         If combine_into_grid is True, multiple dates will be plotted in a grid layout in a single figure.
+#         - If hr is a dict and date is a list -> loop throuhg each date
+#         - If hr is a dict and date is a single str -> lookup that date once
+#         - If hr is a NumPy array, date is ignored
+#     """
+
+#     if save_path is None:
+#         save_path = f"./comparison/{variable}/"
+
+#     # Get cmap for variable if possible
+#     try:
+#         cmap_default = get_cmap_for_variable(variable)
+#     except ValueError:
+#         pass
+
+#     # === MULTIPLE DAYS ===
+#     if isinstance(dates, list):
+#         # === IF COMBINING INTO GRID PLOT IN ONE FIGURE ===
+#         if combine_into_grid:
+#             dates = dates[:n_rows_max]
+#             fields = [('Gen', gen), (f'{hr_model}', hr), (f'{lr_model}', lr)]
+#             fields = [(name, f) for name, f in fields if f is not None]
+#             n_fields = len(fields)
+#             n_rows = len(dates)
+
+#             fig = plt.figure(figsize=(5 * n_fields * 1.5, 3.5 * n_rows))
+#             gs = GridSpec(n_rows, n_fields * 2, width_ratios=[4, 1] * n_fields, figure=fig)
+
+#             for row_idx, d in enumerate(dates):
+#                 row_data = []
+#                 for label, dataset in fields:
+#                     if isinstance(dataset, dict) and d in dataset:
+#                         row_data.append((label, dataset[d]))
+#                     else:
+#                         row_data.append((label, None))
+
+#                 vmin = min(np.min(x[1]) for x in row_data if x[1] is not None)
+#                 vmax = max(np.max(x[1]) for x in row_data if x[1] is not None)
+
+#                 for i, (label, data) in enumerate(row_data):
+#                     ax_img = fig.add_subplot(gs[row_idx, i * 2])
+#                     if data is not None:
+#                         # Ensure data is a NumPy array before plotting
+#                         if isinstance(data, dict):
+#                             logger.warning(f"Cannot plot dictionary for label '{label}'. Skipping.")
+#                             ax_img.set_title(f"{label} (invalid data type)")
+#                             ax_img.axis('off')
+#                             continue
+#                         if not isinstance(data, np.ndarray):
+#                             data = np.array(data)
+#                         # Set date title to only be date (not time)
+#                         try:
+#                             d_title = d.split(' ')[0] if ' ' in d else d
+#                         except Exception as e:
+#                             logger.warning(f"Error extracting date title from '{d}': {e}")
+#                             d_title = d
+                        
+#                         im = ax_img.imshow(data, cmap=cmap_default, vmin=vmin, vmax=vmax)
+#                         ax_img.set_title(f"{label} ({d_title})", fontsize=10)
+#                         ax_img.axis('off')
+#                         ax_img.invert_yaxis()  # Invert y-axis to match the original image orientation
+#                         plt.colorbar(im, ax=ax_img, shrink=0.8)
+#                     else:
+#                         ax_img.set_title(f"{label} (missing)")
+#                         ax_img.axis('off')
+
+#                     ax_box = fig.add_subplot(gs[row_idx, i * 2 + 1])
+#                     if data is not None:
+#                         ax_box.boxplot(
+#                                 data.flatten(),
+#                                 vert=True,
+#                                 widths=1,
+#                                 showmeans=True,
+#                                 meanprops=dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick'),
+#                                 flierprops=dict(marker='o', markerfacecolor='none', markersize=2, linestyle='None', markeredgecolor='darkgreen', alpha=0.4),
+#                                 medianprops=dict(linestyle='-', linewidth=2, color='black'),
+#                                 patch_artist=True,
+#                                 )
+
+#                     # ax_box.set_title("Box", fontsize=8)
+#                     ax_box.set_xticks([])
+#                     ax_box.tick_params(axis='y', labelsize=6)
+#                     ax_box.set_frame_on(False)
+
+
+#             fig.suptitle(f"{variable} | Multiple Dates", fontsize=16)
+#             fig.tight_layout()
+#             if save_path:
+#                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
+#                 path = os.path.join(save_path, f"{variable}_{hr_model}_vs_{lr_model}_boxplot__qualitative_visual.png")
+#                 plt.savefig(path, dpi=300, bbox_inches='tight')
+#             if show:
+#                 plt.show()
+#             plt.close()
+#             return  # Don't fall through to single plot
+
+#         # === IF NOT COMBINING, PLOT EACH DATE SEPARATELY IN MULTIPLE FIGURES ===
+#         for d in dates:
+#             plot_sample_with_boxplot(
+#                 hr=hr, lr=lr, gen=gen,
+#                 variable=variable,
+#                 hr_model=hr_model,
+#                 lr_model=lr_model,
+#                 gen_model=gen_model,
+#                 dates=d,
+#                 save_path=os.path.join(save_path, f"{variable}_{d}_boxplot__qualitative_visual.png") if save_path else None,
+#                 show=show,
+#                 cmap_default=cmap_default
+#             )
+#         return 
+
+#     # === DICTIONARY LOOKUP ===
+#     if isinstance(hr, dict):
+#         if dates not in hr:
+#             logger.warning(f"Date '{dates}' not found in HR data dictionary. Skipping plot.")
+#             return
+#         hr = hr[dates]
+#         lr = lr.get(dates) if lr and isinstance(lr, dict) else None
+#         gen = gen.get(dates) if gen and isinstance(gen, dict) else None
+
+#     # === SINGLE PLOT ===
+
+#     fields = [('HR', hr, hr_model)]
+#     if gen is not None:
+#         fields.insert(0, ('Generated', gen, gen_model if gen_model else "Gen Model"))
+#     if lr is not None:
+#         fields.append(('LR', lr, lr_model if lr_model else "LR Model"))
+
+#     n_fields = len(fields)
+#     fig = plt.figure(figsize=(5 * n_fields * 1.5, 5)) # 5 for each image, 1.5 for boxplot
+#     gs = GridSpec(1, n_fields * 2, width_ratios=[4, 1] * n_fields, figure=fig)
+
+#     vmin = min(np.nanmin(f[1]) for f in fields if isinstance(f[1], np.ndarray))
+#     vmax = max(np.nanmax(f[1]) for f in fields if isinstance(f[1], np.ndarray))
+
+
+#     for i, (label, data, model) in enumerate(fields):
+#         if data is None:
+#             continue
+#         if not isinstance(data, np.ndarray):
+#             data = np.array(data)
+#         ax_img = fig.add_subplot(gs[0, i * 2])
+#         im = ax_img.imshow(data, cmap=cmap_default, vmin=vmin, vmax=vmax)
+#         ax_img.set_title(f"{label} ({model})", fontsize=14)
+#         ax_img.axis('off')
+#         ax_img.invert_yaxis()  # Invert y-axis to match the original image orientation
+
+#         cbar = plt.colorbar(im, ax=ax_img, shrink=0.8)
+#         cbar.ax.tick_params(labelsize=8)
+
+#         ax_box = fig.add_subplot(gs[0, i * 2 + 1])
+#         ax_box.boxplot(data.flatten(), vert=True, patch_artist=True,
+#                           boxprops=dict(facecolor='lightblue', color='blue'),
+#                           medianprops=dict(color='red'),
+#                           flierprops=dict(marker='o', markerfacecolor='none', markersize=5, markeredgecolor='blue', alpha=0.5))
+#         ax_box.set_xticks([])
+#         ax_box.tick_params(axis='y', labelsize=8)
+
+
+#     suptitle = f"{variable} | {dates}" if dates else variable
+#     fig.suptitle(suptitle, fontsize=16)
+
+#     if save_path:
+#         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+#         logger.info(f"Plot saved to {save_path}")
+#     if show:
+#         plt.show()
+#     plt.close()
+    
+#     return 
+
+
+# def plot_samples(samples, cfg, n_samples_threshold=3, figsize=(15, 8)):
+#     """
+#     Plot a batch of samples (provided as a list of sample dictionaries) in a grid where each row is a sample and
+#     each column corresponds to a particular key (e.g., HR, LR, originals, geo).
+    
+#     If the number of samples exceeds n_samples_threshold, only the first n_samples_threshold will be plotted.
+    
+#     Parameters:
+#       - sample_list: List of sample dictionaries.
+#       - cfg: Configuration dictionary containing model and variable information.
+#       - figsize: Overall figure size.
+      
+#     Returns:
+#       - fig: The matplotlib Figure object.
+#     """
+#     from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+#     # Extract configuration for plotting
+#     hr_model = cfg['highres']['model']
+#     lr_model = cfg['lowres']['model']
+#     var = cfg['highres']['variable']
+#     hr_units, lr_units = get_units(cfg)
+#     hr_cmap, lr_cmap_dict = get_cmaps(cfg)
+#     default_lr_cmap = 'viridis'
+#     extra_cmap_dict = {"topo": "terrain", "lsm": "binary", "sdf": "coolwarm"}
+#     show_ocean = cfg.get('visualization', {}).get('show_ocean', False)
+#     force_matching_scale = cfg.get('visualization', {}).get('force_matching_scale', True)
+#     global_min = cfg.get('visualization', {}).get('global_min', None)
+#     global_max = cfg.get('visualization', {}).get('global_max', None)
+#     extra_keys = cfg.get('visualization', {}).get('extra_keys', None)
+
+
+#     # If single batch dict is passed, unpack it to a list
+#     if isinstance(samples, dict):
+#         # Figure out batch size from first tensor we find:
+#         batch_size = None
+#         for v in samples.values():
+#             if torch.is_tensor(v):
+#                 batch_size = v.shape[0]
+#                 break
+#             if isinstance(v, list) and all(torch.is_tensor(x) for x in v):
+#                 batch_size = len(v)
+#                 break
+#         if batch_size is None:
+#             raise ValueError("No tensor found in the sample dictionary to determine batch size.")
+        
+#         sample_list = []
+#         for i in range(batch_size):
+#             single = {}
+#             for k, v in samples.items():
+#                 if torch.is_tensor(v):
+#                     # Slice tensor on batch dim
+#                     single[k] = v[i]
+#                 elif isinstance(v, (list, tuple)) and len(v) == batch_size:
+#                     # Truly per-sample list
+#                     single[k] = v[i]
+#                 else:
+#                     # Some constant list or metadata: leave as-is
+#                     single[k] = v
+#             sample_list.append(single)
+#     else:
+#         sample_list = samples
+
+#     # logger.info(f"Plotting first {n_samples_threshold} samples out of {len(sample_list)} provided.")
+#     sample_list = sample_list[:n_samples_threshold]
+    
+#     # Construct the keys:
+#     # HR key is "var_hr" (e.g., "prcp_hr")
+#     hr_key = f"{var}_hr"
+#     # Assume LR keys end with '_lr'
+#     lr_keys = sorted([key for key in sample_list[0].keys() if key.endswith('_lr')])
+#     scaled_keys = [hr_key] + lr_keys
+
+#     # Determine original keys if available.
+#     original_keys = []
+#     for key in scaled_keys:
+#         orig_key = key + "_original"
+#         if orig_key in sample_list[0]:
+#             original_keys.append(orig_key)
+    
+#     # Build final list of keys. Append extra keys if provided.
+#     plot_keys = scaled_keys + original_keys
+#     if extra_keys is not None:
+#         plot_keys += extra_keys
+
+#     num_samples = len(sample_list)
+#     num_keys = len(plot_keys)
+
+#     # Create a grid with rows = number of samples and columns = number of keys
+#     fig, axs = plt.subplots(num_samples, num_keys, figsize=figsize)
+#     # Set figure title 
+#     fig.suptitle(f"Sample images for {var} (HR: {hr_model} and LR: {lr_model})", fontsize=16)
+#     if num_samples == 1:
+#         axs = np.expand_dims(axs, axis=0)
+#     if num_keys == 1:
+#         axs = np.expand_dims(axs, axis=1)
+
+#     for row, sample in enumerate(sample_list):
+#         for col, key in enumerate(plot_keys):
+#             ax = axs[row, col]
+#             if key not in sample or sample[key] is None:
+#                 ax.axis('off')
+#                 continue
+#             # Retrieve image data
+#             img_data = sample[key]
+#             if torch.is_tensor(img_data):
+#                 img_data = img_data.squeeze().cpu().numpy()
+#             img_data = _squeeze_geo_value(img_data, key)
+#             # For HR images mask out ocean using lsm_hr if needed.
+#             if not show_ocean and (key.endswith('_hr') or key.endswith('_hr_original')):
+#                 if "lsm_hr" in sample and sample["lsm_hr"] is not None:
+#                     mask = sample["lsm_hr"].squeeze().cpu().numpy()
+#                     img_data = np.where(mask < 1, np.nan, img_data)
+#             # Determine color limits.
+#             if force_matching_scale and global_min is not None and global_max is not None:
+#                 vmin = global_min.get(key, np.nanmin(img_data))
+#                 vmax = global_max.get(key, np.nanmax(img_data))
+#             else:
+#                 vmin, vmax = np.nanmin(img_data), np.nanmax(img_data)
+#             # Choose colormap:
+#             if key.endswith('_hr') or key.endswith('_hr_original'):
+#                 cmap = hr_cmap
+#             elif key.endswith('_lr') or key.endswith('_lr_original'):
+#                 if key.endswith('_lr'):
+#                     base = key[:-3]
+#                 else:
+#                     base = key[:-12]
+#                 if lr_cmap_dict is not None and base in lr_cmap_dict:
+#                     cmap = lr_cmap_dict[base]
+#                 else:
+#                     cmap = default_lr_cmap
+#             else:
+#                 if extra_cmap_dict is not None and key in extra_cmap_dict:
+#                     cmap = extra_cmap_dict[key]
+#                 else:
+#                     cmap = 'viridis'
+#             im = ax.imshow(img_data, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
+#             ax.invert_yaxis()
+#             ax.set_xticks([])
+#             ax.set_yticks([])
+#             divider = make_axes_locatable(ax)
+#             # For keys that correspond to variable fields, add a boxplot next to the colorbar.
+#             if key.endswith('_hr') or key.endswith('_lr') or key.endswith('_hr_original') or key.endswith('_lr_original'):
+#                 bax = divider.append_axes("right", size="10%", pad=0.1)
+#                 cax = divider.append_axes("right", size="5%", pad=0.1)
+#                 flierprops = dict(marker='o', markerfacecolor='none', markersize=2,
+#                                   linestyle='none', markeredgecolor='darkgreen', alpha=0.4)
+#                 medianprops = dict(linestyle='-', linewidth=2, color='black')
+#                 meanpointprops = dict(marker='x', markerfacecolor='firebrick', markersize=5, markeredgecolor='firebrick')
+#                 img_flat = img_data[~np.isnan(img_data)].flatten()
+#                 if len(img_flat) > 0:
+#                     bax.boxplot(img_flat,
+#                                 vert=True,
+#                                 widths=2,
+#                                 patch_artist=True,
+#                                 showmeans=True,
+#                                 meanprops=meanpointprops,
+#                                 medianprops=medianprops,
+#                                 flierprops=flierprops)
+#                 bax.set_xticks([])
+#                 bax.set_yticks([])
+#                 bax.set_frame_on(False)
+#             else:
+#                 cax = divider.append_axes("right", size="5%", pad=0.1)
+#             fig.colorbar(im, cax=cax)
+
+#             base = None
+
+
+#             # Set column title (only for top row)
+#             if row == 0:
+#                 if key.endswith('_hr'):
+#                     title = f"HR {hr_model} ({var})\nscaled"
+#                 elif key.endswith('_hr_original'):
+#                     title = f"HR {hr_model} ({var})\noriginal [{hr_units}]"
+#                 elif key.endswith('_lr'):
+#                     base = key[:-3]
+#                     title = f"LR {lr_model} ({base})\nscaled"
+#                 elif key.endswith('_lr_original'):
+#                     base = key[:-12]
+#                     title = f"LR {lr_model} ({base})\noriginal [{lr_units[lr_keys.index(base)]}]"
+#                 elif extra_keys is not None and key in extra_keys:
+#                     if key == "topo":
+#                         title = f"Topography"
+#                     elif key == "sdf":
+#                         title = f"SDF"
+#                     elif key == "lsm":
+#                         title = f"Land/Sea Mask"
+#                     else:
+#                         title = f"{key}"
+#                 else:
+#                     title = f"{key}"
+#                 ax.set_title(title, fontsize=10)
+#     fig.tight_layout()
+#     return fig, axs
