@@ -946,4 +946,3 @@ def apply_cfg_dropout(
             seasons = torch.where(m, torch.full_like(seasons, fill_val), seasons)
 
     return cond_images, lsm, topo, seasons, lr_ups
-

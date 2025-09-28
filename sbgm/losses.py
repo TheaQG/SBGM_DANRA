@@ -37,7 +37,8 @@ class EDMLoss(nn.Module):
                 topo_cond: torch.Tensor | None = None,
                 y: torch.Tensor | None = None,
                 lr_ups: torch.Tensor | None = None,
-                sdf_cond: torch.Tensor | None = None
+                sdf_cond: torch.Tensor | None = None,
+                pixel_weight_map: torch.Tensor | None = None
                 ):
         B = x0.shape[0]
         device = x0.device
@@ -56,6 +57,14 @@ class EDMLoss(nn.Module):
         w = w.view(B, 1, 1, 1)
 
         err2 = (x0_hat - x0)**2  # [B, C, H, W]
+
+        # Optional rain-gate pixel weighting
+        if pixel_weight_map is not None:
+            wmap = pixel_weight_map
+            # Expand channel dim if needed
+            if err2.dim() == 4 and wmap.dim() == 4 and err2.shape[1] != wmap.shape[1]:
+                wmap = wmap.expand(err2.shape[0], err2.shape[1], *err2.shape[2:])
+            err2 = err2 * wmap  # [B, C, H, W
 
         if self.use_sdf_weight and (sdf_cond is not None):
             # Weighting based on SDF: higher weights near land-sea boundary
@@ -92,7 +101,8 @@ class DSMLoss(nn.Module):
                 cond_img: Optional[torch.Tensor] = None,
                 lsm_cond: Optional[torch.Tensor] = None,
                 topo_cond: Optional[torch.Tensor] = None,
-                sdf_cond: Optional[torch.Tensor] = None
+                sdf_cond: Optional[torch.Tensor] = None,
+                pixel_weight_map: Optional[torch.Tensor] = None,
                 ):
         B = x.shape[0]
         device = x.device
@@ -106,13 +116,15 @@ class DSMLoss(nn.Module):
         # forward score model
         score = model(x_t, t, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)  # score estimate
 
+        per_pix = (score * std.view(B, 1, 1, 1) + z)**2  # [B, C, H, W]
         if self.use_sdf_weight and (sdf_cond is not None):
-            # Weighting based on SDF: higher weights near land-sea boundary
             sdf_w = torch.sigmoid(sdf_cond) * (self.max_land_weight - self.min_sea_weight) + self.min_sea_weight
-            loss = torch.mean(torch.sum(sdf_w * (score * std.view(B, 1, 1, 1) + z)**2, dim=(1, 2, 3))) # Loss weighted by SDF
-        else:
-            loss = torch.mean(torch.sum((score * std.view(B, 1, 1, 1) + z)**2, dim=(1, 2, 3)))
-        
+            per_pix = per_pix * sdf_w
+        if pixel_weight_map is not None:
+            wmap = pixel_weight_map
+            if per_pix.dim() == 4 and wmap.dim() == 4 and per_pix.shape[1] != wmap.shape[1]:
+                wmap = wmap.expand(per_pix.shape[0], per_pix.shape[1], *per_pix.shape[2:])
+            per_pix = per_pix * wmap
+        loss = torch.mean(torch.sum(per_pix, dim=(1, 2, 3)))
+
         return loss
-
-
