@@ -205,7 +205,191 @@ def compute_psd_slope(
 
     return out
 
+from sbgm.scale_utils import isotropic_psd, find_intersection_k, wavelength_km_from_k_cpkm, sigma_star_from_preserve_scale, t_star_from_sigma_ve
+def compute_sigma_star_from_loader(hr_batch: torch.Tensor,
+                                   lr_batch: torch.Tensor,
+                                   pixel_km: float,
+                                   lsm_hr: torch.Tensor | None = None,
+                                   land_only: bool = True,
+                                   window: str = "hann"):
+    """
+        Compute sigma* from intersection of isotropic PSDs of HR and LR fields in a batch.
+    """
+    # hr_batch, lr_batch: [B,1,H,W] or [B,H,W]
+    def _prep(b):
+        if isinstance(b, torch.Tensor): b = b.detach().cpu()
+        if b.ndim == 4: b = b[:, 0] # [B,1,H,W] -> [B,H,W]
+        return b
+    
+    Hs = _prep(hr_batch).numpy()
+    Ls = _prep(lr_batch).numpy()
+    if land_only and (lsm_hr is not None):
+        M = _prep(lsm_hr).numpy() > 0.5
+    else:
+        M = None
 
+    # Average PSDs over batch
+    P_hr_all, P_lr_all = [], []
+    k_ref = None
+    for i in range(Hs.shape[0]):
+        h = Hs[i]
+        l = Ls[i]
+        if M is not None:
+            h = np.where(M[i], h, np.nan)
+            l = np.where(M[i], l, np.nan)
+        k_hr, P_hr = isotropic_psd(h, pixel_km, window=window)
+        k_lr, P_lr = isotropic_psd(l, pixel_km, window=window)
+        if k_ref is None:
+            k_ref = (k_hr, k_lr)
+        P_hr_all.append(P_hr)
+        P_lr_all.append(P_lr)
+
+    # Stack common k grid by interpolation
+    kmin = max(min(k_ref[0]), min(k_ref[1])) if k_ref is not None else 0.0
+    kmax = min(max(k_ref[0]), max(k_ref[1])) if k_ref is not None else 1.0
+    k_common = np.linspace(kmin, kmax, 512)
+    Ph = []; Pl = []
+    if P_hr_all is None or P_lr_all is None:
+        logger.warning("No PSDs computed from batches. Returning None for lambda*.")
+        return None
+    if k_ref is None:
+        logger.warning("No reference k grids found. Returning None for lambda*.")
+        return None
+
+    for (k_hr, P_hr), (k_lr, P_lr) in zip([k_ref]*len(P_hr_all), [k_ref]*len(P_lr_all)):
+        # Reuse first's k; could refine but ok.
+        # Actually better: just recompute interp for each entry; keeping simple for brevity
+        Ph.append(np.interp(k_common, k_hr, P_hr_all[0]))
+        Pl.append(np.interp(k_common, k_lr, P_lr_all[0]))
+    P_hr_mean = np.interp(k_common, k_ref[0], np.mean(np.stack(P_hr_all,0),0))
+    P_lr_mean = np.interp(k_common, k_ref[1], np.mean(np.stack(P_lr_all,0),0))
+    # Find intersection k*
+    k_star = find_intersection_k(k_ref[0], np.mean(np.stack(P_hr_all,0),0),
+                                 k_ref[1], np.mean(np.stack(P_lr_all,0),0))
+    if k_star is None:
+        logger.warning("Could not find intersection k* between HR and LR PSDs. Returning None for lambda*.")
+        return None
+    
+    lam_star = wavelength_km_from_k_cpkm(k_star) # in km
+    return lam_star
+
+
+# INSERT THIS IN TRAINING LOOP WHERE APPROPRIATE:
+# lam_star = compute_sigma_star_from_loader(hr_batch=x0_hr, lr_batch=lr_up, pixel_km=self.pixel_km, lsm_hr=lsm_hr, land_only=self.eval_land_only)
+# if lam_star is not None:
+#     preserve_km = cfg.get('scale_control', {}).get('preserve_scale_km') or lam_star
+#     c_sigma = float(cfg.get('scale_control', {}).get('c_sigma', 1.0))
+#     sigma_star_px = sigma_star_from_preserve_scale(preserve_km, self.pixel_km, c=c_sigma)
+#     self.sigma_star_px = sigma_star_px  # cache for sampler
+#     if not self.edm_enabled:
+#         self.t_star = t_star_from_sigma_ve(sigma_star_px, self.marginal_prob_std_fn)
+# INSERT THIS IN SAMPLING LOOP WHERE APPROPRIATE: (Enforces that sampler never tries to "invent" scales larger than target - consistent with "preserve large scales")
+# sigma_min_user = cfg['edm'].get('sigma_min', 0.002)
+# sigma_min_eff = max(sigma_min_user, getattr(self, 'sigma_star_px', 0.0))
+# samples = edm_sampler(self.model, ..., sigma_min=sigma_min_eff, ...)
+
+def _plot_reliability_curve( probs: torch.Tensor, targets: torch.Tensor,
+                            bins: int = 15, save_path: str | None = None,
+                            title: str = "RainGate reliability curve"):
+    """
+        Plot reliability (calibration) curve for wet probabilities vs truth
+        probs, targets are 1D tensors in [0,1] and {0,1} respectively
+    """
+    probs = probs.detach().cpu().float().clamp(0, 1)
+    targets = targets.detach().cpu().float().clamp(0, 1)
+    if probs.numel() == 0:
+        logger.warning("No valid probabilities to plot reliability curve.")
+        return
+    # Bin edges
+    edges = torch.linspace(0, 1, bins + 1)
+    bin_ids = torch.bucketize(probs, edges, right=True) - 1  # Bin indices [0, bins-1]
+    # Aggregate
+    acc = torch.zeros(bins)
+    conf = torch.zeros(bins)
+    cnt = torch.zeros(bins)
+    for b in range(bins):
+        m = bin_ids == b
+        n = int(m.sum())
+        if n == 0:
+            continue
+        cnt[b] = n
+        conf[b] = probs[m].mean()
+        acc[b] = targets[m].mean()
+    # Remove empty bins
+    keep = cnt > 0
+    conf = conf[keep].numpy()
+    acc = acc[keep].numpy()
+    # ECE (Expected Calibration Error)
+    w = (cnt[keep] / cnt[keep].sum()).numpy()
+    ece = float((w * np.abs(acc - conf)).sum())
+    # Plot
+    plt.figure(figsize=(4.2, 4.2))
+    plt.plot([0, 1], [0, 1], '--', lw=1, label='Perfectly calibrated', color='gray')
+    plt.plot(conf, acc, marker='o', lw=1.5, label=f'RainGate (ECE={ece:.3f})', color='blue')
+    plt.xlabel('Predicted probability')
+    plt.ylabel('Observed frequency')
+    plt.title(title)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.legend(frameon=False)
+    if save_path is not None:
+        plt.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
+def _save_weight_map_viz(weight_map: torch.Tensor,
+                            wet_probs: torch.Tensor | None,
+                            wet_target: torch.Tensor | None,
+                            epoch: int, step: int, prefix: str = 'train',
+                            save_path: str | None = None):
+    """Save a small panel showing the pixel weight map (and optional prob/target) for the first sample.
+    Expects tensors with shapes: weight_map [B,1,H,W]; wet_probs [B,1,H,W] or None; wet_target [B,1,H,W] or None."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    try:
+        wm = weight_map.detach().cpu()
+        if wm.ndim == 4:
+            wm = wm[0,0]
+        elif wm.ndim == 3:
+            wm = wm[0]
+        else:
+            return
+        fig, axs = plt.subplots(1, 3, figsize=(10,3))
+        im0 = axs[0].imshow(wm.numpy(), origin='lower', interpolation='nearest')
+        axs[0].set_title('weight_map')
+        axs[0].set_xticks([]); axs[0].set_yticks([])
+        fig.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
+        if wet_probs is not None:
+            p = wet_probs.detach().cpu()
+            p = p[0,0] if p.ndim == 4 else (p[0] if p.ndim == 3 else p)
+            im1 = axs[1].imshow(p.numpy(), origin='lower', interpolation='nearest')
+            axs[1].set_title('wet_prob')
+            axs[1].set_xticks([]); axs[1].set_yticks([])
+            fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+        else:
+            axs[1].axis('off')
+        if wet_target is not None:
+            t = wet_target.detach().cpu()
+            t = t[0,0] if t.ndim == 4 else (t[0] if t.ndim == 3 else t)
+            im2 = axs[2].imshow(t.numpy(), origin='lower', interpolation='nearest')
+            axs[2].set_title('wet_target')
+            axs[2].set_xticks([]); axs[2].set_yticks([])
+            fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
+        else:
+            axs[2].axis('off')
+        for ax in axs:
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+        if save_path is not None:
+            out = os.path.join(save_path, f'{prefix}_wm_e{epoch:03d}_s{step:06d}.png')
+            fig.savefig(out, dpi=200, bbox_inches='tight')
+        else:
+            logger.warning("save_path is None, skipping saving weight_map visualization.")
+        plt.close(fig)
+    except Exception as e:
+        logger.warning(f"[debug] Failed to save weight_map viz: {e}")
 
 @torch.no_grad()
 def compute_p95_p99_and_wet_day(

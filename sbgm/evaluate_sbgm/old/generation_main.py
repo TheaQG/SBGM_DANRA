@@ -1,0 +1,101 @@
+import os 
+import logging
+import numpy as np
+import torch
+from datetime import datetime
+from omegaconf import OmegaConf
+
+from sbgm.training_utils import get_model, get_gen_dataloader
+from sbgm.special_transforms import build_back_transforms_from_stats
+from sbgm.evaluate_sbgm.old.generation import SampleGenerator #run_generation_multiple, run_generation_single, run_generation_repeated
+from sbgm.utils import get_model_string
+
+logger = logging.getLogger(__name__)
+
+def generation_main(cfg):
+    """
+    Main function to run generation from a trained model.
+    """
+    # Set seed
+    torch.manual_seed(cfg.evaluation.seed)
+    torch.cuda.manual_seed(cfg.evaluation.seed)
+    np.random.seed(cfg.evaluation.seed)
+
+    # Setup logging
+    model_name_str = get_model_string(cfg)
+    gen_dir = os.path.join(cfg["paths"]["sample_dir"], 'generation', model_name_str)
+    log_gen_dir = os.path.join(gen_dir, 'logs')
+    
+    # Make sure dirs exist
+    os.makedirs(gen_dir, exist_ok=True)
+    os.makedirs(log_gen_dir, exist_ok=True)
+
+    logger.info(f'[INFO] Configuration: {OmegaConf.to_yaml(cfg)}') # Print the configuration for debugging
+
+    # --- 1. Set device -------------------------------------------------------------
+    device = cfg.training.device
+
+    # --- 2. Load model and data -------------------------------------------------------------
+    model, ckpt_dir, ckpt_name = get_model(cfg)
+    ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+    best_model_state = torch.load(ckpt_path, map_location=device)['network_params']
+    model.load_state_dict(best_model_state)
+    logger.info(f'[INFO] Model checkpoint loaded from: {ckpt_dir}/{ckpt_name}')
+
+    # --- 3. Load generation dataloader ----------------------------------------------
+    gen_dataloader = get_gen_dataloader(cfg)
+
+    # --- 4. Prepare back transforms --------------------------------------------------------
+    full_domain_dims_hr = cfg.highres.full_domain_dims if 'full_domain_dims' in cfg.highres else None
+    full_domain_dims_str_hr = f"{full_domain_dims_hr[0]}x{full_domain_dims_hr[1]}" if full_domain_dims_hr is not None else "full_domain"
+    crop_region_hr = cfg.highres.cutout_domains if 'cutout_domains' in cfg.highres else None
+    crop_region_hr_str = '_'.join(map(str, crop_region_hr)) if crop_region_hr is not None else "no_crop"
+
+    full_domain_dims_lr = cfg.lowres.full_domain_dims if 'full_domain_dims' in cfg.lowres else None
+    full_domain_dims_str_lr = f"{full_domain_dims_lr[0]}x{full_domain_dims_lr[1]}" if full_domain_dims_lr is not None else "full_domain"
+    crop_region_lr = cfg.lowres.cutout_domains if 'cutout_domains' in cfg.lowres else None
+    crop_region_lr_str = '_'.join(map(str, crop_region_lr)) if crop_region_lr is not None else "no_crop"
+    
+
+    back_transforms = build_back_transforms_from_stats(
+                        hr_var              = cfg['highres']['variable'],
+                        hr_model            = cfg['highres']['model'],
+                        domain_str_hr       = full_domain_dims_str_hr,
+                        crop_region_str_hr  = crop_region_hr_str,
+                        hr_scaling_method   = cfg['highres']['scaling_method'],
+                        hr_buffer_frac      = cfg['highres']['buffer_frac'] if 'buffer_frac' in cfg['highres'] else 0.0,
+                        lr_vars             = cfg['lowres']['condition_variables'],
+                        lr_model            = cfg['lowres']['model'],
+                        domain_str_lr       = full_domain_dims_str_lr,
+                        crop_region_str_lr  = crop_region_lr_str,
+                        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+                        lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
+                        split               = 'all',
+                        stats_dir_root      = cfg['paths']['stats_load_dir']
+                        )
+
+    # --- Initialize SampleGenerator --------------------------------------------------------
+    generator = SampleGenerator(cfg, model, gen_dataloader, back_transforms, device)
+
+    # --- Choose generation type to run --------------------------------------------------------
+    gen_types = cfg.evaluation.gen_type
+    valid_types = {'multiple', 'single', 'repeated'}
+
+    for gen_type in gen_types:
+        if gen_type not in valid_types:
+            raise ValueError(f"\nUnknown generation type: {gen_type}\n")
+        
+        logger.info(f"[INFO] Running generation type: {gen_type}")
+
+        if gen_type == 'multiple':
+            logger.info(f"[INFO] Running {cfg.evaluation.n_gen_samples} multiple generations...")
+            generator.generate_multiple()
+            logger.info("[INFO] Multiple generations completed.\n")
+        elif gen_type == 'single':
+            logger.info("[INFO] Running single generation...")
+            generator.generate_single()
+            logger.info("[INFO] Single generation completed.\n")
+        elif gen_type == 'repeated':
+            logger.info(f"[INFO] Running {cfg.evaluation.n_repeats} repeated generations...")
+            generator.generate_repeated()
+            logger.info("[INFO] Repeated generation completed.\n")

@@ -38,7 +38,9 @@ from sbgm.monitoring import (
     tensor_stats,
     save_histogram,
     plot_saved_histograms,
-    in_loop_metrics
+    in_loop_metrics,
+    _save_weight_map_viz,
+    _plot_reliability_curve
     )
 from sbgm.score_sampling import Euler_Maruyama_sampler, pc_sampler, ode_sampler, edm_sampler
 from sbgm.training_utils import get_loss_fn, apply_cfg_dropout
@@ -201,6 +203,12 @@ class TrainingPipeline_general:
         if not os.path.exists(self.path_metrics):
             os.makedirs(self.path_metrics)
             logger.info(f"→ Metrics directory created at {self.path_metrics}")
+        
+        # Debug/diagnostics figures directory
+        self.path_diagnostics = os.path.join(self.path_metrics, 'debug')
+        if not os.path.exists(self.path_diagnostics):
+            os.makedirs(self.path_diagnostics)
+            logger.info(f"→ Diagnostics directory created at {self.path_diagnostics}")
 
 
 
@@ -627,6 +635,15 @@ class TrainingPipeline_general:
             cfg_diagnostics = self.cfg.get("diagnostics", {})
             do_log = bool(cfg_diagnostics.get("per_batch_stats", False))
             every = int(cfg_diagnostics.get("log_every", 100))
+            
+            # Debug: save viz occasionally (show probs if no weight map yet)
+            if do_log and (idx % every == 0) and (wet_logits is not None):
+                _save_weight_map_viz(
+                    weight_map=pixel_weight_map if pixel_weight_map is not None else torch.sigmoid(wet_logits),
+                    wet_probs=torch.sigmoid(wet_logits),
+                    wet_target=locals().get('wet_target', None),
+                    epoch=current_epoch, step=idx, prefix='train', save_path=self.path_diagnostics
+                )
 
             hr = x
             lr_hr = lr_ups_baseline
@@ -908,6 +925,10 @@ class TrainingPipeline_general:
         # Set the progress bar
         pbar = tqdm.tqdm(dataloader, desc=f"Epoch {current_epoch}/{epochs}", unit="batch")
 
+        # Reliability buffers (collect across validation epoch)
+        rel_probs: list[torch.Tensor] = []
+        rel_targets: list[torch.Tensor] = []
+
         # Iterate through batches in dataloader (tuple of images and seasons)
         for idx, samples in enumerate(pbar):
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
@@ -921,78 +942,88 @@ class TrainingPipeline_general:
             if edm_on and self.edm_predict_residual:
                 lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
 
-            # === Optional: gate-based reweighting of loss on wet pixels in validation ===
+            # === Optional: gate-based diagnostics and (optionally) reweighting in validation ===
             pixel_weight_map = None
-            wet_logits_val = None  # Ensure wet_logits_val is always defined
+            wet_logits_val = None
+
             if getattr(self, 'rg_enabled', False) and (getattr(self, 'rain_gate', None) is not None):
-                rg_cfg = self.cfg.get('rain_gating', {})
-                if bool(rg_cfg.get('reweight_enabled', False)):
-                    # Build gate inputs by concatenation at HR resolution
-                    gate_inputs = []
-                    if cond_images is not None:
-                        gate_inputs.append(cond_images)  # LR condition channels already upsampled to HR in dataset
-                    if self.rg_include_lsm and (lsm is not None):
-                        gate_inputs.append(lsm)
-                    if self.rg_include_topo and (topo is not None):
-                        gate_inputs.append(topo)
-                    if self.rg_include_lr_baseline and (lr_ups_baseline is not None):
-                        gate_inputs.append(lr_ups_baseline)
-                    if len(gate_inputs) > 0 and (self.rain_gate is not None):
-                        gate_x = torch.cat(gate_inputs, dim=1)  # [B, C_in, H, W]
-                        # Predict rain probabilities (logits) from gate inputs
-                        with torch.no_grad():
-                            wet_logits_val = self.rain_gate(gate_x)  # [B, 1, H, W]
-                            p = torch.sigmoid(wet_logits_val)  # [B, 1, H, W] probabilities
-                        strategy = str(rg_cfg.get('weight_strategy', 'prob')).lower()  # 'prob' or 'binary'
-                        alpha = float(rg_cfg.get('weight_alpha', 2.0))  # Weighting strength
-                        clip_max = float(rg_cfg.get('clip_max', 5.0))  # Max clip for weights
-                        if strategy == 'binary':
-                            thr_p = float(rg_cfg.get('binary_thresh', 0.5))
-                            w_core = 1.0 + alpha * (p >= thr_p).to(dtype=p.dtype)  # [B, 1, H, W]
-                        else:
-                            gamma = float(rg_cfg.get('prob_gamma', 1.0)) # Exponent for probability weighting
-                            w_core = 1.0 + alpha * (p.clamp(0,1) ** gamma)  # [B, 1, H, W]
+                # Build gate inputs by concatenation at HR resolution
+                gate_inputs = []
+                if cond_images is not None: gate_inputs.append(cond_images)
+                if self.rg_include_lsm and (lsm is not None): gate_inputs.append(lsm)
+                if self.rg_include_topo and (topo is not None): gate_inputs.append(topo)
+                if self.rg_include_lr_baseline and (lr_ups_baseline is not None): gate_inputs.append(lr_ups_baseline)
 
-                        if self.rg_ramp > 0:
-                            phase = min(1.0, max(0.0, (current_epoch - self.rg_warm_start) / max(1, self.rg_ramp)))
-                            ramp_prog = 0.5 * (1 - math.cos(math.pi * phase))  # Cosine ramp from 0 to 1
-                        else:
-                            ramp_prog = 1.0
-                        w = 1.0 + (w_core - 1.0) * ramp_prog
-                        pixel_weight_map = w.clamp(min=1.0, max=clip_max).detach()  # [B, 1, H, W]
+                if len(gate_inputs) > 0 and self.rain_gate is not None:
+                    gate_x = torch.cat(gate_inputs, dim=1)  # [B, C_in, H, W]
 
+                    # Always compute logits for diagnostics (even if not reweighting)
+                    with torch.no_grad():
+                        wet_logits_val = self.rain_gate(gate_x)
+                        p = torch.sigmoid(wet_logits_val)
+                else:
+                    wet_logits_val = None
 
+                # Build pixel_weight_map only if reweighting is enabled and past warm-start
+                do_reweight = bool(self.cfg.get('rain_gating', {}).get('reweight_enabled', False)) and (current_epoch > self.rg_warm_start)
+                if do_reweight and (wet_logits_val is not None):
+                    p = torch.sigmoid(wet_logits_val)
+                    rg_cfg = self.cfg.get('rain_gating', {})
+                    strategy = str(rg_cfg.get('weight_strategy', 'prob')).lower()
+                    alpha = float(rg_cfg.get('weight_alpha', 2.0))
+                    clip_max = float(rg_cfg.get('clip_max', 5.0))
 
-            # === Compute validation BCE for logging if rain-gate enabled ===
-            rg_val_bce = None
-            if getattr(self, 'rg_enabled', False) and (getattr(self, 'rain_gate', None) is not None):
+                    if strategy == 'binary':
+                        thr_p = float(rg_cfg.get('binary_thresh', 0.5))
+                        core = (p >= thr_p).to(dtype=p.dtype)
+                    else:
+                        gamma = float(rg_cfg.get('prob_gamma', 1.0))
+                        core = (p.clamp(0,1) ** gamma)
+
+                    # Optional ramp (keep consistent with train)
+                    if self.rg_ramp > 0:
+                        phase = min(1.0, max(0.0, (current_epoch - self.rg_warm_start) / max(1, self.rg_ramp)))
+                        ramp_prog = 0.5 * (1 - math.cos(math.pi * phase))
+                    else:
+                        ramp_prog = 1.0
+
+                    w = 1.0 + ( (1.0 + alpha * core) - 1.0 ) * ramp_prog
+                    pixel_weight_map = w.clamp(min=1.0, max=clip_max).detach()
+
+            # Reliability buffers + debug viz (now independent of reweighting)
+            if wet_logits_val is not None:
+                # Build wet_target for reliability/BCE logging
                 try:
                     with torch.no_grad():
-                        # Build wet target in PHYSICAL space if possible
-                        wet_target = None
                         thr = float(self.rg_threshold_mm)
-                        bt_hr = None
-                        if self.back_transforms_train is not None:
-                            bt_hr = self.back_transforms_train.get(self.bt_hr_key, None)
+                        bt_hr = self.back_transforms_train.get(self.bt_hr_key, None) if self.back_transforms_train is not None else None
                         if callable(bt_hr):
-                            x_phys = bt_hr(x) # Backtransform to physical space [B, 1, H, W] in mm/day
+                            x_phys = bt_hr(x)
                             if not isinstance(x_phys, torch.Tensor):
                                 x_phys = torch.tensor(x_phys, dtype=torch.float32)
-                            wet_target = (x_phys > thr).to(dtype=torch.float32)  # [B, 1, H, W] binary mask
+                            wet_target = (x_phys > thr).to(dtype=torch.float32)
                         else:
-                            we_target = (x > self.rg_threshold_modelSpace).to(dtype=torch.float32)  # [B, 1, H, W] binary mask
-                            logger.warning(f"[rain_gate] back_transforms_train missing or invalid; using model-space thresholding for rain gate target.")
-                        if (wet_target is not None) and wet_target.shape[1] != 1:
-                            wet_target = wet_target[:, :1, :, :]  # Ensure single channel
-
-                        pos_w = torch.tensor(self.rg_pos_weight, device=x.device, dtype=torch.float32)
-                        if wet_logits_val is not None and wet_target is not None:
-                            rg_val_bce = F.binary_cross_entropy_with_logits(wet_logits_val, wet_target, pos_weight=pos_w).item()
-                        else:
-                            rg_val_bce = None
+                            wet_target = (x > self.rg_threshold_modelSpace).to(dtype=torch.float32)
+                        if wet_target.shape[1] != 1:
+                            wet_target = wet_target[:, :1, :, :]
+                    pos_w = torch.tensor(self.rg_pos_weight, device=x.device, dtype=torch.float32)
+                    rg_val_bce = F.binary_cross_entropy_with_logits(wet_logits_val, wet_target, pos_weight=pos_w).item()
                 except Exception as e:
-                    logger.warning(f"[rain_gate] Could not compute validation BCE for rain gate. Error: {e}")
+                    logger.warning(f"[rain_gate] Could not compute validation BCE or target. Error: {e}")
+                    wet_target = None
                     rg_val_bce = None
+
+                rel_probs.append(torch.sigmoid(wet_logits_val).detach().flatten())
+                rel_targets.append(wet_target.detach().flatten() if wet_target is not None else torch.zeros_like(wet_logits_val.detach()).flatten())
+
+                if (idx % max(1, self.cfg.get('diagnostics', {}).get('log_every', 100)) == 0):
+                    _save_weight_map_viz(
+                        weight_map=pixel_weight_map if pixel_weight_map is not None else torch.sigmoid(wet_logits_val),
+                        wet_probs=torch.sigmoid(wet_logits_val),
+                        wet_target=wet_target,
+                        epoch=current_epoch, step=idx, prefix='val', save_path=self.path_diagnostics
+                    )
+
 
             # No gradients needed for validation
             with torch.inference_mode(): #torch.no_grad(): # New in PyTorch 1.9, slightly faster than torch.no_grad()
@@ -1038,6 +1069,17 @@ class TrainingPipeline_general:
             # Update the bar
             if idx % self.cfg['training'].get('train_postfix_every', 10) == 0:
                 pbar.set_postfix(loss=loss / (idx + 1))
+
+        # Plot reliability for this validation epoch if data collected
+        if len(rel_probs) > 0 and len(rel_targets) > 0:
+            try:
+                probs_all = torch.cat(rel_probs, dim=0)
+                targets_all = torch.cat(rel_targets, dim=0)
+                rel_path = os.path.join(self.path_diagnostics, f'reliability_epoch{current_epoch:03d}.png')
+                _plot_reliability_curve(probs_all, targets_all, bins=15, save_path=rel_path, title=f'Rain Gate Reliability Epoch {current_epoch}')
+                logger.info(f"[debug][rain_gate] Saved reliability plot to {rel_path}")
+            except Exception as e:
+                logger.warning(f"[debug][rain_gate] Could not plot reliability at epoch {current_epoch}. Error: {e}")
 
         # Calculate average loss
         avg_loss = loss / len(dataloader)
