@@ -4,7 +4,7 @@
     main_app.py
     This script serves as the main control point for the full SBGM_SD application.
     Tasks implemented:
-        - Running the training process
+        - Running the training process  
         - Running the generation process on a trained model
         - Running the evaluation process from generated samples
         - Full model pipeline: training --> generation --> evaluation
@@ -44,7 +44,7 @@ def main():
     logger = logging.getLogger(__name__)
     parser = argparse.ArgumentParser(description="SBGM full pipeline launcher")
     parser.add_argument("--config_path", required=True, help="Path to the yaml config")
-    parser.add_argument("--mode", choices=["train", "generate", "evaluate", "full_pipeline", "data_splits"], default="full_pipeline")
+    parser.add_argument("--mode", choices=["train", "generate", "evaluate", "full_pipeline", "data_splits", "quicklook"], default="full_pipeline")
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_generation", action="store_true")
     parser.add_argument("--skip_evaluation", action="store_true")
@@ -102,17 +102,14 @@ def main():
 
     elif args.mode == "generate":
         log_banner("GENERATION START")
-        exists, gen_dir = check_generated_samples_exist(cfg)
-        if not exists:
-            raise RuntimeError(f"Cannot generate: generated samples not found in {gen_dir}")
         launch_generation.run_generation(cfg)
         log_banner("GENERATION DONE")
 
     elif args.mode == "evaluate":
         log_banner("EVALUATION START")
-        exists, gen_dir = check_generated_samples_exist(cfg)
-        if not exists:
-            raise RuntimeError(f"Cannot evaluate: generated samples not found in {gen_dir}")
+        # exists, gen_dir = check_generated_samples_exist(cfg)
+        # if not exists:
+        #     raise RuntimeError(f"Cannot evaluate: generated samples not found in {gen_dir}")
         launch_evaluation.run_evaluation(cfg, make_plots=make_plots)
         log_banner("EVALUATION DONE")
 
@@ -142,8 +139,8 @@ def main():
 
         log_banner("GENERATION START")
         exists, gen_dir = check_generated_samples_exist(cfg)
-        if args.skip_generation and not exists:
-            raise RuntimeError(f"Cannot skip generation: no samples found in {gen_dir}")
+        # if args.skip_generation and not exists:
+        #     raise RuntimeError(f"Cannot skip generation: no samples found in {gen_dir}")
         if not args.skip_generation:
             launch_generation.run_generation(cfg)
         log_banner("GENERATION DONE")
