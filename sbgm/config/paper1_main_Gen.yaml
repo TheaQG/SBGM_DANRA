@@ -1,6 +1,6 @@
 experiment:
-  name: EDM_paper1_wRainGate_wCosSin_dualLR # Name of the experiment
-  config_name: EDM_paper1_wRainGate_wCosSin_dualLR
+  name: EDM_paper1_GenEvalTest
+  config_name: EDM_paper1_GenEvalTest
   # Date of the experiment, taken from the environment variable or set to current date
   date: ${env:EXP_DATE} # Date for the experiment, 
 
@@ -147,7 +147,7 @@ training:
   ema_decay: 0.999 # Decay rate for EMA. 0.999-0.9995 is a good range for per-step decay with batch size 16-32. Lower for smaller batches, higher for larger batches.
   weight_decay: 0.000001 # Weight decay for regularization
   ema_warmup_steps: 2000 # Number of warmup steps for EMA
-  epochs: 250 # Number of epochs for training
+  epochs: 300 # Number of epochs for training
   loss_type: sdfweighted # Type of loss function to use
   sdf_weighted_loss: true # Whether to use SDF weighted loss
   optimizer: adamw # Optimizer to use for training (adam, adamw, sgd) (adamw for better decay)
@@ -308,8 +308,8 @@ generation:
 
 full_gen_eval:
   seed: 504 # Random seed for full evaluation
-  ensemble_size: 32 # Number of ensemble members to generate for full evaluation
-  max_dates: 5 # Maximum number of dates to evaluate (set to -1 for all available dates)
+  ensemble_size: 16 # Number of ensemble members to generate for full evaluation
+  max_dates: 800 # Maximum number of dates to evaluate (set to -1 for all available dates)
   do_prob: true # Whether to do probabilistic generation evaluation
   do_cap: true # Whether to do capability generation evaluation
   do_ext: true # Whether to do extreme generation evaluation

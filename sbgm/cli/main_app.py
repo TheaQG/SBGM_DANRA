@@ -26,17 +26,17 @@ from sbgm.logging_utils import (
     setup_logging, write_run_manifest, log_banner
 )
 
-
 def check_model_exists(cfg):
     model_name = get_model_string(cfg)
-    ckpt_dir = os.path.join(cfg.paths.checkpoint_dir, model_name)
-    return os.path.exists(ckpt_dir) and any(f.endswith(".pth.tar") for f in os.listdir(ckpt_dir))
+    ckpt_dir = os.path.join(cfg.paths.checkpoint_dir, model_name + '.pth.tar')
+    exists = os.path.exists(ckpt_dir) # and any(f.endswith(".pth.tar") for f in os.listdir(ckpt_dir))
+    return exists, ckpt_dir
 
 def check_generated_samples_exist(cfg):
     model_name = get_model_string(cfg)
     gen_dir = os.path.join(cfg.paths.sample_dir, "generation", model_name, "generated_samples")
-    return os.path.exists(gen_dir) and any(f.startswith("gen_samples") for f in os.listdir(gen_dir))
-
+    exists = os.path.exists(gen_dir) and any(f.startswith("gen_samples") for f in os.listdir(gen_dir))
+    return exists, gen_dir
 
 
 # Use setup_logger and write_run_manifest in main
@@ -48,6 +48,7 @@ def main():
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_generation", action="store_true")
     parser.add_argument("--skip_evaluation", action="store_true")
+    parser.add_argument("--make_plots", action="store_true", help="If set, make publication-ready plots after evaluation.")
     parser.add_argument("--dry_run", action="store_true", help="If set, no actual training/generation/evaluation will be performed, only config parsing and logging setup.")
     args = parser.parse_args()
 
@@ -59,6 +60,8 @@ def main():
     h = cfg_hash(cfg)
     run_name = make_run_name(cfg.experiment.name, h)
     run_dir = ensure_run_dir(cfg.paths.log_dir, model_name)
+
+    make_plots = args.make_plots or (args.mode in ['evaluate', 'full_pipeline'] and not args.skip_evaluation)
 
     # === Logging + manifest ===
     from omegaconf import OmegaConf
@@ -83,7 +86,7 @@ def main():
     logger.info("Cfg hash        : %s", h)
 
     # Imports kept here to avoid circular imports
-    from sbgm.cli import launch_sbgm, launch_generation, launch_evaluation
+    from sbgm.cli import launch_sbgm, launch_generation, launch_evaluation, launch_quicklook
     from data_analysis_pipeline.cli import launch_split_creation
 
     # === Dispatch with banners ===
@@ -94,41 +97,60 @@ def main():
 
     if args.mode == "train":
         log_banner("TRAINING START")
-        launch_sbgm.run(cfg)
+        launch_sbgm.run_training(cfg)
         log_banner("TRAINING DONE")
 
     elif args.mode == "generate":
         log_banner("GENERATION START")
-        if not check_model_exists(cfg):
-            raise RuntimeError("Cannot generate: model checkpoint not found")
-        launch_generation.run(cfg)
+        exists, gen_dir = check_generated_samples_exist(cfg)
+        if not exists:
+            raise RuntimeError(f"Cannot generate: generated samples not found in {gen_dir}")
+        launch_generation.run_generation(cfg)
         log_banner("GENERATION DONE")
 
     elif args.mode == "evaluate":
         log_banner("EVALUATION START")
-        if not check_generated_samples_exist(cfg):
-            raise RuntimeError("Cannot evaluate: generated samples not found.")
-        launch_evaluation.run(cfg)
+        exists, gen_dir = check_generated_samples_exist(cfg)
+        if not exists:
+            raise RuntimeError(f"Cannot evaluate: generated samples not found in {gen_dir}")
+        launch_evaluation.run_evaluation(cfg, make_plots=make_plots)
         log_banner("EVALUATION DONE")
+
+    elif args.mode == "quicklook":
+        log_banner("QUICKLOOK START")
+        exists, ckpt_dir = check_model_exists(cfg)
+        if not exists:
+            raise RuntimeError(f"Cannot run quicklook: model checkpoint not found in {ckpt_dir}")
+        launch_quicklook.run_quicklook(cfg)
+        log_banner("QUICKLOOK DONE")
 
     elif args.mode == "full_pipeline":
         log_banner("TRAINING START")
+        exists, ckpt_dir = check_model_exists(cfg)
+        if args.skip_train and not exists:
+            raise RuntimeError(f"Cannot skip training: no trained model found in {ckpt_dir}")
         if not args.skip_train:
-            launch_sbgm.run(cfg)
-        elif not check_model_exists(cfg):
-            raise RuntimeError("Cannot skip training: no trained model found.")
+            launch_sbgm.run_training(cfg)
         log_banner("TRAINING DONE")
 
+        log_banner("QUICKLOOK START")
+        exists, ckpt_dir = check_model_exists(cfg)
+        if not exists:
+            raise RuntimeError(f"Cannot run quicklook: model checkpoint not found in {ckpt_dir}")
+        launch_quicklook.run_quicklook(cfg)
+        log_banner("QUICKLOOK DONE")
+
         log_banner("GENERATION START")
+        exists, gen_dir = check_generated_samples_exist(cfg)
+        if args.skip_generation and not exists:
+            raise RuntimeError(f"Cannot skip generation: no samples found in {gen_dir}")
         if not args.skip_generation:
-            launch_generation.run(cfg)
-        elif not check_generated_samples_exist(cfg):
-            raise RuntimeError("Cannot skip generation: no samples found.")
+            launch_generation.run_generation(cfg)
         log_banner("GENERATION DONE")
 
         log_banner("EVALUATION START")
         if not args.skip_evaluation:
-            launch_evaluation.run(cfg)
+            launch_evaluation.run_evaluation(cfg, make_plots=make_plots)
         log_banner("EVALUATION DONE")
 
         

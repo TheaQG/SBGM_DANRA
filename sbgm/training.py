@@ -281,13 +281,14 @@ class TrainingPipeline_general:
         self.quantiles_compare_to_hr = bool(cfg_mon__end_of_epoch.get('quantiles_compare_to_hr', True)) # Whether to compare LR/HR quantiles
 
         # === Rain/not-rain gating mini-head (optional) ===
-        rg_cfg = cfg.get('rain_gating', {})
+        rg_cfg = cfg.get('rain_gate', {})
         self.rg_enabled = bool(rg_cfg.get('enabled', False))
         self.rg_include_lsm = bool(rg_cfg.get('include_lsm', True))
         self.rg_include_topo = bool(rg_cfg.get('include_topo', True))
         self.rg_include_lr_baseline = bool(rg_cfg.get('include_lr_baseline', True)) # optional
         self.rg_threshold_mm = float(rg_cfg.get('wet_threshold_mm', cfg.get('monitoring', {}).get('end_of_epoch', {}).get('wet_day_threshold_mm', 0.1))) # Default to wet day threshold if not specified
         self.rg_threshold_modelSpace = float(rg_cfg.get('wet_threshold_modelSpace', 0.1)) # Threshold in model space (e.g. z-score) for wet/dry classification when computing BCE loss
+
 
         # Reweighting of loss based on rain gate prediction
         self.rg_reweight_enabled = bool(rg_cfg.get('reweight_enabled', False)) # Whether to reweight loss based on rain gate prediction
@@ -302,7 +303,11 @@ class TrainingPipeline_general:
             # Determine input channel count from config
             c_in = 0
             # LR condition channels (already upsampled to HR in dataset)
-            c_in += len(self.lr_vars)
+            lr_c = len(self.lr_vars)
+            if bool(self.cfg['lowres'].get('dual_lr', False)) and (self.hr_var in self.lr_vars):
+                lr_c += 1  # Add second channel for dual LR input
+            c_in += lr_c
+            # Optional static inputs
             if self.rg_include_lsm:
                 c_in += 1
             if self.rg_include_topo:
@@ -314,8 +319,18 @@ class TrainingPipeline_general:
             # Attach rain_gate params to existing optimizer as a new param group
             if self.optimizer is not None:
                 self.optimizer.add_param_group({'params': self.rain_gate.parameters(), 'lr': self.rg_lr})
-            logger.info(f"→ Rain gating head enabled with c_in={c_in}, c_hidden={int(rg_cfg.get('c_hidden', 16))}, lr={self.rg_lr}")
-
+                import torch.optim.lr_scheduler as _schedulers
+                if isinstance(self.lr_scheduler, _schedulers.ReduceLROnPlateau):
+                    n_groups = len(self.optimizer.param_groups)
+                    # Extend min_lrs to match new param group count
+                    if len(self.lr_scheduler.min_lrs) < n_groups:
+                        tail = self.lr_scheduler.min_lrs[-1] if len(self.lr_scheduler.min_lrs) > 0 else 0.0
+                        self.lr_scheduler.min_lrs += [tail] * (n_groups - len(self.lr_scheduler.min_lrs))
+        else:
+            self.rain_gate = None
+            c_in = 0
+        
+        logger.info(f"→ Rain gating head enabled: {self.rg_enabled}, c_hidden: {c_in if self.rg_enabled else 'N/A'}")
 
     def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
         """
@@ -553,6 +568,7 @@ class TrainingPipeline_general:
                     gate_inputs.append(topo)
                 if self.rg_include_lr_baseline and (lr_ups_baseline is not None):
                     gate_inputs.append(lr_ups_baseline)
+                logger.info(f"[rain_gate debug] cond_images={cond_images is not None}, lsm={lsm is not None}, topo={topo is not None}, lr_ups_baseline={lr_ups_baseline is not None}")
                 if len(gate_inputs) > 0:
                     gate_x = torch.cat(gate_inputs, dim=1)  # [B, C_in, H, W]
                     # Predict rain probabilities (logits) from gate inputs
@@ -594,7 +610,7 @@ class TrainingPipeline_general:
                 # Decide whether to apply reweighting based on epoch
                 do_reweight = self.rg_reweight_enabled and (current_epoch > self.rg_warm_start)
                 if do_reweight and ('wet_logits' in locals()) and (wet_logits is not None):
-                    rg_cfg = self.cfg.get('rain_gating', {})
+                    rg_cfg = self.cfg.get('rain_gate', {})
                     p = torch.sigmoid(wet_logits)  # [B, 1, H, W] probabilities
 
                     # Base weighting shape from config
@@ -604,7 +620,7 @@ class TrainingPipeline_general:
                     detach_w = bool(rg_cfg.get('detach_weights', True))  # Detach weights from gradient flow
 
                     if strategy == 'binary':
-                        thr_p = float(rg_cfg.get('binary_thresh', 0.5))
+                        thr_p = float(rg_cfg.get('binary_threshold', 0.5))
                         w_core = 1.0 + alpha * (p >= thr_p).to(dtype=p.dtype)  # [B, 1, H, W]
                     else:
                         gamma = float(rg_cfg.get('prob_gamma', 1.0)) # Exponent for probability weighting
@@ -636,8 +652,9 @@ class TrainingPipeline_general:
             do_log = bool(cfg_diagnostics.get("per_batch_stats", False))
             every = int(cfg_diagnostics.get("log_every", 100))
             
-            # Debug: save viz occasionally (show probs if no weight map yet)
-            if do_log and (idx % every == 0) and (wet_logits is not None):
+            # Debug: save viz occasionally (show probs if no weight map yet) - only per ten epochs to limit storage
+            viz_every_n_epochs = int(cfg_diagnostics.get("viz_every_n_epochs", 10))
+            if do_log and (wet_logits is not None) and (current_epoch % viz_every_n_epochs == 0):
                 _save_weight_map_viz(
                     weight_map=pixel_weight_map if pixel_weight_map is not None else torch.sigmoid(wet_logits),
                     wet_probs=torch.sigmoid(wet_logits),
@@ -655,7 +672,7 @@ class TrainingPipeline_general:
                 lr_lr = None
 
             residual = hr - lr_hr if (hr is not None and lr_hr is not None) else None
-            if do_log and (idx % every == 0):
+            if do_log and (current_epoch % every == 0):
                 tensor_stats(hr, "train/hr_norm")
                 if lr_hr is not None:
                     tensor_stats(lr_hr, "train/lr_hr_norm")
@@ -965,16 +982,16 @@ class TrainingPipeline_general:
                     wet_logits_val = None
 
                 # Build pixel_weight_map only if reweighting is enabled and past warm-start
-                do_reweight = bool(self.cfg.get('rain_gating', {}).get('reweight_enabled', False)) and (current_epoch > self.rg_warm_start)
+                do_reweight = bool(self.cfg.get('rain_gate', {}).get('reweight_enabled', False)) and (current_epoch > self.rg_warm_start)
                 if do_reweight and (wet_logits_val is not None):
                     p = torch.sigmoid(wet_logits_val)
-                    rg_cfg = self.cfg.get('rain_gating', {})
+                    rg_cfg = self.cfg.get('rain_gate', {})
                     strategy = str(rg_cfg.get('weight_strategy', 'prob')).lower()
                     alpha = float(rg_cfg.get('weight_alpha', 2.0))
                     clip_max = float(rg_cfg.get('clip_max', 5.0))
 
                     if strategy == 'binary':
-                        thr_p = float(rg_cfg.get('binary_thresh', 0.5))
+                        thr_p = float(rg_cfg.get('binary_threshold', 0.5))
                         core = (p >= thr_p).to(dtype=p.dtype)
                     else:
                         gamma = float(rg_cfg.get('prob_gamma', 1.0))
@@ -991,6 +1008,8 @@ class TrainingPipeline_general:
                     pixel_weight_map = w.clamp(min=1.0, max=clip_max).detach()
 
             # Reliability buffers + debug viz (now independent of reweighting)
+            rg_val_bce = None
+            rg_val_bce_t = None
             if wet_logits_val is not None:
                 # Build wet_target for reliability/BCE logging
                 try:
@@ -1007,10 +1026,14 @@ class TrainingPipeline_general:
                         if wet_target.shape[1] != 1:
                             wet_target = wet_target[:, :1, :, :]
                     pos_w = torch.tensor(self.rg_pos_weight, device=x.device, dtype=torch.float32)
-                    rg_val_bce = F.binary_cross_entropy_with_logits(wet_logits_val, wet_target, pos_weight=pos_w).item()
+                    # Tensor BCE for adding to loss
+                    rg_val_bce_t = F.binary_cross_entropy_with_logits(wet_logits_val, wet_target, pos_weight=pos_w)
+                    # Optional scalr for logging
+                    rg_val_bce = float(rg_val_bce_t.item())
                 except Exception as e:
                     logger.warning(f"[rain_gate] Could not compute validation BCE or target. Error: {e}")
                     wet_target = None
+                    rg_val_bce_t = None
                     rg_val_bce = None
 
                 rel_probs.append(torch.sigmoid(wet_logits_val).detach().flatten())
@@ -1053,6 +1076,10 @@ class TrainingPipeline_general:
                                          lr_ups=lr_ups_baseline,
                                          pixel_weight_map=pixel_weight_map
                                      )
+                # Add rain-gate BCE to loss 
+                if (getattr(self, 'rg_enabled', False) and (rg_val_bce_t is not None) and (self.rg_loss_weight > 0.0)):
+                    batch_loss = batch_loss + rg_val_bce_t * self.rg_loss_weight
+
                 # === Cosine monitoring (validation; lightweight) ===
                 monitor_cfg = self.cfg.get('monitoring', {})
                 log_every = monitor_cfg.get('edm_metrics_every', 50)
@@ -1068,7 +1095,7 @@ class TrainingPipeline_general:
             loss += batch_loss.item()
             # Update the bar
             if idx % self.cfg['training'].get('train_postfix_every', 10) == 0:
-                pbar.set_postfix(loss=loss / (idx + 1))
+                pbar.set_postfix(loss=loss/(idx+1), rg_bce=rg_val_bce if wet_logits_val is not None else None)
 
         # Plot reliability for this validation epoch if data collected
         if len(rel_probs) > 0 and len(rel_targets) > 0:

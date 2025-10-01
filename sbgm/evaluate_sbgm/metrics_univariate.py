@@ -65,7 +65,7 @@ def pit_values_from_ensemble(
         U = torch.rand_like(obs_flat)
         pit = (less.float() + U * equal.float()) / float(M)
     else:
-        pit = (less.float() + 0.5 * equal.float()) / float(M)
+        pit = (less.float() + 0.5 * equal.float()) / float(M)   
 
     return pit  # [N]
 
@@ -130,37 +130,54 @@ def _rolling_sum_np(x: np.ndarray, k: int) -> np.ndarray:
     c = np.cumsum(np.insert(x, 0, 0.0))
     return c[k:] - c[:-k]
 
-def rxk_series(
-    y_daily: np.ndarray, 
-    k: int = 1, 
-    block_index: Optional[np.ndarray] = None
-) -> Tuple[np.ndarray, np.ndarray]:
+def rxk_series(series: np.ndarray, k: int, block_index: np.ndarray | None = None):
     """
-    Compute block maxima of k-day accumulations.
-    Args:
-      y_daily: [T] daily precip (mm)
-      k: 1 for Rx1day, 5 for Rx5day (rolling sum)
-      block_index: [T] integer labels for blocks (e.g., year id or season-year id).
-                   If None, treat entire series as one block (not typical for GEV).
-    Returns:
-      maxima_per_block: array of maxima (one per unique block)
-      blocks: array of unique block ids aligned to maxima
+    Compute RxK (maximum K-day running *sum*) within each block.
+    - `series`: 1-D array (e.g., daily basin-mean precipitation in mm/day)
+    - `k`: window length (days)
+    - `block_index`: same length as `series`; equal values define a block
+      (e.g., seasonal block id). If None, everything is one block.
+
+    Returns
+    -------
+    values : np.ndarray
+        Array of RxK values (one per non-empty block). If a block has
+        fewer than `k` valid samples, it falls back to the max daily value
+        in that block. Blocks with no finite values are skipped.
+    meta : dict
+        Metadata with {"k": k}.
     """
-    T = y_daily.shape[0]
+    s = np.asarray(series, dtype=float)
+    if s.ndim != 1:
+        s = s.reshape(-1)
+
     if block_index is None:
-        block_index = np.zeros(T, dtype=int)
-    blocks = np.unique(block_index)
-    out = []
-    out_blocks = []
-    for b in blocks:
-        mask = (block_index == b)
-        xb = y_daily[mask]
-        if xb.size == 0:
+        block_index = np.zeros_like(s, dtype=int)
+    else:
+        block_index = np.asarray(block_index)
+        if block_index.shape != s.shape:
+            raise ValueError("block_index must have the same shape as series")
+
+    values = []
+    for b in np.unique(block_index):
+        x = s[block_index == b]
+        x = x[np.isfinite(x)]  # drop NaNs/inf
+        if x.size == 0:
+            # nothing to contribute from this block
             continue
-        roll = _rolling_sum_np(xb, k)
-        out.append(np.max(roll))
-        out_blocks.append(b)
-    return np.array(out, dtype=float), np.array(out_blocks)
+        if k <= 1:
+            values.append(np.max(x))
+            continue
+        if x.size < k:
+            # Not enough samples for a k-day sum; fall back to daily max
+            values.append(np.max(x))
+            continue
+        # Valid rolling k-day sums
+        roll = np.convolve(x, np.ones(int(k), dtype=float), mode='valid')
+        # Guard (shouldn’t be empty after size check, but be safe)
+        values.append(np.max(roll) if roll.size > 0 else np.max(x))
+
+    return np.asarray(values, dtype=float), {"k": int(k)}
 
 def _return_level_gev(c, loc, scale, rp_years: float, block_per_year: float = 1.0) -> float:
     """
@@ -305,8 +322,13 @@ def to_numpy_1d_series(x: torch.Tensor, mask: Optional[torch.Tensor] = None, agg
       mask: [H,W] or [1,H,W] boolean (e.g., basin mask). If None, aggregate over all pixels.
       agg: 'mean' | 'sum' (use 'sum' for basin-total precip; 'mean' for areal average)
     """
-    x = _ensure_float(x).detach().cpu()
+    x = _ensure_float(x).detach().cpu()    
     if mask is not None:
+        # Normalize mask to [H,W]
+        if mask.dim() == 4 and mask.shape[:2] == (1, 1):
+            mask = mask.squeeze(0).squeeze(0)
+        elif mask.dim() == 3 and mask.shape[0] == 1:
+            mask = mask.squeeze(0)        
         if mask.dtype != torch.bool:
             mask = mask > 0.5
         mask = mask.to(x.device)
@@ -344,3 +366,337 @@ def seasonal_block_index(dates_np: np.ndarray) -> np.ndarray:
     year_adj = yy + ((mm == 12).astype(int))  # Dec goes to next year
     block_id = year_adj * 10 + season
     return block_id.astype(int)
+
+@torch.no_grad()
+def pmm_from_ensemble(ens: torch.Tensor, # [B,M,H,W] ensemble tensor
+                      mask: Optional[torch.Tensor] = None, # [B, H, W] or [H, W] boolean mask 
+                      exclude_zeros: bool = False, # if True, exclude strictly 0.0 values from the pooled distribution
+                      ) -> torch.Tensor:
+    """
+        Probability-Matched Mean (PMM) for univariate fields.
+
+        For each sample b:
+        1) Compute the ensemble-mean field μ(x) over members M.
+        2) Take the ranks of μ(x) over VALID pixels.
+        3) Pool *all* ensemble values across members at VALID pixels and sort that pooled 1-D list.
+        4) Assign to each pixel the pooled value at the corresponding rank (quantile) of μ(x).
+
+        This preserves the pooled marginal distribution of the ensemble while using μ(x) to supply the spatial
+        pattern (classic PMM used in QPF).
+
+        Args:
+            ens: [B,M,H,W] univariate precipitation ensemble in model/physical space
+            mask: Optional boolean mask broadcastable to [B,H,W]. Pixels where mask=False are left as the ensemble mean (i.e. PMM falls back to mean).
+            exclude_zeros: If True, exclude strictly 0.0 values from the pooled distribution (useful for precipitation).
+        Returns:
+            pmm: [B,1,H,W] Probability-Matched Mean fields
+
+    """
+    if ens.dim() != 4:
+        raise ValueError(f"ens must be [B, M, H, W] for univariate PMM, got {ens.shape}")
+
+    ens = ens if torch.is_floating_point(ens) else ens.float()
+    B, M, H, W = ens.shape
+
+    device = ens.device
+
+    # Prepare mask broadcast -> [B, H, W]
+    if mask is None:
+        mask_bhw = torch.ones((B, H, W), dtype=torch.bool, device=device)
+    else:
+        m = mask
+        if m.dtype != torch.bool:
+            m = m > 0.5
+        while m.dim() < 3:
+            m = m.unsqueeze(0)
+        if m.shape[0] == 1 and B > 1:
+            m = m.expand(B, -1, -1)
+        mask_bhw = m.to(device)
+
+    mean_field = ens.mean(dim=1)                 # [B, H, W]
+    pmm_out = torch.empty((B, 1, H, W), dtype=ens.dtype, device=device)
+
+
+    for b in range(B):
+        valid = mask_bhw[b].view(-1)             # [H*W]
+        if valid.sum() == 0:
+            # No valid pixels → fall back to mean
+            pmm_out[b, 0] = mean_field[b]
+            continue
+
+        # Spatial pattern ranks from ensemble mean
+        mf_vals = mean_field[b].view(-1)[valid]  # [Nv]
+        # ranks: 0..Nv-1
+        ranks = torch.argsort(torch.argsort(mf_vals))
+
+        # Pooled distribution across all M members at valid pixels
+        pooled = ens[b].view(M, -1)[:, valid]    # [M, Nv]
+        if exclude_zeros:
+            pooled_flat = pooled.reshape(-1)
+            pooled_flat = pooled_flat[pooled_flat != 0.0]
+        else:
+            pooled_flat = pooled.reshape(-1)
+
+        if pooled_flat.numel() == 0:
+            # Degenerate: no values after excluding zeros → fall back to mean
+            out_vals = mf_vals
+        else:
+            pooled_sorted, _ = torch.sort(pooled_flat)  # [K]
+            Nv = mf_vals.numel()
+            # Quantile mapping: place rank r at q=(r+0.5)/Nv (midpoint rule)
+            q = (ranks.to(torch.float32) + 0.5) / float(Nv)
+            # Convert quantiles to indices in pooled_sorted
+            # Use (K-1) so that q=1 maps to last index
+            K = pooled_sorted.numel()
+            idx = torch.clamp((q * (K - 1)).round().to(torch.long), 0, K - 1)
+            out_vals = pooled_sorted[idx]
+
+        # Write back into full image (fallback to mean for invalid)
+        flat = mean_field[b].view(-1).clone()
+        flat[valid] = out_vals
+        pmm_out[b, 0] = flat.view(H, W)
+
+    return pmm_out
+
+
+def crps_ensemble(
+    obs: torch.Tensor,              # [H,W]
+    ens: torch.Tensor,              # [M,H,W]
+    mask: Optional[torch.Tensor] = None,
+    reduction: str = "mean",        # 'mean' | 'sum' | 'none'
+) -> torch.Tensor:
+    """
+    Continuous Ranked Probability Score (CRPS) for ensemble forecasts.
+    0 = perfect; higher = worse.
+    Fair CRPS estimator (Hersbach, 2000):
+      CRPS = (1/M) * sum_i |X_i - y| - (1/(2 M^2)) * sum_{i,j} |X_i - X_j|
+
+    Vectorized per-pixel. If reduction='none', returns [H,W]; otherwise scalar.
+    """
+    if obs.dim() != 2 or ens.dim() != 3:
+        raise ValueError("obs must be [H,W] and ens must be [M,H,W]")
+    M = ens.shape[0]
+    obs = obs.to(ens.device, ens.dtype)
+
+    # term1: (1/M) sum |Xi - y|
+    term1 = (ens - obs.unsqueeze(0)).abs().mean(dim=0)  # [H,W]
+
+    # term2: (1/(2M^2)) sum_{i,j} |Xi - Xj|  = (1/M^2) * sum_{i<j} (v_j - v_i)
+    v = ens.view(M, -1)                  # [M, H*W]
+    v_sorted, _ = torch.sort(v, dim=0)   # ascending
+    i = torch.arange(M, device=ens.device, dtype=ens.dtype).unsqueeze(1)  # [M,1]
+    # sum_{i<j} (v_j - v_i) = sum_k (2k - M + 1) * v_(k)
+    pair_sum = ( (2*i - (M - 1)) * v_sorted ).sum(dim=0)  # [H*W]
+    term2 = (pair_sum / (M * M)).view_as(term1)           # [H,W]
+
+    crps = term1 - term2  # [H,W]
+
+    if mask is not None:
+        mask = mask.to(ens.device)
+        if mask.dtype != torch.bool:
+            mask = mask > 0.5
+        vals = crps[mask]
+        if vals.numel() == 0:
+            return torch.tensor(0.0, device=ens.device)
+        if reduction == "mean": return vals.mean()
+        if reduction == "sum":  return vals.sum()
+        return vals
+    else:
+        if reduction == "mean": return crps.mean()
+        if reduction == "sum":  return crps.sum()
+        return crps
+
+
+def reliability_exceedance_lr_binned(
+    obs: torch.Tensor,                  # [H,W] (mm/day)
+    ens: torch.Tensor,                  # [M,H,W] (mm/day)
+    threshold: float,
+    lr_covariate: Optional[torch.Tensor] = None,  # [H,W]; if None, bin by forecast prob
+    n_bins: int = 10,
+    mask: Optional[torch.Tensor] = None,
+    return_brier: bool = True,
+) -> Dict[str, torch.Tensor]:
+    """
+    Reliability diagram data for threshold exceedance.
+      p_hat = fraction of members >= threshold
+      o     = 1(obs >= threshold)
+    If lr_covariate is provided, bins are quantiles of that field; else equal-width bins over p_hat in [0,1].
+    Returns: bin_center, prob_pred, freq_obs, count, and (optionally) Brier decomposition terms.
+    """
+    device = ens.device
+    p_hat = (ens >= float(threshold)).float().mean(dim=0)  # [H,W]
+    o = (obs.to(device) >= float(threshold)).float()       # [H,W]
+
+    if mask is not None:
+        mask = mask.to(device)
+        if mask.dtype != torch.bool:
+            mask = mask > 0.5
+        p_hat = p_hat[mask]
+        o = o[mask]
+        cov = lr_covariate[mask] if (lr_covariate is not None) else None
+    else:
+        cov = lr_covariate
+
+    if cov is not None:
+        cov = cov.to(device).float().view(-1)
+        q = torch.linspace(0, 1, n_bins + 1, device=device)
+        edges = torch.quantile(cov, q)
+        edges[0]  = cov.min() - 1e-6
+        edges[-1] = cov.max() + 1e-6
+        which = torch.bucketize(cov, edges) - 1  # [N]
+        bin_center = 0.5 * (edges[:-1] + edges[1:])
+        p_src = p_hat.view(-1)
+        o_src = o.view(-1)
+    else:
+        p_src = p_hat.view(-1)
+        o_src = o.view(-1)
+        edges = torch.linspace(0, 1, n_bins + 1, device=device)
+        which = torch.bucketize(p_src, edges) - 1
+        bin_center = 0.5 * (edges[:-1] + edges[1:])
+
+    prob_pred, freq_obs, count = [], [], []
+    for b in range(n_bins):
+        sel = (which == b)
+        n = int(sel.sum().item())
+        count.append(n)
+        if n == 0:
+            prob_pred.append(0.0); freq_obs.append(0.0); continue
+        prob_pred.append(p_src[sel].mean().item())
+        freq_obs.append(o_src[sel].mean().item())
+
+    out = {
+        "bin_center": bin_center.detach().cpu(),
+        "prob_pred": torch.tensor(prob_pred, dtype=torch.float32),
+        "freq_obs": torch.tensor(freq_obs, dtype=torch.float32),
+        "count": torch.tensor(count, dtype=torch.int64),
+    }
+
+    if return_brier:
+        o_bar = float(o_src.mean().item()) if o_src.numel() else 0.0
+        N = max(int(o_src.numel()), 1)
+        rel = 0.0
+        res = 0.0
+        for k in range(n_bins):
+            Nk = int(out["count"][k].item())
+            if Nk == 0: continue
+            pk = float(out["prob_pred"][k].item())
+            ok = float(out["freq_obs"][k].item())
+            w = Nk / N
+            rel += w * (pk - ok) ** 2
+            res += w * (ok - o_bar) ** 2
+        unc = o_bar * (1.0 - o_bar)
+        out.update({
+            "brier": torch.tensor(rel - res + unc, dtype=torch.float32),
+            "reliability": torch.tensor(rel, dtype=torch.float32),
+            "resolution": torch.tensor(res, dtype=torch.float32),
+            "uncertainty": torch.tensor(unc, dtype=torch.float32),
+        })
+
+    for k, v in out.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.cpu()
+    return out
+
+
+def spread_skill(
+    obs: torch.Tensor,             # [H,W]
+    ens: torch.Tensor,             # [M,H,W]
+    point: str = "pmm",            # 'pmm' | 'mean' | 'median'
+    mask: Optional[torch.Tensor] = None,
+    n_bins: int = 10,
+) -> Dict[str, torch.Tensor]:
+    """
+    Spread–skill diagnostic:
+      spread = ensemble std per pixel
+      skill  = |point_estimate - obs| per pixel
+    We bin by spread (quantile bins) to assess calibration of spread.
+    """
+    from sbgm.evaluate_sbgm.metrics_univariate import pmm_from_ensemble
+
+    device = ens.device
+    obs = obs.to(device).to(ens.dtype)
+    if mask is not None:
+        mask = (mask.to(device) > 0.5)
+
+    spread = ens.std(dim=0)  # [H,W]
+    if point == "mean":
+        pt = ens.mean(dim=0)
+    elif point == "median":
+        pt = ens.median(dim=0).values
+    else:
+        pt = pmm_from_ensemble(ens.unsqueeze(0)).squeeze(0).squeeze(0)  # [H,W]
+    ae = (pt - obs).abs()
+
+    if mask is not None:
+        spread = spread[mask]
+        ae = ae[mask]
+
+    q = torch.linspace(0, 1, n_bins + 1, device=device)
+    edges = torch.quantile(spread, q)
+    edges[0]  = spread.min() - 1e-9
+    edges[-1] = spread.max() + 1e-9
+    which = torch.bucketize(spread, edges) - 1
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    sp_mean, sk_mean, count = [], [], []
+    for b in range(n_bins):
+        sel = (which == b)
+        n = int(sel.sum().item())
+        count.append(n)
+        if n == 0:
+            sp_mean.append(0.0); sk_mean.append(0.0); continue
+        sp_mean.append(spread[sel].mean().item())
+        sk_mean.append(ae[sel].mean().item())
+
+    return {
+        "bin_center": centers.detach().cpu(),
+        "spread": torch.tensor(sp_mean, dtype=torch.float32),
+        "skill": torch.tensor(sk_mean, dtype=torch.float32),
+        "count": torch.tensor(count, dtype=torch.int64),
+    }
+
+
+
+def compute_isotropic_psd(
+    batch: torch.Tensor,        # [B,1,H,W]
+    dx_km: float,
+    mask: Optional[torch.Tensor] = None,  # [B,1,H,W] or broadcastable
+) -> Dict[str, torch.Tensor]:
+    """
+    Isotropic (radially averaged) 2D PSD for a batch.
+    Returns: {'k': [n_bins], 'psd': [n_bins]} averaged over batch.
+    """
+    if batch.dim() != 4 or batch.shape[1] != 1:
+        raise ValueError("batch must be [B,1,H,W]")
+    B, _, H, W = batch.shape
+    device = batch.device
+    x = batch.to(torch.float32)
+
+    if mask is not None:
+        m = mask
+        while m.dim() < 4: m = m.unsqueeze(0)
+        if m.shape[0] == 1 and B > 1: m = m.expand(B, -1, -1, -1)
+        x = x.masked_fill(~m.bool(), 0.0)
+
+    X = torch.fft.rfft2(x, norm='ortho')           # [B,1,H,W//2+1]
+    P = (X.real**2 + X.imag**2).mean(dim=0).squeeze(0)  # [H, W//2+1]
+
+    ky = torch.fft.fftfreq(H, d=dx_km, device=device)   # 1/km
+    kx = torch.fft.rfftfreq(W, d=dx_km, device=device)
+    Ky, Kx = torch.meshgrid(ky, kx, indexing='ij')
+    Kr = torch.sqrt(Kx**2 + Ky**2)                      # [H, W//2+1]
+
+    kr = Kr.flatten()
+    p  = P.flatten()
+    kmax = kr.max().item()
+    n_bins = int(min(H, W) // 2)
+    edges = torch.linspace(0, kmax, n_bins + 1, device=device)
+    which = torch.bucketize(kr, edges) - 1
+
+    psd = torch.zeros(n_bins, device=device)
+    for i in range(n_bins):
+        sel = (which == i)
+        if sel.any(): psd[i] = p[sel].mean()
+
+    k_centers = 0.5 * (edges[:-1] + edges[1:])
+    return {"k": k_centers.detach().cpu(), "psd": psd.detach().cpu()}
