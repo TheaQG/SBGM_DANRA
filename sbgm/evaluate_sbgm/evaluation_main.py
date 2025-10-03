@@ -39,7 +39,7 @@ def evaluation_main(cfg):
     eval_dir = cfg_full_gen_eval.get("eval_dir", None)
 
     # Logging & seed
-    seed = int(cfg.get("evaluation", {}).get("seed", 1234))
+    seed = int(cfg_full_gen_eval.get("seed", 1234))
     torch.manual_seed(seed); torch.cuda.manual_seed(seed); np.random.seed(seed)
     # logger.info(f"[evaluation_main] Configuration:\n{OmegaConf.to_yaml(cfg)}")
 
@@ -62,16 +62,16 @@ def evaluation_main(cfg):
     ev_cfg = EvaluationConfig(
         gen_dir=str(gen_root),
         out_dir=str(eval_root),
-        grid_km_per_px=float(cfg.get("data", {}).get("grid_km_per_px", 2.0)),
-        fss_scales_km=tuple(cfg.get("evaluation", {}).get("fss_scales_km", (5,10,20))),
-        thresholds_mm=tuple(cfg.get("evaluation", {}).get("thresholds_mm", (1.0,5.0,10.0))),
-        wet_threshold_mm=float(cfg.get("evaluation", {}).get("wet_threshold_mm", 1.0)),
-        reliability_bins=int(cfg.get("evaluation", {}).get("reliability_bins", 10)),
-        spread_skill_bins=int(cfg.get("evaluation", {}).get("spread_skill_bins", 10)),
-        pit_bins=int(cfg.get("evaluation", {}).get("pit_bins", 20)),
-        psd_ignore_low_k_bins=int(cfg.get("evaluation", {}).get("psd_ignore_low_k_bins", 1)),
-        random_ref_kind=str(cfg.get("evaluation", {}).get("random_ref_kind", "phase_randomized")),
-        seasons=tuple(cfg.get("evaluation", {}).get("seasons", ("ALL","DJF","MAM","JJA","SON"))),
+        grid_km_per_px=float(cfg_full_gen_eval.get("grid_km_per_px", 2.0)),
+        fss_scales_km=tuple(cfg_full_gen_eval.get("fss_scales_km", (5,10,20))),
+        thresholds_mm=tuple(cfg_full_gen_eval.get("thresholds_mm", (1.0,5.0,10.0))),
+        wet_threshold_mm=float(cfg_full_gen_eval.get("wet_threshold_mm", 1.0)),
+        reliability_bins=int(cfg_full_gen_eval.get("reliability_bins", 10)),
+        spread_skill_bins=int(cfg_full_gen_eval.get("spread_skill_bins", 10)),
+        pit_bins=int(cfg_full_gen_eval.get("pit_bins", 20)),
+        psd_ignore_low_k_bins=int(cfg_full_gen_eval.get("psd_ignore_low_k_bins", 1)),
+        random_ref_kind=str(cfg_full_gen_eval.get("random_ref_kind", "phase_randomized")),
+        seasons=tuple(cfg_full_gen_eval.get("seasons", ("ALL","DJF","MAM","JJA","SON"))),
         seed=seed,
     )
 

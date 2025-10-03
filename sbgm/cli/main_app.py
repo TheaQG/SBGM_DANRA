@@ -25,6 +25,8 @@ from sbgm.logging_utils import (
     cfg_hash, make_run_name, ensure_run_dir,
     setup_logging, write_run_manifest, log_banner
 )
+from baselines.baseline_main import run as run_baselines
+from baselines.baseline_eval import run_all as run_baseline_eval
 
 def check_model_exists(cfg):
     model_name = get_model_string(cfg)
@@ -44,7 +46,9 @@ def main():
     logger = logging.getLogger(__name__)
     parser = argparse.ArgumentParser(description="SBGM full pipeline launcher")
     parser.add_argument("--config_path", required=True, help="Path to the yaml config")
-    parser.add_argument("--mode", choices=["train", "generate", "evaluate", "full_pipeline", "data_splits", "quicklook"], default="full_pipeline")
+    parser.add_argument("--mode", choices=["train", "generate", "evaluate", "full_pipeline", "data_splits", "quicklook", "baseline"], default="full_pipeline")
+    parser.add_argument("--baseline_type", choices=["bilinear", "qm", "unet_sr"], default="bilinear", help="If mode is 'baseline', which baseline to run.")
+    parser.add_argument("--baseline_split", choices=["train", "valid", "test"], default="test", help="If mode is 'baseline', which split to use.")
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_generation", action="store_true")
     parser.add_argument("--skip_evaluation", action="store_true")
@@ -54,6 +58,16 @@ def main():
 
 
     cfg = load_config(args.config_path)
+
+    # # Apply baseline CLI overrides if provided
+    # if args.baseline_type is not None:
+    #     if not hasattr(cfg, 'baseline') or cfg.baseline is None:
+    #         cfg.baseline = {}
+    #     cfg.baseline['type'] = args.baseline_type
+    # if args.baseline_split is not None:
+    #     if not hasattr(cfg, 'baseline') or cfg.baseline is None:
+    #         cfg.baseline = {}
+    #     cfg.baseline['split'] = args.baseline_split
 
     # === Build run context ===
     model_name = get_model_string(cfg)
@@ -149,6 +163,16 @@ def main():
         if not args.skip_evaluation:
             launch_evaluation.run_evaluation(cfg, make_plots=make_plots)
         log_banner("EVALUATION DONE")
+
+    elif args.mode == "baseline":
+        log_banner(f"BASELINE START")
+        run_baselines(cfg)
+        log_banner(f"BASELINE DONE")
+
+    elif args.mode == "baseline_eval":
+        log_banner(f"BASELINE EVALUATION START")
+        run_baseline_eval(cfg)
+        log_banner(f"BASELINE EVALUATION DONE")
 
         
     logger.info("=== SBGM_SD MAIN APP DONE ===")
