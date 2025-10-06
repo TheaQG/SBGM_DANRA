@@ -66,6 +66,6 @@ echo "[INFO] Launching baselines ($TYPE)"
 srun singularity exec "$CONTAINER" bash -lc "
   set -euo pipefail
   export PYTHONPATH='${PYTHONPATH}'
-  python -m sbgm.cli.main_app --config_path '$CONFIG_DIR/$CFG' --mode baseline
+  python -m sbgm.cli.main_app --config_path '$CONFIG_DIR/$CFG' --mode baseline_eval
 "
 

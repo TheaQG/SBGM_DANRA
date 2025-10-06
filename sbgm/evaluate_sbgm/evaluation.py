@@ -28,14 +28,9 @@ from typing import Optional, Iterable, Dict, Any
 import numpy as np
 import torch
 
-# --- project utils you already have ---
 from sbgm.utils import get_model_string
 # from sbgm.training_utils import load_land_mask_if_any  # if you have something similar; else set mask=None
 
-# --- metrics we already discussed/you implemented ---
-from sbgm.evaluate_sbgm.plot_utils import (
-    plot_psd_curves,                       # plotting util if present
-)
 from sbgm.monitoring import (
     compute_fss_at_scales,                 # on batches [B,1,H,W]
     compute_psd_slope,                     # returns dict/slopes
@@ -52,9 +47,115 @@ from sbgm.evaluate_sbgm.metrics_univariate import (
     rxk_series,
     fit_gev_block_maxima_with_ci,
     fit_pot_gpd_with_ci,
+    compute_isotropic_psd
 )
 
 logger = logging.getLogger(__name__)
+
+
+# === Helpers for baseline evaluation metrics implementation ===
+def _baseline_base_dir(cfg, baseline_name: str, split: str) -> Path:
+    base_root = Path(cfg['paths']['sample_dir']) 
+    return base_root / 'evaluation' / 'baselines' / baseline_name / split
+
+def load_baseline_fss(cfg, baseline_name: str, split: str):
+    """Return dict: { 'thr_list': [...], 'scales_km': [...], 'values': 2D np.array[T,S] } or None."""
+    d = _baseline_base_dir(cfg, baseline_name, split) / 'tables' / 'fss_summary.csv'
+    if not d.exists(): return None
+    import csv
+    thrs, scales = [], None
+    rows = []
+    with open(d, 'r') as f:
+        r = csv.DictReader(f)
+        for row in r:
+            if scales is None:
+                scales = [int(c.split('_')[1].replace('km','')) for c in row if c.startswith('FSS_')]
+            thrs.append(float(row['thr']))
+            rows.append([float(row[f'FSS_{s}km']) for s in scales])
+    return {'thr_list': thrs, 'scales_km': scales, 'values': np.array(rows, dtype=float)}
+
+def load_baseline_psd(cfg, baseline_name: str, split: str):
+    """Return dict from psd_slope_summary.json plus (optionally) full curves if you want to read them later."""
+    d = _baseline_base_dir(cfg, baseline_name, split) / 'tables' / 'psd_slope_summary.json'
+    if not d.exists(): return None
+    return json.loads(d.read_text())
+
+def load_baseline_tails(cfg, baseline_name: str, split: str):
+    """Return dict with p95/p99 and wet-day freq for HR and baseline."""
+    d = _baseline_base_dir(cfg, baseline_name, split) / 'tables' / 'tails_summary.json'
+    if not d.exists(): return None
+    return json.loads(d.read_text())
+
+def load_baseline_reliability(cfg, baseline_name: str, split: str):
+    """
+    Returns:
+      dict[float, list[dict]] mapping threshold -> rows with keys:
+        'bin_center', 'prob_pred', 'freq_obs', 'count'
+      or None if the CSV does not exist.
+    """
+    p = _baseline_base_dir(cfg, baseline_name, split) / 'tables' / 'reliability_bins.csv'
+    if not p.exists():
+        return None
+
+    out = {}
+    try:
+        import csv
+        with open(p, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # robust numeric parsing
+                try:
+                    thr = float(row.get('thr', 'nan'))
+                    bin_center = float(row.get('bin_center', row.get('prob_pred', 'nan')))
+                    prob_pred  = float(row.get('prob_pred', 'nan'))
+                    freq_obs   = float(row.get('freq_obs', 'nan'))
+                    count_raw  = row.get('count', '0')
+                    # 'count' can sometimes be float-like in CSV; coerce to int safely
+                    try:
+                        count = int(float(count_raw))
+                    except Exception:
+                        count = 0
+                except Exception:
+                    # skip malformed lines
+                    continue
+
+                if thr not in out:
+                    out[thr] = []
+                out[thr].append({
+                    'bin_center': bin_center,
+                    'prob_pred':  prob_pred,
+                    'freq_obs':   freq_obs,
+                    'count':      count,
+                })
+    except Exception:
+        return None
+
+    return out
+
+def load_all_baselines(cfg, split: str, names=None):
+    """
+    names = list like ['bilinear','qm','unet_sr'] or None -> use cfg.baseline.compare_list or all three.
+    Returns a dict:
+      {
+        name: {
+           'fss': {...} or None,
+           'psd': {...} or None,
+           'tails': {...} or None,
+           'reliability': {thr->df} or None
+        }, ...
+      }
+    """
+    if names is None:
+        names = cfg.get('baseline', {}).get('compare_list', ['bilinear','qm','unet_sr'])
+    out = {}
+    for name in names:
+        out[name] = dict(
+            fss        = load_baseline_fss(cfg, name, split),
+            psd        = load_baseline_psd(cfg, name, split),
+            tails      = load_baseline_tails(cfg, name, split),
+            reliability= load_baseline_reliability(cfg, name, split),
+        )
+    return out
 
 @dataclass
 class EvaluationConfig:
@@ -74,11 +175,17 @@ class EvaluationConfig:
 
 
 class EvaluationRunner:
-    def __init__(self, cfg_yaml: dict, eval_cfg: EvaluationConfig, device: torch.device, mask: Optional[torch.Tensor] = None):
+    def __init__(self,
+                 cfg_yaml: dict,
+                 eval_cfg: EvaluationConfig,
+                 device: torch.device,
+                 mask: Optional[torch.Tensor] = None,
+                 baseline_data: Optional[Dict[str, Dict[str, Any]]] = None):
         self.cfg_yaml = cfg_yaml
         self.eval_cfg = eval_cfg
         self.device = device
         self.mask = mask  # [H,W] bool or None
+        self.baseline_data = baseline_data
 
         self.gen_root = Path(eval_cfg.gen_dir)
         # Prefer physical-space outputs; fall back to model-space if needed
@@ -279,7 +386,7 @@ class EvaluationRunner:
             logger.info("[eval] spread–skill: date=%s → %d rows", date, added)
 
 
-            # PIT & rank hist (accumulate) — expected by metrics: obs [B,H,W], ens [B,M,H,W]
+            # PIT and rank hist (accumulate) — expected by metrics: obs [B,H,W], ens [B,M,H,W]
             obs_bhw  = obs.unsqueeze(0)                   # [1,H,W]
             ens_bmhw = ens.unsqueeze(0)                   # [1,M,H,W]
 
@@ -371,7 +478,7 @@ class EvaluationRunner:
         # Sanitize: replace NaNs/±inf and clamp negatives to 0 for precip
         pmm_bt = torch.nan_to_num(pmm_bt, nan=0.0, posinf=None, neginf=0.0).clamp_min(0.0)
         hr_bt  = torch.nan_to_num(hr_bt,  nan=0.0, posinf=None, neginf=0.0).clamp_min(0.0)
-        logger.info("[eval] Capability stack: pmm_bt=%s hr_bt=%s (after nan→num & clamp≥0)", tuple(pmm_bt.shape), tuple(hr_bt.shape))
+        logger.info("[eval] Capability stack: pmm_bt=%s hr_bt=%s (after nan→num and clamp≥0)", tuple(pmm_bt.shape), tuple(hr_bt.shape))
 
         # Build per-sample mask batch aligned to dates_used
         mask_bt = None
@@ -452,21 +559,35 @@ class EvaluationRunner:
         logger.info(f"[eval] Wrote FSS summary to {tables_dir / 'fss_summary.csv'}")
 
 
-        # PSD slope & curves
+        # PSD slope and series (save CSV, handle plotting in plot_utils)
         psd_summ = compute_psd_slope(gen_bt=pmm_bt, hr_bt=hr_bt, mask=mask_bt,
                                      ignore_low_k_bins=self.eval_cfg.psd_ignore_low_k_bins)
         (tables_dir / "psd_slope_summary.json").write_text(json.dumps(psd_summ, indent=2))
         logger.info(f"[eval] Wrote PSD slope summary to {tables_dir / 'psd_slope_summary.json'}")
+        # Save full isotropic PSD series as CSV, handl plotting in plot_utils
         try:
-            # only if you have this plotting helper
-            plot_psd_curves(pmm_bt, hr_bt, mask=mask_bt,
-                            dx_km=self.eval_cfg.grid_km_per_px,
-                            seasons=self.eval_cfg.seasons,
-                            out_dir=str(figs_dir))
-        except Exception as e:
-            logger.warning(f"[eval] plot_psd_curves failed: {e}")
+            psd_gen = compute_isotropic_psd(pmm_bt, dx_km=self.eval_cfg.grid_km_per_px, mask=mask_bt)
+            psd_hr  = compute_isotropic_psd(hr_bt,  dx_km=self.eval_cfg.grid_km_per_px, mask=mask_bt)
+            k = psd_gen["k"].detach().cpu().numpy() 
+            Pg = psd_gen["psd"].detach().cpu().numpy()
+            Ph = psd_hr["psd"].detach().cpu().numpy()
 
-        # P95/P99 & wet-day frequency
+            # Write CSV with columns: k, PSD_gen, PSD_hr
+            out_csv = tables_dir / "psd_curves.csv"
+            with open(out_csv, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(["k","psd_pmm","psd_hr"])
+                for i in range(len(k)):
+                    try: 
+                        w.writerow([float(k[i]), float(Pg[i]), float(Ph[i])])
+                    except Exception:
+                        # best-effort: skip malformed rows
+                        continue
+            logger.info(f"[eval] Wrote PSD curves to {out_csv}")
+        except Exception as e:
+            logger.warning(f"[eval] Saving PSD curves CSV failed: {e}")
+
+        # P95/P99 and wet-day frequency
         tails = compute_p95_p99_and_wet_day(
             pmm_bt, hr_bt=hr_bt, mask=mask_bt,
             wet_threshold_mm=self.eval_cfg.wet_threshold_mm
@@ -516,7 +637,7 @@ class EvaluationRunner:
         tables_dir = self.out_root / "tables"
         figs_dir = self.out_root / "figures"
 
-        # Build daily basin-mean series from HR & PMM
+        # Build daily basin-mean series from HR + PMM
         dates = list(self._list_dates())
         HR = []
         PMM = []
@@ -557,7 +678,7 @@ class EvaluationRunner:
         dates_np = np.array([np.datetime64(d) for d in dates])
         blk = seasonal_block_index(dates_np)
 
-        # GEV on Rx1day & Rx5day (seasonal blocks, 4 per year)
+        # GEV on Rx1day + Rx5day (seasonal blocks, 4 per year)
         rx1_hr, _  = rxk_series(series_hr,  1, block_index=blk)
         rx1_pmm,_  = rxk_series(series_pmm, 1, block_index=blk)
         rx5_hr,_   = rxk_series(series_hr,  5, block_index=blk)

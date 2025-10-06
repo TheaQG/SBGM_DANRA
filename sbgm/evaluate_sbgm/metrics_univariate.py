@@ -1,10 +1,39 @@
+"""
+Univariate metrics for ensemble forecasts.
+Contains:
+    - PIT values and rank histograms from ensembles
+    - Extremes: Rx1day/Rx5day, GEV fit to block maxima, POT with GPD fit, with bootstrap CIs
+    - Reliability diagrams for threshold exceedance
+    - Spread-skill diagnostic
+    - Probability-Matched Mean (PMM) for univariate fields
+    - CRPS for ensembles
+    - Isotropic PSD computation (2D FFT and radial averaging)
+    
+To implement:
+    - Full pixel distributions with distribution based metrics (Wasserstein, KL divergence, KS, etc.)
+    - Yearly metrics map (e.g., annual average, sum, Rx1day, Rx5day, R95p, R99p, etc.)
+
+
+"""
+
 import torch
+import logging
+import csv
 import numpy as np
-from typing import Optional, Tuple, Dict, Sequence
+from typing import Optional, Tuple, Dict, Sequence, Deque, DefaultDict, Any, cast
+from dataclasses import dataclass, field
+from collections import defaultdict, deque
+from numpy.typing import NDArray
+from pathlib import Path
 
 # Extremes needs SciPy
 from scipy.stats import genextreme as scipy_gev
 from scipy.stats import genpareto as scipy_gpd
+from scipy.stats import wasserstein_distance as _wasserstein
+from scipy.stats import ks_2samp as _ks2
+from scipy.stats import entropy as _kl_entropy
+
+logger = logging.getLogger(__name__)
 
 # =========================
 # Helpers (Torch)
@@ -700,3 +729,387 @@ def compute_isotropic_psd(
 
     k_centers = 0.5 * (edges[:-1] + edges[1:])
     return {"k": k_centers.detach().cpu(), "psd": psd.detach().cpu()}
+
+
+@torch.no_grad()
+def _flatten_valid_np(arr: np.ndarray, mask: Optional[torch.Tensor], non_neg: bool = True) -> np.ndarray:
+    """ Return 1D numpy array of valid, finite, optionally non-negative pixels"""
+    x = np.nan_to_num(arr.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    if non_neg:
+        x = np.maximum(x, 0.0)
+    if mask is not None:
+        m = mask
+        if isinstance(m, torch.Tensor):
+            if m.dtype != torch.bool:
+                m = m > 0.5
+            # normalize to [H,W]
+            if m.dim() == 4 and m.shape[:2] == (1, 1):
+                m = m.squeeze(0).squeeze(0)
+            elif m.dim() == 3 and m.shape[0] == 1:
+                m = m.squeeze(0)
+            m = m.cpu().numpy().astype(bool)
+        if m.shape != x.shape:
+            m = np.broadcast_to(m, x.shape)
+        x = x[m]
+    else:
+        x = x.reshape(-1)
+    return x
+
+def _write_bins_and_counts_csv(tables_dir: "Path", bins: np.ndarray, counts: Dict[str, np.ndarray]) -> None:
+    import csv
+    # bins
+    with open(tables_dir / "pixel_dist_bins.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["bin_left", "bin_right"])
+        for i in range(len(bins) - 1):
+            w.writerow([float(bins[i]), float(bins[i+1])])
+    # each series
+    for name, H in counts.items():
+        with open(tables_dir / f"pixel_dist_{name}.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["bin_idx", "count"])
+            for i, c in enumerate(H.astype(int)):
+                w.writerow([i, int(c)])
+
+def _distribution_metrics(ref: np.ndarray, comp: np.ndarray, eps: float = 1e-12) -> Dict[str, float]:
+    """
+    Compute Wasserstein-1 (Earth Mover), KS statistic, and KL(ref||comp).
+    KL stabilised with small epsilon on discrete histograms after normalizing to probabilities.
+    NOTE: KL is asymmetric; we use KL(HR||X) where HR is the reference.
+    """
+    if ref.size == 0 or comp.size == 0:
+        return {"wasserstein": float("nan"), "ks_stat": float("nan"), "ks_p": float("nan"), "kl_hr_to_x": float("nan")}
+    try:
+        w = float(_wasserstein(ref, comp))
+    except Exception:
+        w = float("nan")
+    try:
+        # Some SciPy versions return a namedtuple-like object, others a plain tuple.
+        ks_any: Any = _ks2(ref, comp, alternative="two-sided")  # type: ignore[call-arg]
+        if hasattr(ks_any, "statistic") and hasattr(ks_any, "pvalue"):
+            ks_stat = float(getattr(ks_any, "statistic")); ks_p = float(getattr(ks_any, "pvalue"))
+        else:
+            # Fall back to tuple unpacking
+            ks_tup = cast(Tuple[float, float], ks_any)
+            ks_stat = float(ks_tup[0]); ks_p = float(ks_tup[1])
+    except Exception:
+        ks_stat = float("nan"); ks_p = float("nan")
+
+    # KL on *coarsened* support for robustness: use common fixed bins from pooled 99.5th percentile
+    vmax = np.percentile(np.concatenate([ref, comp]), 99.5) if ref.size and comp.size else 1.0
+    vmax = max(1.0, float(vmax))
+    edges = np.linspace(0.0, vmax, 128+1, dtype=np.float32)
+    Hr, _ = np.histogram(ref, bins=edges)
+    Hx, _ = np.histogram(comp, bins=edges)
+    pr = Hr.astype(np.float64); px = Hx.astype(np.float64)
+    pr = pr / max(pr.sum(), 1.0); px = px / max(px.sum(), 1.0)
+    pr = np.clip(pr, eps, 1.0); px = np.clip(px, eps, 1.0)
+    try:
+        kl = float(_kl_entropy(pr, px))
+    except Exception:
+        kl = float("nan")
+    return {"wasserstein": w, "ks_stat": ks_stat, "ks_p": ks_p, "kl_hr_to_x": kl}
+
+
+# --- Insert/replace: compute_and_save_pooled_pixel_distributions and compute_and_save_yearly_maps ---
+
+def compute_and_save_pooled_pixel_distributions(
+    gen_root: str | Path,
+    out_root: str | Path,
+    mask_global: Optional[torch.Tensor] = None,
+    include_lr: bool = True,
+    n_bins: int = 80,
+    vmax_percentile: float = 99.5,
+    save_samples_cap: int = 200_000,
+) -> bool:
+    """
+    Pools valid pixels across all dates from:
+      <gen_root>/{pmm_phys|pmm}/DATE.npz  (key='pmm')
+      <gen_root>/{lr_hr_phys|lr_hr}/DATE.npz (keys: 'hr' and optional 'lr')
+      <gen_root>/lsm/DATE.npz (optional; key 'lsm' or 'lsm_hr')
+    Writes CSVs under <out_root>/tables:
+      - pixel_dist_bins.csv
+      - pixel_dist_hr.csv
+      - pixel_dist_pmm.csv
+      - pixel_dist_lr.csv (optional)
+      - pixel_dist_metrics.csv (Wasserstein, KS, KL vs HR)
+    Returns True iff outputs were written.
+    """
+    gen_root = Path(gen_root)
+    out_root = Path(out_root)
+    tables_dir = out_root / "tables"
+    figs_dir   = out_root / "figures"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    figs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prefer physical-space folders if present
+    pmm_dir  = gen_root / "pmm_phys"
+    lrhr_dir = gen_root / "lr_hr_phys"
+    if not pmm_dir.exists():  pmm_dir  = gen_root / "pmm"
+    if not lrhr_dir.exists(): lrhr_dir = gen_root / "lr_hr"
+    lsm_dir = gen_root / "lsm"
+    if not lsm_dir.exists(): lsm_dir = None
+
+    dates = sorted([p.stem for p in pmm_dir.glob("*.npz")])
+    logger.info("[metrics] pooled-dists: pmm_dir=%s lrhr_dir=%s lsm_dir=%s n_dates=%d",
+                pmm_dir, lrhr_dir, lsm_dir, len(dates))
+    if len(dates) == 0:
+        logger.warning("[metrics] pooled-dists: no dates found → nothing written")
+        return False
+
+    def _get_np(folder: Path, date: str, key: str):
+        p = folder / f"{date}.npz"
+        if not p.exists(): return None
+        try:
+            d = np.load(p, allow_pickle=True)
+            a = d.get(key, None)
+            if a is None: return None
+            return np.nan_to_num(a.squeeze(), nan=0.0, posinf=0.0, neginf=0.0)
+        except Exception:
+            return None
+
+    X_hr, X_pmm, X_lr = [], [], []
+    skipped = 0
+    for d in dates:
+        pmm = _get_np(pmm_dir,  d, "pmm")
+        hr  = _get_np(lrhr_dir, d, "hr")
+        if pmm is None or hr is None:
+            skipped += 1
+            continue
+        lr  = _get_np(lrhr_dir, d, "lr") if include_lr else None
+
+        # optional per-date mask
+        m = None
+        if lsm_dir is not None:
+            m = _get_np(lsm_dir, d, "lsm")
+            if m is None: m = _get_np(lsm_dir, d, "lsm_hr")
+            if m is not None:
+                m = torch.from_numpy((m > 0.5) if isinstance(m, np.ndarray) else m)
+
+        X_hr.append(_flatten_valid_np(hr,  m, non_neg=True))
+        X_pmm.append(_flatten_valid_np(pmm, m, non_neg=True))
+        if lr is not None:
+            X_lr.append(_flatten_valid_np(lr, m, non_neg=True))
+
+    if not X_hr or not X_pmm:
+        logger.warning("[metrics] pooled-dists: no valid HR/PMM vectors after loading; skipped=%d", skipped)
+        return False
+
+    X_hr  = np.concatenate(X_hr,  axis=0)
+    X_pmm = np.concatenate(X_pmm, axis=0)
+    X_lr  = np.concatenate(X_lr, axis=0) if X_lr else None
+
+    # cap samples to limit file size / plotting speed
+    def _cap(x: np.ndarray | None) -> np.ndarray | None:
+        if x is None: return None
+        if save_samples_cap and x.size > save_samples_cap:
+            idx = np.linspace(0, x.size - 1, save_samples_cap).astype(int)
+            return x[idx]
+        return x
+
+    X_hr_c  = _cap(X_hr)
+    X_pmm_c = _cap(X_pmm)
+    X_lr_c  = _cap(X_lr)
+
+    vmax = np.percentile(
+        np.concatenate([a for a in [X_hr_c, X_pmm_c, X_lr_c] if a is not None]),
+        vmax_percentile
+    )
+    vmax = max(1.0, float(vmax))
+    edges = np.linspace(0.0, vmax, int(n_bins) + 1, dtype=np.float32)
+
+    H_hr = H_pmm = H_lr = None
+    counts = {}
+    if X_hr_c is not None:
+        H_hr, _ = np.histogram(X_hr_c, bins=edges)
+        counts["hr"] = H_hr
+    if X_pmm_c is not None:
+        H_pmm, _ = np.histogram(X_pmm_c, bins=edges)
+        counts["pmm"] = H_pmm
+    if X_lr_c is not None:
+        H_lr, _ = np.histogram(X_lr_c, bins=edges)
+        counts["lr"] = H_lr
+
+    _write_bins_and_counts_csv(tables_dir, edges, counts)
+    logger.info("[metrics] pooled-dists: wrote %s", tables_dir / "pixel_dist_bins.csv")
+
+    # distance metrics vs HR
+    rows = []
+    if X_hr_c is not None and X_pmm_c is not None:
+        rows.append({"ref": "hr", "comp": "pmm", **_distribution_metrics(X_hr_c, X_pmm_c)})
+    if X_hr_c is not None and X_lr_c is not None:
+        rows.append({"ref": "hr", "comp": "lr", **_distribution_metrics(X_hr_c, X_lr_c)})
+
+    out_csv = tables_dir / "pixel_dist_metrics.csv"
+    with open(out_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        for r in rows: w.writerow(r)
+    logger.info("[metrics] pooled-dists: wrote %s", out_csv)
+
+    # optional sample NPZ for quick checks
+    np.savez_compressed(
+        figs_dir / "pixel_dist_samples.npz",
+        hr=(X_hr_c if X_hr_c is not None else np.array([], dtype=np.float32)),
+        pmm=(X_pmm_c if X_pmm_c is not None else np.array([], dtype=np.float32)),
+        lr=(X_lr_c if X_lr_c is not None else np.array([], dtype=np.float32))
+    )
+    return True
+
+
+@torch.no_grad()
+def compute_and_save_yearly_maps(
+    gen_root: str | Path,
+    out_root: str | Path,
+    which: Sequence[str] = ("mean","sum","rx1","rx5"),
+    include_lr: bool = True,
+) -> bool:
+    """
+    Aggregate daily HR/PMM (and optional LR) into yearly maps and save under:
+      <out_root>/maps/year_YYYY_{means,sums,rx1,rx5}.npz
+    Each NPZ contains keys: 'hr', 'pmm', and optionally 'lr'.
+    Returns True iff at least one year's maps were written.
+    """
+    gen_root = Path(gen_root)
+    out_root = Path(out_root)
+    maps_dir = out_root / "maps"
+    maps_dir.mkdir(parents=True, exist_ok=True)
+
+    pmm_dir  = gen_root / "pmm_phys"
+    lrhr_dir = gen_root / "lr_hr_phys"
+    if not pmm_dir.exists():  pmm_dir  = gen_root / "pmm"
+    if not lrhr_dir.exists(): lrhr_dir = gen_root / "lr_hr"
+
+    dates = sorted([p.stem for p in pmm_dir.glob("*.npz")])
+    logger.info("[metrics] yearly-maps: pmm_dir=%s lrhr_dir=%s n_dates=%d", pmm_dir, lrhr_dir, len(dates))
+    if len(dates) == 0:
+        logger.warning("[metrics] yearly-maps: no dates found → nothing written")
+        return False
+
+    @dataclass
+    class YearAgg:
+        sum_hr: Optional[np.ndarray] = None
+        sum_pmm: Optional[np.ndarray] = None
+        sum_lr: Optional[np.ndarray] = None
+        n: int = 0
+        rx1_hr: Optional[np.ndarray] = None
+        rx1_pmm: Optional[np.ndarray] = None
+        rx1_lr: Optional[np.ndarray] = None
+        rx5_hr: Optional[np.ndarray] = None
+        rx5_pmm: Optional[np.ndarray] = None
+        rx5_lr: Optional[np.ndarray] = None
+        last5_hr: Deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=5))
+        last5_pmm: Deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=5))
+        last5_lr: Deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=5))
+
+    def _year_from(date_str: str) -> int:
+        try:
+            return int(str(date_str)[:4])
+        except Exception:
+            return -1
+
+    acc: DefaultDict[int, YearAgg] = defaultdict(YearAgg)
+
+    def _get_np(folder: Path, date: str, key: str):
+        p = folder / f"{date}.npz"
+        if not p.exists(): return None
+        try:
+            d = np.load(p, allow_pickle=True)
+            a = d.get(key, None)
+            if a is None: return None
+            return np.nan_to_num(a.squeeze(), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        except Exception:
+            return None
+
+    for d in dates:
+        y = _year_from(d)
+        if y < 0: continue
+        pmm = _get_np(pmm_dir,  d, "pmm")
+        hr  = _get_np(lrhr_dir, d, "hr")
+        if pmm is None or hr is None:
+            continue
+        lr = _get_np(lrhr_dir, d, "lr") if include_lr else None
+
+        A = acc[y]
+        # sums / count
+        A.sum_hr  = hr  if A.sum_hr  is None else (A.sum_hr  + hr)
+        A.sum_pmm = pmm if A.sum_pmm is None else (A.sum_pmm + pmm)
+        if lr is not None:
+            A.sum_lr = lr if A.sum_lr is None else (A.sum_lr + lr)
+        A.n += 1
+
+        # Rx1 (daily max)
+        A.rx1_hr  = hr  if A.rx1_hr  is None else np.maximum(A.rx1_hr,  hr)
+        A.rx1_pmm = pmm if A.rx1_pmm is None else np.maximum(A.rx1_pmm, pmm)
+        if lr is not None:
+            A.rx1_lr = lr if A.rx1_lr is None else np.maximum(A.rx1_lr, lr)
+
+        # Rx5 (rolling 5-day sum over time)
+        A.last5_hr.append(hr); A.last5_pmm.append(pmm)
+        if lr is not None: A.last5_lr.append(lr)
+        if len(A.last5_hr) == 5:
+            s5_hr  = np.sum(np.stack(list(A.last5_hr)),  axis=0)
+            s5_pmm = np.sum(np.stack(list(A.last5_pmm)), axis=0)
+            A.rx5_hr  = s5_hr  if A.rx5_hr  is None else np.maximum(A.rx5_hr,  s5_hr)
+            A.rx5_pmm = s5_pmm if A.rx5_pmm is None else np.maximum(A.rx5_pmm, s5_pmm)
+            if len(A.last5_lr) == 5:
+                s5_lr = np.sum(np.stack(list(A.last5_lr)), axis=0)
+                A.rx5_lr = s5_lr if A.rx5_lr is None else np.maximum(A.rx5_lr, s5_lr)
+
+    wrote_any = False
+    for y, A in acc.items():
+        if A.n <= 0:
+            logger.warning("[metrics] yearly-maps: year %d has no valid days → skipping", y)
+            continue
+        wrote_any = True
+        n = max(1, int(A.n))
+
+        # --- MEAN ---
+        if "mean" in which:
+            out = {}
+            if A.sum_hr  is not None: out["hr"]  = (A.sum_hr  / n).astype(np.float32)
+            if A.sum_pmm is not None: out["pmm"] = (A.sum_pmm / n).astype(np.float32)
+            if A.sum_lr  is not None: out["lr"]  = (A.sum_lr  / n).astype(np.float32)
+            if out:
+                p1 = maps_dir / f"year_{y}_means.npz"
+                p2 = maps_dir / f"year_{y}_mean.npz"
+                np.savez_compressed(p1, **out)
+                np.savez_compressed(p2, **out)
+                logger.info("[metrics] yearly-maps: wrote %s and %s", p1.name, p2.name)
+
+        # --- SUM ---
+        if "sum" in which:
+            out = {}
+            if A.sum_hr  is not None: out["hr"]  = A.sum_hr.astype(np.float32)
+            if A.sum_pmm is not None: out["pmm"] = A.sum_pmm.astype(np.float32)
+            if A.sum_lr  is not None: out["lr"]  = A.sum_lr.astype(np.float32)
+            if out:
+                p1 = maps_dir / f"year_{y}_sums.npz"
+                p2 = maps_dir / f"year_{y}_sum.npz"
+                np.savez_compressed(p1, **out)
+                np.savez_compressed(p2, **out)
+                logger.info("[metrics] yearly-maps: wrote %s and %s", p1.name, p2.name)
+
+        # --- RX1 ---
+        if "rx1" in which and A.rx1_hr is not None:
+            out = {"hr": A.rx1_hr.astype(np.float32)}
+            if A.rx1_pmm is not None: out["pmm"] = A.rx1_pmm.astype(np.float32)
+            if A.rx1_lr  is not None: out["lr"]  = A.rx1_lr.astype(np.float32)
+            p = maps_dir / f"year_{y}_rx1.npz"
+            np.savez_compressed(p, **out)
+            logger.info("[metrics] yearly-maps: wrote %s", p.name)
+
+        # --- RX5 ---
+        if "rx5" in which and A.rx5_hr is not None:
+            out = {"hr": A.rx5_hr.astype(np.float32)}
+            if A.rx5_pmm is not None: out["pmm"] = A.rx5_pmm.astype(np.float32)
+            if A.rx5_lr  is not None: out["lr"]  = A.rx5_lr.astype(np.float32)
+            p = maps_dir / f"year_{y}_rx5.npz"
+            np.savez_compressed(p, **out)
+            logger.info("[metrics] yearly-maps: wrote %s", p.name)
+
+    if wrote_any:
+        logger.info("[metrics] yearly-maps: all done → %s", maps_dir)
+    else:
+        logger.warning("[metrics] yearly-maps: nothing written (no accumulations).")
+    return wrote_any

@@ -30,6 +30,9 @@ import torch
 # --- use the user's canonical implementations ---
 from sbgm.evaluate_sbgm.plot_utils import (
     plot_psd_curves,   # optional; will be tried in a try/except
+    plot_pooled_pixel_distributions,
+    plot_yearly_maps,
+    plot_date_montages
 )
 from sbgm.monitoring import (
     compute_fss_at_scales,        # gen_bt/hr_bt: [B,1,H,W]
@@ -38,14 +41,24 @@ from sbgm.monitoring import (
 )
 from sbgm.evaluate_sbgm.metrics_univariate import (
     reliability_exceedance_lr_binned,  # obs [H,W], ens [M,H,W]
+    compute_isotropic_psd,             # returns {'k', 'psd'}
+    compute_and_save_pooled_pixel_distributions,
+    compute_and_save_yearly_maps,
 )
 
 logger = logging.getLogger(__name__)
 
 # ---------------- I/O helpers ----------------
 def _list_dates(base_dir: Path) -> Iterable[str]:
-    dates = sorted([f.stem for f in (base_dir / 'pmm').glob("*.npz")])
-    logger.info("[baseline_eval] Found %d date files under %s", len(dates), base_dir / 'pmm')
+    p1 = base_dir / 'pmm'
+    p2 = base_dir / 'pmm_phys'
+    s = set()
+    if p1.exists():
+        s.update([f.stem for f in p1.glob("*.npz")])
+    if p2.exists():
+        s.update([f.stem for f in p2.glob("*.npz")])
+    dates = sorted(s)
+    logger.info("[baseline_eval] Found %d date files under {%s,%s}", len(dates), p1, p2)
     return dates
 
 def _load_npz(folder: Path, date: str, key: str):
@@ -74,15 +87,20 @@ def _load_mask(dir_lsm: Path, date: str) -> Optional[torch.Tensor]:
     if not p.exists():
         return None
     try:
-        arr = np.load(p, allow_pickle=True).get('lsm', None) or np.load(p, allow_pickle=True).get('lsm_hr', None)
+        d = np.load(p, allow_pickle=True)
+        arr = d.get('lsm', None)
+        if arr is None:
+            arr = d.get('lsm_hr', None)
         if arr is None:
             return None
-        m = torch.from_numpy(arr).to(torch.bool)
-        # normalize to [H,W]
-        if m.dim() == 4 and m.shape[:2] == (1, 1):
+
+        m = torch.from_numpy(np.asarray(arr))
+        # normalize to [H,W] and boolean
+        if m.dim() == 4 and tuple(m.shape[:2]) == (1, 1):
             m = m.squeeze(0).squeeze(0)
         elif m.dim() == 3 and m.shape[0] == 1:
             m = m.squeeze(0)
+        m = (m > 0.5)
         return m
     except Exception as e:
         logger.warning(f"[baseline_eval] Failed loading mask for {date}: {e}")
@@ -95,9 +113,9 @@ def evaluate_baseline(cfg: dict, baseline_type: str, split: str):
     """
     run_name = cfg.get('baseline', {}).get('experiment_name', f'{baseline_type}_baseline')
 
-    base_root = Path(cfg['paths']['sample_dir']) / 'baselines' / run_name
-    gen_root  = base_root / 'generated_samples'
-    out_root  = base_root / 'evaluation' / split
+    base_root = Path(cfg['paths']['sample_dir'])  
+    gen_root  = base_root  / 'generation' / 'baselines' / baseline_type / split
+    out_root  = base_root / 'evaluation' / 'baselines' / baseline_type / split
     tables_dir = out_root / 'tables'
     figs_dir   = out_root / 'figures'
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -118,13 +136,23 @@ def evaluate_baseline(cfg: dict, baseline_type: str, split: str):
                                 cfg.get('evaluation', {}).get('psd_ignore_low_k_bins', 1)))
 
     # dirs inside gen_root
-    dir_pmm  = gen_root / 'pmm'
-    dir_lrhr = gen_root / 'lr_hr'
-    dir_lsm  = gen_root / 'lsm'
+    if baseline_type in ['qm', 'bilinear']:
+        dir_pmm  = gen_root / 'pmm'
+        dir_lrhr = gen_root / 'lr_hr'
+        dir_lsm  = gen_root / 'lsm'
+    elif baseline_type in ['unet_sr']:
+        dir_pmm  = gen_root / 'pmm_phys'
+        dir_lrhr = gen_root / 'lr_hr_phys'
+        dir_lsm  = gen_root / 'lsm'
+    else:
+        raise ValueError(f"Unknown baseline type: {baseline_type}")
+
+    
 
     dates = list(_list_dates(gen_root))
     if not dates:
         logger.warning("[baseline_eval] No dates found. Nothing to evaluate.")
+        logger.warning(f"[baseline_eval] Root dir to collect from: {gen_root}")
         return {"ok": False, "msg": "no_dates"}
 
     # ---- stack PMM & HR for capability metrics on [B,1,H,W] ----
@@ -189,6 +217,28 @@ def evaluate_baseline(cfg: dict, baseline_type: str, split: str):
                         dx_km=grid_km, seasons=("ALL",), out_dir=str(figs_dir))
     except Exception as e:
         logger.warning(f"[baseline_eval] plot_psd_curves failed: {e}")
+    # Save full isotropic PSD series as CSV, handl plotting in plot_utils
+    try:
+        psd_gen = compute_isotropic_psd(pmm_bt, dx_km=grid_km, mask=mask_bt)
+        psd_hr  = compute_isotropic_psd(hr_bt,  dx_km=grid_km, mask=mask_bt)
+        k = psd_gen["k"].detach().cpu().numpy() 
+        Pg = psd_gen["psd"].detach().cpu().numpy()
+        Ph = psd_hr["psd"].detach().cpu().numpy()
+
+        # Write CSV with columns: k, PSD_gen, PSD_hr
+        out_csv = tables_dir / "psd_curves.csv"
+        with open(out_csv, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(["k","psd_pmm","psd_hr"])
+            for i in range(len(k)):
+                try: 
+                    w.writerow([float(k[i]), float(Pg[i]), float(Ph[i])])
+                except Exception:
+                    # best-effort: skip malformed rows
+                    continue
+        logger.info(f"[eval] Wrote PSD curves to {out_csv}")
+    except Exception as e:
+        logger.warning(f"[eval] Saving PSD curves CSV failed: {e}")
 
     # ---------- P95/P99 & wet-day frequency ----------
     tails = compute_p95_p99_and_wet_day(
@@ -264,6 +314,83 @@ def evaluate_baseline(cfg: dict, baseline_type: str, split: str):
             w = csv.DictWriter(f, fieldnames=header); w.writeheader()
             for r in rows_rel: w.writerow(r)
         logger.info("[baseline_eval] Wrote Reliability → %s", tables_dir / "reliability_bins.csv")
+
+    # ==== Pooled pixel distributions + distribution distances ====
+    try:
+        logger.info("[baseline_eval] Computing pooled pixel distributions ...")
+        # knobs
+        n_bins = int(cfg.get('baseline', {}).get('eval', {}).get('pixel_dist_n_bins', 100))
+        vmax_pct = float(cfg.get('baseline', {}).get('eval', {}).get('pixel_dist_vmax_percentile', 99.5))
+        save_cap = int(cfg.get('baseline', {}).get('eval', {}).get('pixel_dist_save_cap', 1_000_000))
+
+        ok = compute_and_save_pooled_pixel_distributions(
+            gen_root=gen_root,
+            out_root=out_root,
+            mask_global=None, # Land mask already per-date in files
+            include_lr=True,
+            n_bins=n_bins,
+            vmax_percentile=vmax_pct,
+            save_samples_cap=save_cap,
+        )
+        if ok:
+            logger.info("[baseline_eval] Wrote pooled pixel distributionstables under %s", out_root / "tables")
+        else:
+            # List what we expect to read for debug
+            pmm_dir = (gen_root / 'pmm_phys') if (gen_root / 'pmm_phys').exists() else (gen_root / 'pmm')
+            lrhr_dir = (gen_root / 'lr_hr_phys') if (gen_root / 'lr_hr_phys').exists() else (gen_root / 'lr_hr')
+            logger.warning("[baseline_eval] Skipped pooled distributions (none written). Checked dirs: pmm_dir=%s lrhr_dir=%s", pmm_dir, lrhr_dir)
+            ex = list(pmm_dir.glob("*.npz"))[:3]
+            logger.warning(f"[baseline_eval] Example files in pmm_dir: {[str(e.name) for e in ex]}")
+    except Exception as e:
+        logger.warning(f"[baseline_eval] Pooled pixel distributions failed: {e}")
+
+    # ==== Yearly maps of mean, sum, rx1, rx5 ====
+    try:
+        logger.info("[baseline_eval] Computing yearly maps ...")
+        which_maps = tuple(cfg.get('baseline', {}).get('eval', {}).get('yearly_maps', ("mean","sum","rx1","rx5")))
+        ok = compute_and_save_yearly_maps(
+            gen_root=gen_root,
+            out_root=out_root,
+            which=which_maps,
+        )
+        if ok:
+            logger.info("[baseline_eval] Wrote yearly maps under %s", out_root / "maps")
+        else:
+            pmm_dir = (gen_root / 'pmm_phys') if (gen_root / 'pmm_phys').exists() else (gen_root / 'pmm')
+            lrhr_dir = (gen_root / 'lr_hr_phys') if (gen_root / 'lr_hr_phys').exists() else (gen_root / 'lr_hr')
+            logger.warning("[baseline_eval] Yearly maps not written (empty accumulation?). Checked dirs: pmm_dir=%s lrhr_dir=%s", pmm_dir, lrhr_dir)
+    except Exception as e:
+        logger.warning(f"[baseline_eval] Yearly maps failed: {e}")
+        
+    # ==== Optional: post-eval plotting ====
+    try:
+        plot_after = bool(cfg.get('baseline', {}).get('eval', {}).get('plot_after_eval', True))
+        if plot_after:
+            # Baselines overlays are not needed here, as this IS baselines
+            plot_pooled_pixel_distributions(eval_root=str(out_root), baseline_eval_dirs=None)
+            which_maps = tuple(cfg.get('baseline', {}).get('eval', {}).get('yearly_maps', ("mean","sum","rx1","rx5")))
+            plot_yearly_maps(eval_root=str(out_root), years=None, which=which_maps, baselines=None)
+            logger.info("[baseline_eval] Plots written under %s", out_root / "figures")
+    except Exception as e:
+        logger.warning(f"[baseline_eval] Post-eval plotting failed: {e}")
+
+    # ==== Optional date montages (HR | PMM | members | baselines) ====
+    try:
+        montage_cfg = cfg.get("baseline", {}).get('eval', {}).get('montage', {})
+        n_dates = int(montage_cfg.get('n_dates', 3))
+        n_members = int(montage_cfg.get('n_members', 1))
+        if n_dates > 0:
+            sel_dates = dates[:n_dates]
+            plot_date_montages(eval_root=str(out_root),
+                            dates=sel_dates,
+                            baselines=None,
+                            n_members=n_members)
+            logger.info("[baseline_eval] Date montages written under %s", out_root / "figures")
+    except Exception as e:
+        logger.warning(f"[baseline_eval] Date montages plotting failed: {e}")
+
+            
+
 
     # Provenance
     meta = dict(

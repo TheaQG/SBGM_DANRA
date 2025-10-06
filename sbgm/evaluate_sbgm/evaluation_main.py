@@ -13,7 +13,7 @@ import yaml
 
 from sbgm.utils import get_model_string
 from sbgm.training_utils import get_model  # only for model string & dims if needed
-from sbgm.evaluate_sbgm.evaluation import EvaluationRunner, EvaluationConfig
+from sbgm.evaluate_sbgm.evaluation import EvaluationRunner, EvaluationConfig, load_all_baselines
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,18 @@ def evaluation_main(cfg):
         seed=seed,
     )
 
-    runner = EvaluationRunner(cfg_yaml=cfg, eval_cfg=ev_cfg, device=device, mask=mask)
+    # Set up baselines
+    use_baselines = bool(cfg_full_gen_eval.get("compare_with_baselines", True))
+    baseline_names = cfg_full_gen_eval.get("baseline_names", None)  # If None, use all available
+    split = str(cfg_full_gen_eval.get("baseline_split", "test"))
+
+    baseline_data = None
+    if use_baselines:
+
+        baseline_data = load_all_baselines(cfg, split=split, names=baseline_names)
+        logger.info(f"[evaluation_main] Loaded baseline data for {len(baseline_data)} baselines: {list(baseline_data.keys())}")
+
+    runner = EvaluationRunner(cfg_yaml=cfg, eval_cfg=ev_cfg, device=device, mask=mask, baseline_data=baseline_data)
     runner.run_all(do_prob=do_prob, do_cap=do_cap, do_ext=do_ext)
 
     logger.info(f"[evaluation_main] Done. Outputs at: {eval_root}")

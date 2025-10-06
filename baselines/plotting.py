@@ -26,9 +26,11 @@ def _squeeze2d(x: np.ndarray | None):
     if x is None:
         return None
     x = np.asarray(x)
-    if x.ndim == 4:   # [B,1,H,W] -> [H,W]
-        x = x[0, 0]
-    elif x.ndim == 3: # [1,H,W]   -> [H,W]
+    # squeeze singleton axes repeatedly
+    while x.ndim > 2 and 1 in x.shape:
+        x = np.squeeze(x)
+    # If still 3D (e.g., [C,H,W]), pick the first channel
+    if x.ndim == 3 and x.shape[0] <= 4:
         x = x[0]
     return x
 

@@ -59,6 +59,6 @@ class TinyUNet(nn.Module):
         y = self.head(h)
         if self.residual and x.shape[1] == y.shape[1]:
             y = y + x[:, :y.shape[1]]
-        return torch.clamp(y, min=0.0)  # Ensure non-negative output
+        return y  # Do NOT clamp during training if targets are scaled
 
             

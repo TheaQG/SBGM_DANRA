@@ -4,12 +4,113 @@ import numpy as np
 import json
 import logging
 from pathlib import Path
+from typing import Callable, Optional, Tuple
 import torch, torch.nn as nn, torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
+
 from baselines.unet_sr.model import TinyUNet
 from baselines.plotting import plotting_enabled, plotting_params, resolve_samples_dir, plot_triplet
 
+from sbgm.special_transforms import build_back_transforms_from_stats
+
 logger = logging.getLogger(__name__)
+
+# --- helper to construct back-transforms (mirrors generation.py logic)
+def _build_back_transforms(cfg: dict):
+    """
+    Build callable back-transforms:
+      - 'bt_gen'     : generated → physical
+      - 'bt_hr'      : HR       → physical
+      - 'bt_lr_HR'   : LR (HR/HR+LR-scaled) → physical
+      - 'bt_lr_LR'   : LR (LR-only scaled)  → physical
+    """
+    full_domain_dims_hr = cfg['highres'].get('full_domain_dims', None)
+    full_domain_dims_str_hr = f"{full_domain_dims_hr[0]}x{full_domain_dims_hr[1]}" if full_domain_dims_hr is not None else "full_domain"
+    crop_region_hr = cfg['highres'].get('cutout_domains', None)
+    crop_region_hr_str = '_'.join(map(str, crop_region_hr)) if crop_region_hr is not None else 'no_crop'
+
+    full_domain_dims_lr = cfg['lowres'].get('full_domain_dims', None)
+    full_domain_dims_str_lr = f"{full_domain_dims_lr[0]}x{full_domain_dims_lr[1]}" if full_domain_dims_lr is not None else "full_domain"
+    crop_region_lr = cfg['lowres'].get('cutout_domains', None)
+    crop_region_lr_str = '_'.join(map(str, crop_region_lr)) if crop_region_lr is not None else 'no_crop'
+
+    bt_all = build_back_transforms_from_stats(
+        hr_var=cfg['highres']['variable'],
+        hr_model=cfg['highres']['model'],
+        domain_str_hr=full_domain_dims_str_hr,
+        crop_region_str_hr=crop_region_hr_str,
+        hr_scaling_method=cfg['highres']['scaling_method'],
+        hr_buffer_frac=cfg['highres'].get('buffer_frac', 0.0),
+        lr_vars=cfg['lowres']['condition_variables'],
+        lr_model=cfg['lowres']['model'],
+        domain_str_lr=full_domain_dims_str_lr,
+        crop_region_str_lr=crop_region_lr_str,
+        lr_scaling_methods=cfg['lowres']['scaling_methods'],
+        lr_buffer_frac=cfg['lowres'].get('buffer_frac', 0.0),
+        split=cfg.get('transforms', {}).get('scaling_split', 'train'),
+        stats_dir_root=cfg['paths']['stats_load_dir'],
+        eps=cfg.get('transforms', {}).get('prcp_eps', 0.01),
+    )
+
+    logger.info("[UNetSR][bt] keys: %s", list(bt_all.keys()))
+    hr_var = cfg['highres']['variable']
+
+    # Heuristics to pick LR inverses:
+    # - HR-flavored inverse: keys that mention 'hr_lr'/'hrlr' or 'hr' along with the LR/target var
+    # - LR-flavored inverse: keys that mention 'lr' (but not 'hr_lr') with the LR/target var
+    
+    def pick_lr(bt_dict: dict, prefer: str) -> Tuple[Optional[Callable], Optional[str]]:
+        prefer = (prefer or "HR").upper()
+        keys = [k for k in bt_dict.keys() if (hr_var.lower() in k.lower()) and ('lr' in k.lower())]
+        if not keys:
+            return None, None
+
+        def score_hr(k: str) -> int:
+            kl = k.lower()
+            s = 0
+            if ('hr_lr' in kl) or ('hrlr' in kl) or ('hr+lr' in kl): s += 10
+            if 'hr' in kl: s += 3
+            if 'lr' in kl: s += 1
+            return s
+
+        def score_lr(k: str) -> int:
+            kl = k.lower()
+            s = 0
+            # prefer pure-lr mention without 'hr_lr'
+            if 'lr' in kl: s += 3
+            if ('hr_lr' in kl) or ('hrlr' in kl) or ('hr+lr' in kl): s -= 5
+            if 'hr' in kl: s -= 1
+            return s
+
+        if prefer == "HR":
+            cand = sorted(keys, key=lambda k: (-score_hr(k), k))
+        else:
+            cand = sorted(keys, key=lambda k: (-score_lr(k), k))
+
+        for k in cand:
+            fn = bt_dict.get(k, None)
+            if callable(fn): return fn, k
+
+        # fallback: any callable among keys
+        for k in keys:
+            fn = bt_dict.get(k, None)
+            if callable(fn): return fn, k
+        return None, None
+
+    bt_gen = bt_all.get('generated', None)
+    bt_hr  = bt_all.get(f"{hr_var}_hr", None)
+
+    bt_lr_HR, key_hr = pick_lr(bt_all, "HR")
+    bt_lr_LR, key_lr = pick_lr(bt_all, "LR")
+
+    logger.info("[UNetSR][bt] chosen: bt_gen=%s  bt_hr=%s  bt_lr_HR=%s(%s)  bt_lr_LR=%s(%s)",
+                'ok' if callable(bt_gen) else None,
+                'ok' if callable(bt_hr) else None,
+                'ok' if callable(bt_lr_HR) else None, key_hr,
+                'ok' if callable(bt_lr_LR) else None, key_lr)
+
+    return {"bt_gen": bt_gen, "bt_hr": bt_hr, "bt_lr_HR": bt_lr_HR, "bt_lr_LR": bt_lr_LR}
+
 
 def evaluate(model, loader, loss_fn, device):
     """
@@ -47,6 +148,33 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
     (out_root / 'lsm').mkdir(parents=True, exist_ok=True)
     (out_root / 'meta').mkdir(parents=True, exist_ok=True)
 
+    # physical-space dirs (mirror generation.py)
+    (out_root / 'pmm_phys').mkdir(parents=True, exist_ok=True)
+    (out_root / 'lr_hr_phys').mkdir(parents=True, exist_ok=True)
+
+    # build back-transforms
+    bt = _build_back_transforms(cfg)
+    bt_gen   = bt.get("bt_gen", None)
+    bt_hr    = bt.get("bt_hr",  None)
+    bt_lr_HR = bt.get("bt_lr_HR", None)
+    bt_lr_LR = bt.get("bt_lr_LR", None)
+
+    # Map channel 0 based on how LR was scaled for training
+    main_scale = (cfg.get('lowres', {}).get('lr_main_var_scale', 'HR') or 'HR').upper()
+    # Treat "HR_LR" same as "HR" (your note) NOTE: needs to change when full HR_LR stats calculated.
+    if main_scale == "HR_LR":
+        main_scale = "HR"
+
+    dual_lr = bool(cfg.get('lowres', {}).get('dual_lr', False))
+
+    # Channel mapping policy:
+    #  - If dual_lr: ch0 uses main_scale inverse; ch1 uses the other inverse (if available)
+    #  - If single LR: use main_scale inverse
+    logger.info("[UNetSR][save] LR mapping policy: dual_lr=%s, lr_main_var_scale=%s", dual_lr, main_scale)
+
+    if bt_gen is None or bt_hr is None:
+        logger.warning("[UNetSR][save] Back-transform functions missing (bt_gen=%s, bt_hr=%s). Physical outputs will be skipped.", bt_gen, bt_hr)
+
     # plotting setup (optional)
     want_plot = plotting_enabled(cfg)
     params = plotting_params(cfg) if want_plot else {}
@@ -68,18 +196,86 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
             y_np = y.cpu().numpy()
             lsm_np = lsm.cpu().numpy()
             lr_np  = batch.lr_up.cpu().numpy()
-
+            
             if b_idx == 0:
                 B, _, H, W = yhat.shape if isinstance(yhat, np.ndarray) else (len(dates),) + tuple(batch.y.shape[1:])
                 logger.info(f"[UNetSR][save] First batch: B={len(dates)}, HxW~{batch.y.shape[-2:]}")
             for i, d in enumerate(dates):
+                # --- Save model-space outputs
                 np.savez_compressed(out_root / 'pmm' / f'{d}.npz', pmm=yhat[i:i+1])
                 np.savez_compressed(out_root / 'lr_hr' / f'{d}.npz', hr=y_np[i:i+1], lr_hr=lr_np[i:i+1])
                 np.savez_compressed(out_root / 'lsm' / f'{d}.npz', lsm=lsm_np[i:i+1])
+
+                # Initialize possibly unbound variables
+                pmm_phys_np = None
+                hr_phys_np = None
+                lr_phys_np = None
+                lr0_phys_np = None
+                lr1_phys_np = None
+
+                # --- optionally save physical-space using back-transforms
+                try:
+                    if (bt_gen is not None) and (bt_hr is not None):
+                        yhat_t = torch.from_numpy(yhat[i:i+1])
+                        hr_t   = torch.from_numpy(y_np[i:i+1])
+
+                        pmm_phys = bt_gen(yhat_t) if callable(bt_gen) else None
+                        hr_phys  = bt_hr(hr_t)    if callable(bt_hr)  else None
+
+                        lr0_phys = lr1_phys = None
+                        if lr_np is not None:
+                            lr_t_full = torch.from_numpy(lr_np[i:i+1])  # [1,C,H,W]
+                            if dual_lr and lr_t_full.shape[1] >= 2:
+                                ch0 = lr_t_full[:, 0:1]
+                                ch1 = lr_t_full[:, 1:2]
+                                # Channel 0 uses main_scale
+                                if main_scale == "HR" and callable(bt_lr_HR):
+                                    lr0_phys = bt_lr_HR(ch0)
+                                elif main_scale == "LR" and callable(bt_lr_LR):
+                                    lr0_phys = bt_lr_LR(ch0)
+                                # Channel 1 uses the other, if available
+                                if main_scale == "HR" and callable(bt_lr_LR):
+                                    lr1_phys = bt_lr_LR(ch1)
+                                elif main_scale == "LR" and callable(bt_lr_HR):
+                                    lr1_phys = bt_lr_HR(ch1)
+                            else:
+                                # single-channel LR
+                                ch = lr_t_full
+                                if main_scale == "HR" and callable(bt_lr_HR):
+                                    lr0_phys = bt_lr_HR(ch)
+                                elif main_scale == "LR" and callable(bt_lr_LR):
+                                    lr0_phys = bt_lr_LR(ch)
+
+                        def _to_np(x):
+                            if x is None: return None
+                            if torch.is_tensor(x): x = x.detach().cpu().float()
+                            return x.numpy()
+
+                        pmm_phys_np = _to_np(pmm_phys)
+                        hr_phys_np  = _to_np(hr_phys)
+                        lr0_phys_np = _to_np(lr0_phys)
+                        lr1_phys_np = _to_np(lr1_phys)
+
+                        if pmm_phys_np is not None:
+                            np.savez_compressed(out_root / 'pmm_phys' / f'{d}.npz', pmm=pmm_phys_np)
+
+                        # Write lr_hr_phys: hr + canonical lr + optional lr0/lr1 for debugging
+                        arrs = {}
+                        if hr_phys_np  is not None: arrs['hr']  = hr_phys_np
+                        if lr0_phys_np is not None: arrs['lr']  = lr0_phys_np  # canonical = ch0 mapping
+                        if lr0_phys_np is not None: arrs['lr0'] = lr0_phys_np
+                        if lr1_phys_np is not None: arrs['lr1'] = lr1_phys_np
+                        if arrs:
+                            np.savez_compressed(out_root / 'lr_hr_phys' / f'{d}.npz', **arrs)
+
+                    else:
+                        logger.debug(f"[UNetSR][save] Skipping physical outputs for {d} (no back-transform).")
+                except Exception as e:
+                    logger.warning(f"[UNetSR][save] Physical-space save failed for {d}: {e}")
+                
                 if (i + 1) % 200 == 0:
                     logger.info(f"[UNetSR][save] Saved {i+1} samples in current batch...")
 
-                # optional plotting
                 # optional plotting
                 max_plots = int(params.get("max_plots", 0))
                 if want_plot and plotted < max_plots and sample_dir is not None:
@@ -90,10 +286,19 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
                                 vmax_param = float(vmax_param)
                             except ValueError:
                                 vmax_param = None
-                        cmap_param = params.get("cmap", "Blues")
+                        # choose physical arrays for plotting when available; else fallback to model-space
+                        pmm_plot = pmm_phys_np if (pmm_phys_np is not None) else yhat[i:i+1]
+                        hr_plot  = hr_phys_np  if (hr_phys_np  is not None) else y_np[i:i+1]
+                        # canonical LR = channel 0 mapping (aligned with lr_main_var_scale)
+                        if lr0_phys_np is not None:
+                            lr_plot = lr0_phys_np
+                        elif lr1_phys_np is not None:
+                            lr_plot = lr1_phys_np
+                        else:
+                            lr_plot = lr_np[i:i+1]
                         plot_triplet(hr_var=hr_var,
                             date=d,
-                            pmm=yhat[i:i+1], hr=y_np[i:i+1], lr=lr_np[i:i+1], lsm=lsm_np[i:i+1],
+                            pmm=pmm_plot, hr=hr_plot, lr=lr_plot, lsm=lsm_np[i:i+1],
                             out_dir=sample_dir,
                             vmax=vmax_param,
                             title_suffix="(UNet-SR)"
@@ -145,8 +350,8 @@ def run_unet_sr(cfg, adapter_train, adapter_val, adapter_test, out_root: Path):
     model = TinyUNet(in_ch, out_ch, width=width, depth=depth, act=act, residual=residual).to(device)
 
     # loss/opt
-    loss_fn = nn.L1Loss(reduction='none') if loss_nm.upper()=='L1' else nn.MSELoss(reduction='none')
-    opt = optim.AdamW(model.parameters(), lr=lr)
+    loss_fn = nn.SmoothL1Loss(reduction='none', beta=1.0) if loss_nm == 'L1' else nn.MSELoss(reduction='none')
+    opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0)
     scaler = GradScaler(enabled=amp)
 
     # train loop
