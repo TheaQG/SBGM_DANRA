@@ -5,8 +5,8 @@ import numpy as np
 from data_analysis_pipeline.stats_analysis.data_loading import DataLoader
 from data_analysis_pipeline.comparison.compare_fields import compare_single_day_fields
 from data_analysis_pipeline.comparison.compare_timeseries import compare_over_time
-from data_analysis_pipeline.comparison.compare_distributions import compare_power_spectra, plot_histograms, batch_compare_power_spectra, compute_distribution_stats, compare_distributions, compare_seasonal_distributions
-from sbgm.plotting_utils import plot_sample_with_boxplot
+from data_analysis_pipeline.comparison.compare_distributions import compare_power_spectra, batch_compare_power_spectra, compare_distributions, compare_seasonal_distributions
+from data_analysis_pipeline.comparison.plot_utils import plot_samples_grid
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ def run_comparison_pipeline(cfg):
     show = comparison_cfg.get("show", False)
     save_figures = comparison_cfg.get("save_figures", True)
     save_path = comparison_cfg.get("save_path", "./figures")
+    verbose_data_loading = cfg.get("data", {}).get("verbose", False)
     if split is not None:
         # Append split to save path if not "all"
         save_path = os.path.join(save_path, split) if split != "all" else save_path
@@ -60,18 +61,18 @@ def run_comparison_pipeline(cfg):
         domain_size=domain_size_hr,
         split=split,
         crop_region=crop_hr,
-        verbose=cfg.get("data", {}).get("verbose", False),
+        verbose=verbose_data_loading,
         )
 
     lr_loader = DataLoader(
         base_dir=data_dir,
         n_workers=n_workers,
         variable=variable,
-        model=lowres_cfg["model"],
+        model=model_lr,
         domain_size=domain_size_lr,
         split=split,
         crop_region=crop_lr,
-        verbose=cfg.get("data", {}).get("verbose", False),
+        verbose=verbose_data_loading,
         )
 
     if mode == "field":
@@ -147,7 +148,7 @@ def run_comparison_pipeline(cfg):
                 hr_dict = {d: c for d, c in zip(hr_data["timestamps"], hr_data["cutouts"])}
                 lr_dict = {d: c for d, c in zip(lr_data["timestamps"], lr_data["cutouts"])}
 
-                plot_sample_with_boxplot(
+                plot_samples_grid(
                     hr=hr_dict,
                     lr=lr_dict,
                     hr_model=model_hr,
@@ -156,7 +157,7 @@ def run_comparison_pipeline(cfg):
                     dates=dates,
                     combine_into_grid=field_mode_cfg.get("combine_into_grid", True),
                     save_path=save_path if save_path is not None else f"./figures/comparison/{variable}",
-                    show=show
+                    show=show,
                     )
                 logger.info("=========== Qualitative visual comparison completed ===========\n")
         
@@ -362,13 +363,17 @@ def run_comparison_pipeline(cfg):
                         # PIXEL DISTRIBUTION COMPARISON - SEASONAL #
                         ############################################
                         logger.info(f"\n\n           ### SEASONAL PIXEL DISTRIBUTION COMPARISON ###\n")                        
-
+                        if variable in ['prcp']:
+                            plot_log = True
+                        else:
+                            plot_log = False
                         compare_seasonal_distributions(
                                         hr_data,
                                         lr_data,
                                         model_hr,
                                         model_lr,
                                         variable,
+                                        log_hist=plot_log,
                                         save_path=save_path if save_figures else "",
                                         show=show)
 

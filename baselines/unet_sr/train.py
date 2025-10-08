@@ -159,18 +159,18 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
     bt_lr_HR = bt.get("bt_lr_HR", None)
     bt_lr_LR = bt.get("bt_lr_LR", None)
 
-    # Map channel 0 based on how LR was scaled for training
+    # --- mapping policy driven by YAML ---
+    # Channel-0 follows lr_main_var_scale (HR_LR → HR), channel-1 (if present) uses the other inverse.
     main_scale = (cfg.get('lowres', {}).get('lr_main_var_scale', 'HR') or 'HR').upper()
-    # Treat "HR_LR" same as "HR" (your note) NOTE: needs to change when full HR_LR stats calculated.
-    if main_scale == "HR_LR":
-        main_scale = "HR"
-
+    if main_scale in ('HR_LR', 'HRLR', 'HR+LR'):
+        main_scale = 'HR'
     dual_lr = bool(cfg.get('lowres', {}).get('dual_lr', False))
 
-    # Channel mapping policy:
-    #  - If dual_lr: ch0 uses main_scale inverse; ch1 uses the other inverse (if available)
-    #  - If single LR: use main_scale inverse
-    logger.info("[UNetSR][save] LR mapping policy: dual_lr=%s, lr_main_var_scale=%s", dual_lr, main_scale)
+    # Which LR channel to plot if dual (0 or 1)
+    plot_ch = int(cfg.get('visualization', {}).get('plot_dual_lr_channel', 0))
+
+    logger.info("[UNetSR][save] LR policy: dual_lr=%s, lr_main_var_scale=%s, plot_ch=%d",
+                dual_lr, main_scale, plot_ch)
 
     if bt_gen is None or bt_hr is None:
         logger.warning("[UNetSR][save] Back-transform functions missing (bt_gen=%s, bt_hr=%s). Physical outputs will be skipped.", bt_gen, bt_hr)
@@ -222,18 +222,20 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
                         pmm_phys = bt_gen(yhat_t) if callable(bt_gen) else None
                         hr_phys  = bt_hr(hr_t)    if callable(bt_hr)  else None
 
+                        # --- LR channels → physical ---
                         lr0_phys = lr1_phys = None
                         if lr_np is not None:
                             lr_t_full = torch.from_numpy(lr_np[i:i+1])  # [1,C,H,W]
-                            if dual_lr and lr_t_full.shape[1] >= 2:
+                            C = lr_t_full.shape[1]
+                            if C >= 1:
                                 ch0 = lr_t_full[:, 0:1]
-                                ch1 = lr_t_full[:, 1:2]
-                                # Channel 0 uses main_scale
                                 if main_scale == "HR" and callable(bt_lr_HR):
                                     lr0_phys = bt_lr_HR(ch0)
                                 elif main_scale == "LR" and callable(bt_lr_LR):
                                     lr0_phys = bt_lr_LR(ch0)
-                                # Channel 1 uses the other, if available
+                            if dual_lr and C >= 2:
+                                ch1 = lr_t_full[:, 1:2]
+                                # channel-1 is the complementary scale if available
                                 if main_scale == "HR" and callable(bt_lr_LR):
                                     lr1_phys = bt_lr_LR(ch1)
                                 elif main_scale == "LR" and callable(bt_lr_HR):
@@ -289,13 +291,17 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
                         # choose physical arrays for plotting when available; else fallback to model-space
                         pmm_plot = pmm_phys_np if (pmm_phys_np is not None) else yhat[i:i+1]
                         hr_plot  = hr_phys_np  if (hr_phys_np  is not None) else y_np[i:i+1]
-                        # canonical LR = channel 0 mapping (aligned with lr_main_var_scale)
-                        if lr0_phys_np is not None:
-                            lr_plot = lr0_phys_np
-                        elif lr1_phys_np is not None:
-                            lr_plot = lr1_phys_np
+                        # LR panel choice: channel selected by visualization.plot_dual_lr_channel
+                        if dual_lr:
+                            if plot_ch == 0 and lr0_phys_np is not None:
+                                lr_plot = lr0_phys_np
+                            elif plot_ch == 1 and lr1_phys_np is not None:
+                                lr_plot = lr1_phys_np
+                            else:
+                                # fallback to whatever exists, then to model-space
+                                lr_plot = lr0_phys_np if lr0_phys_np is not None else (lr1_phys_np if lr1_phys_np is not None else lr_np[i:i+1])
                         else:
-                            lr_plot = lr_np[i:i+1]
+                            lr_plot = lr0_phys_np if lr0_phys_np is not None else lr_np[i:i+1]
                         plot_triplet(hr_var=hr_var,
                             date=d,
                             pmm=pmm_plot, hr=hr_plot, lr=lr_plot, lsm=lsm_np[i:i+1],

@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable
 
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -61,27 +62,49 @@ def plot_difference_map(
         save_path (str, optional): Path to save the plot. If None, the plot is shown instead.
     """
     diff_map = data_model1 - data_model2
+    unit = get_unit_for_variable(variable)
 
-    data_list = [data_model1, data_model2, diff_map]
-    title_list = [f'{variable} - {model1}', f'{variable} - {model2}', f'{variable} - Difference ({model1} - {model2})']
-    
+    # Shared vmin/vmax for HR/LR panels
+    finite1 = np.asarray(data_model1)[np.isfinite(data_model1)]
+    finite2 = np.asarray(data_model2)[np.isfinite(data_model2)]
+    if finite1.size and finite2.size:
+        vmin = min(finite1.min(), finite2.min())
+        vmax = max(finite1.max(), finite2.max())
+    else:
+        vmin, vmax = None, None
+
+    # Symmetric range for the difference
+    finite_diff = np.asarray(diff_map)[np.isfinite(diff_map)]
+    dmax = float(np.max(np.abs(finite_diff))) if finite_diff.size else None
+
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
     axs = axs.ravel()  # Flatten
 
-    for i, ax in enumerate(axs):
-        im = ax.imshow(data_list[i], cmap='bwr' if i == 2 else get_cmap_for_variable(variable))
-        ax.invert_yaxis()
+    panels = [
+        (data_model1, f'{variable} - {model1}', get_cmap_for_variable(variable), (vmin, vmax)),
+        (data_model2, f'{variable} - {model2}', get_cmap_for_variable(variable), (vmin, vmax)),
+        (diff_map, f'{variable} - Difference ({model1} - {model2})', 'bwr', (-dmax, dmax) if dmax is not None else (None, None))
+    ]
+
+    for ax, (arr, ttl, cmap, lims) in zip(axs, panels):
+        vmin_i, vmax_i = lims
+        im = ax.imshow(arr, cmap=cmap, vmin=vmin_i, vmax=vmax_i, origin='lower')
         ax.set_xticks([])
         ax.set_yticks([])
-        plt.colorbar(im, ax=ax, orientation='vertical', fraction=0.02, pad=0.04, label=f"[{get_unit_for_variable(variable)}]")
-        ax.set_title(title_list[i])
+        ax.set_title(ttl)
+
+        # Compact, consistent colorbars using axes_grid1 (same width across panels)
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="3.5%", pad=0.05)
+        cb = plt.colorbar(im, cax=cax, orientation="vertical")
+        cb.set_label(f"[{unit}]" if unit else "")
 
     fig.suptitle(title, fontsize=16)
-    fig.tight_layout()
-
+    
     if save_path:
-        plt.savefig(save_path + f"/{variable}_{model1}_vs_{model2}_difference_map.png", dpi=300, bbox_inches='tight')
-        logger.info(f"      Saved difference map to {save_path}/{variable}_{model1}_vs_{model2}_difference_map.png")
+        out = f"{save_path}/{variable}_{model1}_vs_{model2}_difference_map.png"
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        logger.info(f"      Saved difference map to {out}")
     if show:
         plt.show()
     plt.close()

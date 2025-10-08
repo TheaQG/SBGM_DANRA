@@ -1,3 +1,5 @@
+run_name: comparison_run_001  # Name for this comparison run
+
 comparison:
   variables: [temp, prcp]             # Variable to compare (must exist in both HR and LR)
   transformations: {prcp: log_zscore, temp: zscore} # Per-variable transformations

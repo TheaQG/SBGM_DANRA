@@ -364,12 +364,12 @@ baseline:
     grid_km_per_px: 2.5
     fss_scales_km: [5, 10, 20]
     thresholds_mm: [1.0, 5.0, 10.0]
-    wet_threshold_mm: 1.0
+    wet_threshold_mm: 0.1
     reliability_bins: 10
     psd_ignore_low_k_bins: 1
 
-    pixel_dist_bins: 100 # Number of bins for pixel-wise distribution histograms
-    pixel_dist_vmax_percentile: 99.9 # Percentile for vmax in pixel-wise distribution histograms
+    pixel_dist_bins: 200 # Number of bins for pixel-wise distribution histograms
+    pixel_dist_vmax_percentile: 99.5 # Percentile for vmax in pixel-wise distribution histograms
     pixel_dist_save_cap: 20_000_000 # Cap on number of pixels to use for pixel-wise distribution histograms (for memory control)
     yearly_maps: ["mean","sum","rx1","rx5"] # Which yearly maps to compute and plot
     plot_after_eval: true # Whether to plot evaluation results after evaluation

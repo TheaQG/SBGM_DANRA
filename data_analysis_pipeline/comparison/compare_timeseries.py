@@ -6,6 +6,7 @@ Time series comparison module (pandas-free).
 import logging
 import numpy as np
 import matplotlib.pyplot as plt
+import datetime as _dt
 from data_analysis_pipeline.comparison.compare_fields import compute_field_stats
 
 # Setup logging
@@ -16,6 +17,117 @@ formatter = logging.Formatter("[%(levelname)s] %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+# --- Detect and normalize input structures ---
+
+def _looks_like_date_key(k):
+    if isinstance(k, (_dt.date, _dt.datetime, np.datetime64)):
+        return True
+    if isinstance(k, str):
+        s = k.strip().replace("-", "")
+        if len(s) == 8:
+            try:
+                _dt.datetime.strptime(s, "%Y%m%d")
+                return True
+            except Exception:
+                pass
+    return False
+
+def _is_array_like(v):
+    try:
+        return hasattr(v, "__array__") or hasattr(v, "shape") or isinstance(v, (list, tuple))
+    except Exception:
+        return False
+
+def _as_ts_and_cutouts(d: dict):
+    """
+    Normalize different input shapes to (timestamps_list, cutouts_list).
+    Supports:
+      A) {'timestamps': [...], 'cutouts': [...]}
+      B) {date_key -> 2D array}
+    Returns ([], []) if nothing recognized.
+    """
+    if not isinstance(d, dict):
+        return [], []
+
+    # Case A: parallel arrays
+    ts = d.get("timestamps")
+    cu = d.get("cutouts")
+    if ts is None:
+        for alias in ["dates", "date_list", "date_array", "times", "time"]:
+            if alias in d:
+                ts = d[alias]
+                break
+    if ts is not None and cu is not None and hasattr(ts, "__len__") and hasattr(cu, "__len__") and len(ts) == len(cu) and len(ts) > 0:
+        return list(ts), list(cu)
+
+    # Case B: dict keyed by dates
+    meta = {"timestamps","dates","date_list","date_array","times","time","cutouts","X","Y","meta","attrs"}
+    candidates = [(k, v) for k, v in d.items() if k not in meta]
+    if candidates and all(_looks_like_date_key(k) and _is_array_like(v) for k, v in candidates[:min(10, len(candidates))]):
+        def _sort_key(x):
+            if isinstance(x, (_dt.date, _dt.datetime)):
+                return x.toordinal()
+            if isinstance(x, np.datetime64):
+                return int(x.astype("datetime64[D]").astype(int))
+            s = str(x).replace("-", "")
+            try:
+                return _dt.datetime.strptime(s, "%Y%m%d").toordinal()
+            except Exception:
+                return hash(s)
+        candidates.sort(key=lambda kv: _sort_key(kv[0]))
+        ks = [k for k, _ in candidates]
+        vs = [v for _, v in candidates]
+        return ks, vs
+
+    return [], []
+
+def _extract_timestamps(d: dict):
+    """
+    Robustly extract a list of timestamps from a data dict that may use
+    different key names. Returns [] if none found.
+    """
+    if d is None:
+        return []
+    for k in ["timestamps", "dates", "date", "date_list", "date_array", "time", "times"]:
+        ts = d.get(k, [])
+        # Accept numpy arrays or lists; ignore scalars
+        if ts is not None and hasattr(ts, "__len__") and len(ts) > 0:
+            return list(ts)
+    # Diagnostics
+    logger.debug(f"_extract_timestamps: available keys={list(d.keys())}")
+    return []
+
+# Helper: normalize various date types to 'YYYYMMDD' string
+def _normalize_date_key(d):
+    """
+    Return a canonical 'YYYYMMDD' string for a variety of input date types:
+    - datetime.date/datetime.datetime
+    - numpy.datetime64
+    - 'YYYYMMDD' or 'YYYY-MM-DD' strings
+    - Falls back to naive string slicing for other types
+    """
+    try:
+        # Python datetime/date
+        if isinstance(d, (_dt.datetime, _dt.date)):
+            return d.strftime("%Y%m%d")
+        # Numpy datetime64 -> 'YYYY-MM-DD'
+        if isinstance(d, np.datetime64):
+            s = np.datetime_as_string(d, unit='D')
+            return s.replace("-", "")
+        # String inputs
+        if isinstance(d, str):
+            s = d.strip()
+            if "-" in s:
+                s = s.replace("-", "")
+            return s[:8]
+    except Exception:
+        pass
+    # Fallback
+    s = str(d)
+    if "-" in s:
+        s = s.replace("-", "")
+    return s[:8]
+
 
 def compute_daily_metrics_over_time(dict_data1, dict_data2):
     """
@@ -24,21 +136,49 @@ def compute_daily_metrics_over_time(dict_data1, dict_data2):
     """
     timeseries = []
 
-    timestamps1 = dict_data1.get("timestamps", [])
-    timestamps2 = dict_data2.get("timestamps", [])
+    # Support both structures: {"timestamps","cutouts"} OR {date -> 2D array}
+    timestamps1, cutouts1 = _as_ts_and_cutouts(dict_data1)
+    timestamps2, cutouts2 = _as_ts_and_cutouts(dict_data2)
 
-    shared_dates = sorted(set(timestamps1) & set(timestamps2))
+    if not timestamps1 or not timestamps2:
+        logger.warning(
+            "No timestamps found: len(ts1)=%d, len(ts2)=%d | keys1=%s | keys2=%s",
+            len(timestamps1), len(timestamps2),
+            list(dict_data1.keys()) if isinstance(dict_data1, dict) else type(dict_data1).__name__,
+            list(dict_data2.keys()) if isinstance(dict_data2, dict) else type(dict_data2).__name__,
+        )
+        return timeseries
+    
+    # Normalize the timestamps to common key (YYYYMMDD)
+    norm1 = [_normalize_date_key(t) for t in timestamps1]
+    norm2 = [_normalize_date_key(t) for t in timestamps2]
 
-    for i, date in enumerate(shared_dates):
+    # Index maps
+    idx_map1 = {d: i for i, d in enumerate(norm1)}
+    idx_map2 = {d: i for i, d in enumerate(norm2)}
+
+    shared_norm = sorted(set(norm1) & set(norm2))
+    if not shared_norm:
+        logger.warning("No overlapping dates between the two datasets.\n"
+                       f"   Example ts1[0:3] = {norm1[:3]} (types: {[type(t).__name__ for t in timestamps1[:3]]})\n"
+                       f"   Example ts2[0:3] = {norm2[:3]} (types: {[type(t).__name__ for t in timestamps2[:3]]})")
+        return timeseries
+
+    if not cutouts1 or not cutouts2:
+        logger.warning(f"No cutouts found: len(cutouts1)={len(cutouts1)}, len(cutouts2)={len(cutouts2)}")
+        return timeseries
+    
+    for key in shared_norm:
+        i1 = idx_map1[key]
+        i2 = idx_map2[key]
+        data1 = cutouts1[i1]
+        data2 = cutouts2[i2]
+
+        # Parse a plotting-friendly date (datetime.date) if possible
         try:
-            idx1 = timestamps1.index(date)
-            idx2 = timestamps2.index(date)
-        except ValueError as e:
-            logger.warning(f"Date {date} not found in both datasets: {e}")
-            continue
-
-        data1 = dict_data1["cutouts"][idx1]
-        data2 = dict_data2["cutouts"][idx2]
+            date = _dt.datetime.strptime(key, "%Y%m%d").date()
+        except Exception:
+            date = key  # fallback to raw string
 
         stats = compute_field_stats(data1, data2)
         stats['date'] = date
@@ -47,12 +187,13 @@ def compute_daily_metrics_over_time(dict_data1, dict_data2):
     return timeseries
 
 
-def plot_daily_metrics_over_time(timeseries, save_path='./figures', title="Time Series", fname='daily_metrics', show=False):
+def plot_daily_metrics_over_time(timeseries, save_path='./figures', title="Time Series", fname='daily_metrics', show=False, window_days=90):
     """
     Plots time series of each metric over time in subplots.
     """
     if not timeseries or 'date' not in timeseries[0]:
-        raise ValueError("Timeseries must contain 'date' as a key in each dictionary.")
+        logger.warning("Timeseries is empty or lacks 'date' - skipping time series plot.")
+        return  # Stop plotting if no valid data
 
     # Extract metrics and dates
     metrics = [k for k in timeseries[0] if k != 'date']
@@ -67,13 +208,44 @@ def plot_daily_metrics_over_time(timeseries, save_path='./figures', title="Time 
     fig.suptitle(title, fontsize=16)
     axs = axs.flatten()
 
+    # Helper
+    def moving_average(x, w):
+        if w <= 1 or len(x) < w:
+            return None
+        kernel = np.ones(w, dtype=float) / w
+        return np.convolve(np.asarray(x, dtype=float), kernel, mode='valid')
+    
+    # Sort by date to make the moving average meaningful
+    def _to_sort_key(d):
+        if isinstance(d, (_dt.date, _dt.datetime)):
+            return d.toordinal()
+        try:
+            return _dt.datetime.strptime(str(d), "%Y-%m-%d").toordinal()
+        except Exception:
+            try:
+                return _dt.datetime.strptime(str(d), "%Y%m%d").toordinal()
+            except Exception:
+                return hash(str(d))
+    order_idx = sorted(range(len(dates)), key=lambda i: _to_sort_key(dates[i]))
+    dates_sorted = [dates[i] for i in order_idx]
+    values = {metric: [values[metric][i] for i in order_idx] for metric in metrics}
+
     for i, metric in enumerate(metrics):
-        axs[i].plot(dates, values[metric], marker='o', linestyle='-')
+        # Background: all daily points
+        axs[i].scatter(dates_sorted, values[metric], s=6, alpha=0.25)
+        # Rolling mean
+        ma = moving_average(values[metric], window_days)
+        if ma is not None:
+            half = window_days // 2
+            ma_dates = dates_sorted[half:half + len(ma)]
+            axs[i].plot(ma_dates, ma, linewidth=2.0, label=f"{metric} {window_days}-day mean")
         axs[i].set_title(f"{metric}")
-        axs[i].set_xlabel('Date')
+        axs[i].set_xlabel("Date")
         axs[i].set_ylabel(metric)
         axs[i].tick_params(axis='x', rotation=45)
         axs[i].grid(True)
+        if ma is not None:
+            axs[i].legend(loc='best', frameon=False)
 
     # Hide unused subplots
     for j in range(n_metrics, len(axs)):
@@ -95,10 +267,14 @@ def compare_over_time(dict_data1, dict_data2, model1, model2, variable, save_pat
     """
     timeseries = compute_daily_metrics_over_time(dict_data1, dict_data2)
 
+    if not timeseries:
+        logger.warning("No timeseries data computed - skipping plotting and summary stats.")
+        return {}
+
     if show or save_path:
         title = f"Daily Metrics Over Time: {variable} ({model1} vs {model2})"
         fname = f"{variable}_{model1}_vs_{model2}"
-        plot_daily_metrics_over_time(timeseries, title=title, fname=fname, save_path=save_path, show=show)
+        plot_daily_metrics_over_time(timeseries, title=title, fname=fname, save_path=save_path, show=show, window_days=90)
 
     # Compute summary stats
     summary_stats = {}
