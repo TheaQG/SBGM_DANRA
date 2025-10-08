@@ -4,6 +4,7 @@ Time series comparison module (pandas-free).
 """
 
 import logging
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import datetime as _dt
@@ -129,6 +130,148 @@ def _normalize_date_key(d):
     return s[:8]
 
 
+#######################################################################
+# === Daily domain-mean series + aggregation plotting ===
+#######################################################################
+
+def _compute_daily_domain_means(data_dict):
+    """
+    Accepts either {'timestamps','cutouts'} or {date -> 2D array}.
+    Returns (dates_sorted: list[datetime.date], values_sorted: np.ndarray)
+    """
+    ts, cu = _as_ts_and_cutouts(data_dict)
+    if not ts or not cu:
+        return [], np.array([])
+    # Convert to datetime.date and sort
+    def _to_date(x):
+        if isinstance(x, _dt.datetime):
+            return x.date()
+        if isinstance(x, _dt.date):
+            return x
+        if isinstance(x, np.datetime64):
+            s = np.datetime_as_string(x, unit='D')
+            return _dt.datetime.strptime(s, "%Y-%m-%d").date()
+        s = str(x).replace("-", "")
+        try:
+            return _dt.datetime.strptime(s, "%Y%m%d").date()
+        except Exception:
+            # fallback: try ISO
+            try:
+                return _dt.datetime.strptime(str(x), "%Y-%m-%d").date()
+            except Exception:
+                return None
+    pairs = [(d, np.nanmean(c)) for d, c in zip(ts, cu)]
+    pairs = [( _to_date(d), v) for d, v in pairs if _to_date(d) is not None and np.isfinite(v)]
+
+    pairs.sort(key=lambda kv: kv[0].toordinal()) # type: ignore
+    if not pairs:
+        return [], np.array([])
+    dates = [d for d, _ in pairs]
+    vals  = np.array([v for _, v in pairs], dtype=float)
+    return dates, vals
+
+def _aggregate_series(dates, values, freq='monthly', how='mean'):
+    """
+    Aggregate a daily series to monthly or weekly with mean +/- std.
+    Returns (agg_dates, agg_mean, agg_std, counts)
+    """
+    if not dates or values.size == 0:
+        return [], np.array([]), np.array([]), np.array([])
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    if freq == 'weekly':
+        for d, v in zip(dates, values):
+            iso = d.isocalendar()  # (year, week, weekday)
+            key = (iso[0], iso[1])
+            buckets[key].append((d, v))
+        agg_dates = []
+        means, stds, counts = [], [], []
+        for (y, w), items in sorted(buckets.items()):
+            # Find Monday
+            monday = _dt.date.fromisocalendar(y, w, 1)
+            agg_dates.append(monday)
+            arr = np.array([v for _, v in items], dtype=float)
+            mean = np.nanmean(arr) if how == 'mean' else np.nansum(arr)
+            std  = np.nanstd(arr)
+            means.append(mean)
+            stds.append(std)
+            counts.append(arr.size)
+        return agg_dates, np.array(means), np.array(stds), np.array(counts)
+    else:  # monthly
+        for d, v in zip(dates, values):
+            key = (d.year, d.month)
+            buckets[key].append(v)
+        agg_dates = [_dt.date(y, m, 15) for (y, m) in sorted(buckets.keys())]
+        means, stds, counts = [], [], []
+        for (y, m) in sorted(buckets.keys()):
+            arr = np.array(buckets[(y, m)], dtype=float)
+            means.append(np.nanmean(arr) if how == 'mean' else np.nansum(arr))
+            stds.append(np.nanstd(arr))
+            counts.append(arr.size)
+        return agg_dates, np.array(means), np.array(stds), np.array(counts)
+
+def plot_daily_series_dual(
+    dict_data1,
+    dict_data2,
+    model1: str,
+    model2: str,
+    variable: str,
+    save_path: str = "./figures",
+    show: bool = False,
+    fname_prefix: str = "",
+    freqs = ("monthly", "weekly"),
+    how: str = "mean",
+):
+    """
+    New figure: daily domain-mean scatter for each dataset + aggregated (monthly/weekly) mean with errorbars.
+    Produces one figure per frequency in `freqs`.
+    """
+    os.makedirs(save_path, exist_ok=True)
+
+    dates1, vals1 = _compute_daily_domain_means(dict_data1)
+    dates2, vals2 = _compute_daily_domain_means(dict_data2)
+
+    if not dates1 or not dates2:
+        logger.warning("plot_daily_series_dual: empty daily series for one or both datasets; skipping.")
+        return
+
+    # Align the daily series to shared dates for fair overlays (optional)
+    set1 = {d: v for d, v in zip(dates1, vals1)}
+    set2 = {d: v for d, v in zip(dates2, vals2)}
+    shared = sorted([d for d in set(set1.keys()) & set(set2.keys()) if d is not None])
+    dates = shared
+    vals1 = np.array([set1[d] for d in dates], dtype=float)
+    vals2 = np.array([set2[d] for d in dates], dtype=float)
+
+    for freq in freqs:
+        fig, ax = plt.subplots(figsize=(13, 4.6), constrained_layout=True)
+        # Scatter of daily means
+        ax.scatter(np.asarray(dates), vals1, s=4, alpha=0.25, label=f"{model1} daily", color='#1f77b4')
+        ax.scatter(np.asarray(dates), vals2, s=4, alpha=0.25, label=f"{model2} daily", color='#ff7f0e')
+
+        # Aggregated overlays with errorbars
+        d1, m1, s1, _ = _aggregate_series(dates, vals1, freq=freq, how=how)
+        d2, m2, s2, _ = _aggregate_series(dates, vals2, freq=freq, how=how)
+
+        if len(d1) > 0:
+            ax.errorbar(d1, m1, yerr=s1, fmt='-o', linewidth=1.2, markersize=3, # type: ignore
+                        label=f"{model1} {freq} {how}", color='#1f77b4')
+        if len(d2) > 0:
+            ax.errorbar(d2, m2, yerr=s2, fmt='-o', linewidth=1.2, markersize=3, # type: ignore
+                        label=f"{model2} {freq} {how}", color='#ff7f0e')
+
+        ax.set_title(f"{variable} daily domain mean | {model1} vs {model2} ({freq} {how})")
+        ax.set_xlabel("Date"); ax.set_ylabel(variable)
+        ax.grid(True, which='both', alpha=0.3)
+        ax.legend(frameon=False, ncol=2)
+        fname = f"{fname_prefix}{variable}_{model1}_vs_{model2}_daily_series_{freq}.png" if fname_prefix else f"{variable}_{model1}_vs_{model2}_daily_series_{freq}.png"
+        out = os.path.join(save_path, fname)
+        fig.savefig(out, dpi=300, bbox_inches="tight")
+        logger.info(f"      Saved daily series ({freq}) to {out}")
+        if show:
+            plt.show()
+        plt.close(fig)
+
 def compute_daily_metrics_over_time(dict_data1, dict_data2):
     """
     Accepts dictionaries with keys "cutouts" and "timestamps" for two datasets.
@@ -232,13 +375,13 @@ def plot_daily_metrics_over_time(timeseries, save_path='./figures', title="Time 
 
     for i, metric in enumerate(metrics):
         # Background: all daily points
-        axs[i].scatter(dates_sorted, values[metric], s=6, alpha=0.25)
+        axs[i].scatter(dates_sorted, values[metric], s=4, alpha=0.2)
         # Rolling mean
         ma = moving_average(values[metric], window_days)
         if ma is not None:
             half = window_days // 2
             ma_dates = dates_sorted[half:half + len(ma)]
-            axs[i].plot(ma_dates, ma, linewidth=2.0, label=f"{metric} {window_days}-day mean")
+            axs[i].plot(ma_dates, ma, linewidth=1.2, label=f"{metric} {window_days}-day mean", color='gray')
         axs[i].set_title(f"{metric}")
         axs[i].set_xlabel("Date")
         axs[i].set_ylabel(metric)
@@ -275,6 +418,17 @@ def compare_over_time(dict_data1, dict_data2, model1, model2, variable, save_pat
         title = f"Daily Metrics Over Time: {variable} ({model1} vs {model2})"
         fname = f"{variable}_{model1}_vs_{model2}"
         plot_daily_metrics_over_time(timeseries, title=title, fname=fname, save_path=save_path, show=show, window_days=90)
+        
+        # New figure: daily domain-mean series for each dataset with aggregated overlays
+        try:
+            plot_daily_series_dual(
+                dict_data1, dict_data2,
+                model1, model2, variable,
+                save_path=save_path, show=show,
+                fname_prefix="", freqs=("monthly", "weekly"), how="mean",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to plot daily series dual figure: {e}")
 
     # Compute summary stats
     summary_stats = {}
