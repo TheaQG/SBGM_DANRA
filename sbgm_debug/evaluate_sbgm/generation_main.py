@@ -29,7 +29,7 @@ def _build_generation_config(cfg, out_root: Path) -> GenerationConfig:
         output_root=str(out_root),
         ensemble_size=M,
         sampler_steps=int(edm.get('sampling_steps', 40)),
-        seed = int(cfg_full_gen_eval.get('seed', 1234)),
+        seed = int(cfg.evaluation.get('seed', 42)) if 'evaluation' in cfg else 42,
         use_edm = bool(edm.get('enabled', True)),
         sigma_min = float(edm.get('sigma_min', 0.002)),
         sigma_max = float(edm.get('sigma_max', 80.0)),
@@ -49,7 +49,7 @@ def generation_main(cfg):
         Entry point used by launch_generation.run()
     """
     # ----------------------- Seed & logging -----------------------
-    seed = int(cfg.full_gen_eval.get('seed', 1234))
+    seed = int(cfg.evaluation.seed) if "evaluation" in cfg and "seed" in cfg.evaluation else 1234
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)

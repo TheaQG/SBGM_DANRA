@@ -327,7 +327,7 @@ def compute_temporal_corr_series_np(
             "lr": np.asarray(lr_m),
             "dates": dates_m,
             "r": float(r_m) if r_m == r_m else np.nan,
-        }
+        }w
     else:
         out["monthly"] = {"hr": np.array([]), "lr": np.array([]), "dates": [], "r": np.nan}
 
