@@ -41,6 +41,8 @@ def _week_id(dt): # ISO week (year, week)
 def _year_id(dt): # year
     return dt.year
 
+
+
 def build_climatology(ts, timestamps, method="monthly"):
     """
         ts: 1D array (time, )
@@ -190,50 +192,177 @@ def spatial_corr_map(hr_stack, lr_stack, remove_seasonality=None):
 
 
 
-def compute_temporal_correlation(hr_data, lr_data, method='pearson'):
+def compute_temporal_correlation(
+                                hr_data,
+                                lr_data,
+                                method='pearson',
+                                timestamps=None, 
+                                remove_seasonality=None, # None | 'monthly' | 'doy'
+                                agg=None, # None | 'weekly' | 'monthly'
+                                agg_how="mean"
+                                ):
     """
-    Compute correlation between HR and LR time series (domain mean per day).
+        Compute correlation between HR and LR time series (domain mean per day),
+        with optional deseasonalization and temporal aggregation applied *before* computing correlation.
+        Parameters:
+            hr_data, lr_data: dict mapping date -> 2D array (H, W)
+            method: 'pearson' or 'spearman'
+            timestamps: list of datetime objects corresponding to the keys in hr_data/lr_data
+            remove_seasonality: None | 'monthly' | 'doy'
+            agg: None | 'weekly' | 'monthly'
+            agg_how: 'mean' or 'sum' (only relevant if agg is not None)
+        Returns:
+            dict with keys:
+                'correlation': correlation coefficient
+                'series_hr_raw': processed HR time series (1D array)
+                'series_lr_raw': processed LR time series (1D array)
+                'series_hr_proc': processed HR time series after deseasonalization and aggregation (1D array)
+                'series_lr_proc': processed LR time series after deseasonalization and aggregation (1D array)
+                'timestamps_raw': original timestamps (list of datetime)
+                'timestamps_proc': timestamps after aggregation (list of datetime)
     """
-    hr_series = np.array([np.mean(hr_data[date]) for date in sorted(hr_data)])
-    lr_series = np.array([np.mean(lr_data[date]) for date in sorted(lr_data)])
 
+    # Align data by dates
+    dates  = sorted(set(hr_data.keys()) & set(lr_data.keys()))
+    if timestamps is None:
+        timestamps = dates
+    else:
+        # keep only shared
+        timestamps = [d for d in timestamps if d in hr_data and d in lr_data]
+    if not timestamps:
+        return dict(correlation=np.nan, series_hr_raw=np.array([]), series_lr_raw=np.array([]),
+                    series_hr_proc=np.array([]), series_lr_proc=np.array([]),
+                    timestamps_raw=[], timestamps_proc=[])
+    # Domain mean per day (raw)
+    hr_series = np.array([np.nanmean(hr_data[d]) for d in timestamps], dtype=float)
+    lr_series = np.array([np.nanmean(lr_data[d]) for d in timestamps], dtype=float)
+
+    hr_proc, lr_proc, t_proc = hr_series, lr_series, list(timestamps)
+
+    # Deseasonalize first (if requested)
+    if remove_seasonality is not None:
+        hr_proc = remove_seasonality_ts(hr_proc, t_proc, method=remove_seasonality)
+        lr_proc = remove_seasonality_ts(lr_proc, t_proc, method=remove_seasonality)
+
+    # Then aggregate (if requested)
+    if agg is not None:
+        hr_proc, t_proc = aggregate_ts(hr_proc, t_proc, freq=agg, how=agg_how)
+        lr_proc, _      = aggregate_ts(lr_proc, t_proc, freq=agg, how=agg_how)
+
+    # Correlation on processed series
     if method == 'pearson':
-        corr, _ = pearsonr(hr_series, lr_series)
+        r = corrcoef_1d(hr_proc, lr_proc)
     elif method == 'spearman':
-        corr, _ = spearmanr(hr_series, lr_series)
+        m = np.isfinite(hr_proc) & np.isfinite(lr_proc)
+        r, _ = spearmanr(hr_proc[m], lr_proc[m]) if np.sum(m) >= 2 else (np.nan, None)
     else:
         raise ValueError(f"Unknown correlation method: {method}")
 
     return {
-        'correlation': corr,
-        'series_hr': hr_series,
-        'series_lr': lr_series
+        'correlation': float(r) if r is not None else np.nan, # type: ignore
+        'series_hr_raw': hr_series,
+        'series_lr_raw': lr_series,
+        'series_hr_proc': np.asarray(hr_proc),
+        'series_lr_proc': np.asarray(lr_proc),
+        'timestamps_raw': list(timestamps),
+        'timestamps_proc': list(t_proc),
     }
 
-def compute_spatial_correlation(hr_data, lr_data, method="pearson"):
-    """ ¨
-        Compute spatial (grid-point wise) correlation over time.
-        Returns a 2D map of correlation values.
-    """
-    hr_stack = np.array([hr_data[date] for date in sorted(hr_data)])
-    lr_stack = np.array([lr_data[date] for date in sorted(lr_data)])
 
-    if hr_stack.shape != lr_stack.shape:
-        raise ValueError("HR and LR data must have the same shape for spatial correlation.")
-    
+# === Numpy-only temporal corr helper ===
+def compute_temporal_corr_series_np(
+    hr_data,
+    lr_data,
+    *,
+    remove_seasonality: str | None = None,  # None | 'monthly' | 'doy'
+    monthly: bool = True,
+    monthly_how: str = "mean",
+):
+    """
+    Numpy-only routine that builds daily domain-mean series for HR and LR,
+    optionally removes seasonality, then (optionally) aggregates to monthly.
+    Returns a dict:
+      {
+        "raw":     {"hr": np.ndarray, "lr": np.ndarray, "dates": list[datetime], "r": float},
+        "monthly": {"hr": np.ndarray, "lr": np.ndarray, "dates": list[datetime], "r": float}
+      }
+    """
+    # Align dates
+    shared = sorted(set(hr_data.keys()) & set(lr_data.keys()))
+    if not shared:
+        return {
+            "raw": {"hr": np.array([]), "lr": np.array([]), "dates": [], "r": np.nan},
+            "monthly": {"hr": np.array([]), "lr": np.array([]), "dates": [], "r": np.nan},
+        }
+
+    # Daily domain means (aligned)
+    hr_daily = np.array([np.nanmean(hr_data[d]) for d in shared], dtype=float)
+    lr_daily = np.array([np.nanmean(lr_data[d]) for d in shared], dtype=float)
+
+    # Optional deseasonalization (same timestamps for both)
+    if remove_seasonality is not None:
+        hr_anom = remove_seasonality_ts(hr_daily, shared, method=remove_seasonality)
+        lr_anom = remove_seasonality_ts(lr_daily, shared, method=remove_seasonality)
+    else:
+        hr_anom, lr_anom = hr_daily, lr_daily
+
+    # Daily correlation
+    r_raw = corrcoef_1d(hr_anom, lr_anom)
+    out = {
+        "raw": {
+            "hr": hr_anom,
+            "lr": lr_anom,
+            "dates": list(shared),
+            "r": float(r_raw) if r_raw == r_raw else np.nan,
+        }
+    }
+
+    # Monthly aggregation (optional)
+    if monthly:
+        hr_m, dates_m = aggregate_ts(hr_anom, shared, freq="monthly", how=monthly_how)
+        lr_m, _       = aggregate_ts(lr_anom, shared, freq="monthly", how=monthly_how)
+        r_m = corrcoef_1d(hr_m, lr_m)
+        out["monthly"] = {
+            "hr": np.asarray(hr_m),
+            "lr": np.asarray(lr_m),
+            "dates": dates_m,
+            "r": float(r_m) if r_m == r_m else np.nan,
+        }
+    else:
+        out["monthly"] = {"hr": np.array([]), "lr": np.array([]), "dates": [], "r": np.nan}
+
+    return out
+
+
+
+def compute_spatial_correlation(
+    hr_data, lr_data, method="pearson",
+    remove_seasonality: str | None = None,
+    timestamps: list | None = None
+):
+    """
+    Compute per-pixel correlation over time, optionally removing a seasonal
+    cycle ('monthly' or 'doy') for each pixel prior to correlation.
+    """
+    # align dates & build stacks
+    dates_shared = sorted(set(hr_data.keys()) & set(lr_data.keys()))
+    hr_stack = np.array([hr_data[d] for d in dates_shared], dtype=float)
+    lr_stack = np.array([lr_data[d] for d in dates_shared], dtype=float)
+
+    if remove_seasonality is not None:
+        ts_use = timestamps if timestamps is not None else dates_shared
+        hr_stack = remove_seasonality_stack(hr_stack, ts_use, method=remove_seasonality)
+        lr_stack = remove_seasonality_stack(lr_stack, ts_use, method=remove_seasonality)
+
     T, H, W = hr_stack.shape
     corr_map = np.full((H, W), np.nan)
-
     for i in range(H):
         for j in range(W):
-            x = hr_stack[:, i, j]
-            y = lr_stack[:, i, j]
-            if method == 'pearson':
-                corr, _ = pearsonr(x, y)
-            elif method == 'spearman':
-                corr, _ = spearmanr(x, y)
+            x = hr_stack[:, i, j]; y = lr_stack[:, i, j]
+            if method == "pearson":
+                corr = corrcoef_1d(x, y)
             else:
-                raise ValueError(f"Unknown method '{method}' for spatial correlation.")
+                m = np.isfinite(x) & np.isfinite(y)
+                corr, _ = spearmanr(x[m], y[m]) if np.sum(m) >= 2 else (np.nan, None)
             corr_map[i, j] = corr
-
     return corr_map

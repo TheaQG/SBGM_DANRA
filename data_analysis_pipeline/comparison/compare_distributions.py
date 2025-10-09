@@ -522,4 +522,5 @@ def compare_seasonal_distributions(
     if show:
         plt.show()
     plt.close('all')
-    
+
+

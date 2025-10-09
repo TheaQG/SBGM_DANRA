@@ -20,8 +20,12 @@ def _outdir_quicklook(cfg) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
-def _imshow(ax, arr2d, title, vmin=0.0, vmax=None):
-    im = ax.imshow(arr2d, origin="upper", vmin=vmin, vmax=vmax)
+def _imshow(ax, arr2d, title, vmin=None, vmax=None):
+    """Draw a 2D array with provided vmin/vmax (can be shared across panels)."""
+    if vmin is None and vmax is None:
+        im = ax.imshow(arr2d, origin="upper")
+    else:
+        im = ax.imshow(arr2d, origin="upper", vmin=vmin, vmax=vmax)
     ax.set_title(title, fontsize=10)
     ax.set_xticks([]); ax.set_yticks([])
     return im
@@ -168,18 +172,78 @@ def quicklook_from_runner(cfg):
             elif ens_np.ndim == 3:
                 for k in range(min(members_to_show, ens_np.shape[0])):
                     member_maps.append(ens_np[k])
-        # Build figure
+
+        # --- Determine shared color scale across all panels ---
+        def _finite_minmax(arrs):
+            vals = []
+            for a in arrs:
+                if a is None:
+                    continue
+                an = np.asarray(a, dtype=float)
+                m = np.isfinite(an)
+                if m.any():
+                    vals.append(an[m])
+            if not vals:
+                return None, None
+            cat = np.concatenate(vals)
+            return float(np.min(cat)), float(np.max(cat))
+
+        # Assemble all 2D arrays we are going to plot for this date
+        arrays_all = []
+        # Temporarily convert tensors to numpy for min/max if needed
+        def _as2d_np(x):
+            if x is None:
+                return None
+            if isinstance(x, torch.Tensor):
+                x = x.detach().cpu().numpy()
+            if x.ndim == 4 and x.shape[1] == 1:
+                return x[0, 0]
+            if x.ndim == 3:
+                return x[0]
+            if x.ndim == 2:
+                return x
+            return None
+
+        arrays_all.extend([_as2d_np(lr), _as2d_np(hr), _as2d_np(pmm)])
+        arrays_all.extend(member_maps)
+
+        # Priority of explicit limits from cfg:
+        # 1) quicklook['vmin'], quicklook['vmax'] if both provided
+        # 2) quicklook['vmax_mm'] with vmin=0 (useful for precipitation)
+        # 3) data-driven finite min/max
+        vmin_cfg = ql.get("vmin", None)
+        vmax_cfg = ql.get("vmax", None)
+        if vmin_cfg is not None and vmax_cfg is not None:
+            shared_vmin = float(vmin_cfg)
+            shared_vmax = float(vmax_cfg)
+        elif vmax is not None:
+            shared_vmin = 0.0
+            shared_vmax = float(vmax)
+        else:
+            mn, mx = _finite_minmax(arrays_all)
+            shared_vmin, shared_vmax = mn, mx
+
+
+        # Build figure: all panels share the same vmin/vmax and a single colorbar
         cols = [("LR", _to2d(lr)), ("HR", _to2d(hr)), ("PMM", _to2d(pmm))]
         for i, arr in enumerate(member_maps):
             cols.append((f"m{i+1}", arr))
 
         ncols = len(cols)
         fig, axes = plt.subplots(1, ncols, figsize=(3.0*ncols, 3.2))
+        ims = []
         for ax, (title, arr2d) in zip(axes, cols):
             if arr2d is None:
                 ax.axis("off"); ax.set_title(f"{title} (n/a)", fontsize=10)
             else:
-                _imshow(ax, arr2d, title, vmin=0.0, vmax=vmax)
+                ims.append(_imshow(ax, arr2d, title, vmin=shared_vmin, vmax=shared_vmax))
+        # Shared colorbar spanning all axes (use the last image handle)
+        if ims:
+            cbar = fig.colorbar(ims[-1], ax=axes.ravel().tolist(), orientation="vertical",
+                                fraction=0.046, pad=0.04)
+            # optional label from cfg
+            if "cbar_label" in ql:
+                cbar.set_label(str(ql["cbar_label"]))
 
         fig.suptitle(f"{date}", fontsize=11)
         fig.tight_layout(rect=(0, 0, 1, 0.95))

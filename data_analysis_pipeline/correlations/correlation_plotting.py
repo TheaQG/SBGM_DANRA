@@ -1,5 +1,6 @@
 import math
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 import os
 import logging
@@ -23,10 +24,11 @@ logger.addHandler(handler)
 
 # === SPATIAL: grid of subplots (one figure per HR variable) ===
 def plot_spatial_corr_grid(hr_var, lr_to_rmap, *,
-                           vmin=-1.0, vmax=1.0, cmap='RdBu_r',
-                           ncols=3, figsize_per_subplot=(4, 4),
+                           vmin=None,
+                           vmax=None,
+                           cmap='RdBu_r',
+                           ncols=4, figsize_per_subplot=(4.2, 4.2),
                            suptitle=None,
-                           # NEW controls:
                            wspace=0.25, hspace=0.35, title_pad=6,
                            per_subplot_cbar=False,
                            cbar_label="Correlation coefficient",
@@ -51,7 +53,7 @@ def plot_spatial_corr_grid(hr_var, lr_to_rmap, *,
     if per_subplot_cbar:
         # Standard grid; we'll append a cbar to each axes with axes_grid1
         fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False,
-                                 gridspec_kw=dict(wspace=wspace, hspace=hspace))
+                                 gridspec_kw=dict(wspace=wspace, hspace=hspace), constrained_layout=True)
         cax_global = None
     else:
         # Build a gridspec with an extra narrow column for the shared colorbar
@@ -69,6 +71,11 @@ def plot_spatial_corr_grid(hr_var, lr_to_rmap, *,
     im_last = None
 
     for i, lr in enumerate(lr_vars):
+        # If vmin or vmax are None, compute from data
+        if vmin is None or vmax is None:
+            rmap = lr_to_rmap[lr]
+            vmin = np.nanmin(rmap) if vmin is None else vmin
+            vmax = np.nanmax(rmap) if vmax is None else vmax
         rmap = lr_to_rmap[lr]
         ax = axes[i // ncols, i % ncols]
         im_last = ax.imshow(rmap, vmin=vmin, vmax=vmax, cmap=cmap, origin="lower")
@@ -90,7 +97,8 @@ def plot_spatial_corr_grid(hr_var, lr_to_rmap, *,
         cb.set_label(cbar_label)
 
     if suptitle:
-        fig.suptitle(suptitle, y=0.995)
+        fig.suptitle(suptitle, y=0.98)
+        plt.subplots_adjust(top=0.92) # leave space for suptitle
 
     if savepath:
         fig.savefig(savepath, dpi=300)
@@ -103,6 +111,80 @@ def plot_spatial_corr_grid(hr_var, lr_to_rmap, *,
     return fig
 
 # === TEMPORAL: raw + aggregated with optional seasonality removal ===
+# correlation_plotting.py
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+def plot_temporal_correlations_grid(
+    pairs,
+    *, 
+    hr_var_label: str,
+    deseasonalize: bool,
+    out_dir: str,
+    fname_prefix: str,
+    ncols: int = 4, nrows: int = 2,
+    hr_color="tab:red", lr_color="tab:green",
+):
+    """
+        pairs[i]["series"] is expected from compute_temporal_corr_series_np:
+                {"raw": {"hr","lr","dates","r"}, "monthly": {"hr","lr","dates","r"}}
+    """
+    N = len(pairs)
+    ncols = max(1, min(ncols, N))
+    nrows = max(1, nrows if nrows * ncols >= N else int(np.ceil(N / ncols)))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.0*ncols, 2.6*nrows),
+                             sharex=True, constrained_layout=True)
+    if isinstance(axes, np.ndarray):
+        axes = axes.flatten()
+    else:
+        axes = [axes]
+
+    season_tag = "deseasonalized" if deseasonalize else "with seasonality"
+    fig.suptitle(f"Temporal correlations | HR={hr_var_label} ({season_tag})", y=0.98)
+    plt.subplots_adjust(top=0.92) # leave space for suptitle
+
+    for ax, p in zip(axes, pairs):
+        ser = p["series"]
+
+        # Raw daily: faint, thin
+        d_raw = ser["raw"]["dates"]
+        hr_raw = ser["raw"]["hr"]; lr_raw = ser["raw"]["lr"]
+        if len(d_raw) and hr_raw.size and lr_raw.size:
+            ax.plot(d_raw, hr_raw, lw=0.6, alpha=0.25, color=hr_color, label=f'{p["hr_name"]} (raw)')
+            ax.plot(d_raw, lr_raw, lw=0.6, alpha=0.25, color=lr_color, label=f'{p["lr_name"]} (raw)')
+
+        # Monthly: thicker
+        d_m = ser["monthly"]["dates"]
+        hr_m = ser["monthly"]["hr"]; lr_m = ser["monthly"]["lr"]
+        if len(d_m) and hr_m.size and lr_m.size:
+            ax.plot(d_m, hr_m, lw=1.1, alpha=0.9, color=hr_color, label=f'{p["hr_name"]} (monthly)')
+            ax.plot(d_m, lr_m, lw=1.1, alpha=0.9, color=lr_color, label=f'{p["lr_name"]} (monthly)')
+
+        r_raw = ser["raw"]["r"]
+        r_month = ser["monthly"]["r"]
+        ax.set_title(f'{p["hr_name"]} vs {p["lr_name"]} | r(raw)={r_raw:.02f}, r(monthly)={r_month:.02f}', fontsize=9)
+
+        # Ticks: yearly major, label every 5th year to reduce clutter 
+        ax.xaxis.set_major_locator(mdates.YearLocator(base=5))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax.grid(alpha=0.25)
+        # Small, non-intrusive legend
+        ax.legend(loc="upper left", fontsize=7, frameon=False, ncol=2)
+
+    # Only bottom row shows x tick labels & “Date”
+    for a in axes[:-ncols]:
+        a.label_outer()
+    for a in axes[-ncols:]:
+        a.set_xlabel("Date")
+
+    # Save with seasonality indicator
+    suffix = "deseas-yes" if deseasonalize else "deseas-no"
+    fname = f"{fname_prefix}__{suffix}.png"
+    os.makedirs(out_dir, exist_ok=True)
+    fig.savefig(os.path.join(out_dir, fname), dpi=300)
+    plt.close(fig)
+
 def plot_temporal_pair(hr_var, lr_var, hr_ts, lr_ts, timestamps,
                        remove_seasonality=None, agg=None, agg_how="mean",
                        ax=None, colors=None, title=None, save_path=None, show=False):
@@ -125,22 +207,22 @@ def plot_temporal_pair(hr_var, lr_var, hr_ts, lr_ts, timestamps,
 
     created_fig = False
     if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 4))
+        fig, ax = plt.subplots(figsize=(12, 3.2))
         created_fig = True
     else:
         fig = ax.figure
 
-    # background raw series
-    ax.plot(timestamps, hr, label=f"{hr_var} (raw)", alpha=0.3, marker='o', markersize=1, linewidth=0.6)
-    ax.plot(timestamps, lr, label=f"{lr_var} (raw)", alpha=0.3, marker='x', markersize=1, linewidth=0.6)
+    # background raw series (thinner, cleaner)
+    ax.plot(timestamps, hr, label=f"{hr_var} (raw)", alpha=0.25, linewidth=0.6)
+    ax.plot(timestamps, lr, label=f"{lr_var} (raw)", alpha=0.25, linewidth=0.6)
 
     r_agg = np.nan
     if agg is not None:
         hr_a, t_a = aggregate_ts(hr, timestamps, freq=agg, how=agg_how)
         lr_a, _   = aggregate_ts(lr, timestamps, freq=agg, how=agg_how)
         r_agg = corrcoef_1d(hr_a, lr_a)
-        ax.plot(t_a, hr_a, label=f"{hr_var} ({agg})", linewidth=1.5)
-        ax.plot(t_a, lr_a, label=f"{lr_var} ({agg})", linewidth=1.5)
+        ax.plot(t_a, hr_a, label=f"{hr_var} ({agg})", linewidth=1.0)
+        ax.plot(t_a, lr_a, label=f"{lr_var} ({agg})", linewidth=1.0)
 
     # cosmetics
     ax.set_xlabel("Date")
@@ -166,7 +248,7 @@ def plot_temporal_pair(hr_var, lr_var, hr_ts, lr_ts, timestamps,
 
 def plot_temporal_grid(hr_var, lr_to_series, timestamps,
                        remove_seasonality=None, agg=None, agg_how="mean",
-                       ncols=2, figsize_per_subplot=(10, 3), suptitle=None, savepath=None):
+                       ncols=4, figsize_per_subplot=(9, 2.8), suptitle=None, savepath=None):
     """
     lr_to_series: dict {lr_var: (hr_ts, lr_ts)} – both 1D aligned arrays
     Makes one figure with subplots for each LR var.
@@ -177,7 +259,8 @@ def plot_temporal_grid(hr_var, lr_to_series, timestamps,
     nrows = math.ceil(N / ncols)
     fig_w = figsize_per_subplot[0] * ncols
     fig_h = figsize_per_subplot[1] * nrows
-    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False, constrained_layout=True)
+    fig.subplots_adjust(hspace=0.35, wspace=0.5)
 
     for i, lr in enumerate(lr_vars):
         hr_ts, lr_ts = lr_to_series[lr]
@@ -194,6 +277,7 @@ def plot_temporal_grid(hr_var, lr_to_series, timestamps,
 
     if suptitle:
         fig.suptitle(suptitle, y=0.99)
+        plt.subplots_adjust(top=0.92) # leave space for suptitle
     
     if savepath:
         fig.savefig(savepath, dpi=300)

@@ -221,6 +221,7 @@ def plot_daily_series_dual(
     fname_prefix: str = "",
     freqs = ("monthly", "weekly"),
     how: str = "mean",
+    use_shaded: bool = True,
 ):
     """
     New figure: daily domain-mean scatter for each dataset + aggregated (monthly/weekly) mean with errorbars.
@@ -244,21 +245,34 @@ def plot_daily_series_dual(
     vals2 = np.array([set2[d] for d in dates], dtype=float)
 
     for freq in freqs:
-        fig, ax = plt.subplots(figsize=(13, 4.6), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(13, 4.2), constrained_layout=True)
         # Scatter of daily means
-        ax.scatter(np.asarray(dates), vals1, s=4, alpha=0.25, label=f"{model1} daily", color='#1f77b4')
-        ax.scatter(np.asarray(dates), vals2, s=4, alpha=0.25, label=f"{model2} daily", color='#ff7f0e')
+        ax.scatter(np.asarray(dates), vals1, s=1.2, alpha=0.18, label=f"{model1} daily", color='#1f77b4')
+        ax.scatter(np.asarray(dates), vals2, s=1.2, alpha=0.18, label=f"{model2} daily", color='#ff7f0e')
 
-        # Aggregated overlays with errorbars
+        # Aggregated overlays with errorbars or shaded band
         d1, m1, s1, _ = _aggregate_series(dates, vals1, freq=freq, how=how)
         d2, m2, s2, _ = _aggregate_series(dates, vals2, freq=freq, how=how)
 
         if len(d1) > 0:
-            ax.errorbar(d1, m1, yerr=s1, fmt='-o', linewidth=1.2, markersize=3, # type: ignore
-                        label=f"{model1} {freq} {how}", color='#1f77b4')
+            if use_shaded:
+                ax.plot(d1, m1, linewidth=1.4, label=f"{model1} {freq} {how}", color='#1f77b4')
+                ax.fill_between(d1, m1 - s1, m1 + s1, color='#1f77b4', alpha=0.12, linewidth=0) # type: ignore
+            else:
+                ax.errorbar(d1, m1, yerr=s1, fmt='-', linewidth=0.9, markersize=0, # type: ignore
+                            elinewidth=0.6, capsize=1.5, label=f"{model1} {freq} {how}", color='#1f77b4')
         if len(d2) > 0:
-            ax.errorbar(d2, m2, yerr=s2, fmt='-o', linewidth=1.2, markersize=3, # type: ignore
-                        label=f"{model2} {freq} {how}", color='#ff7f0e')
+            if use_shaded:
+                ax.plot(d2, m2, linewidth=1.4, label=f"{model2} {freq} {how}", color='#ff7f0e')
+                ax.fill_between(d2, m2 - s2, m2 + s2, color='#ff7f0e', alpha=0.12, linewidth=0) # type: ignore
+            else:
+                ax.errorbar(d2, m2, yerr=s2, fmt='-o', linewidth=1.2, markersize=3, # type: ignore
+                            label=f"{model2} {freq} {how}", color='#ff7f0e')
+        # Tighten x-limits to data span
+        if len(dates) > 1:
+            xmin = min(dates)
+            xmax = max(dates)
+            ax.set_xlim(xmin, xmax) # type: ignore
 
         ax.set_title(f"{variable} daily domain mean | {model1} vs {model2} ({freq} {how})")
         ax.set_xlabel("Date"); ax.set_ylabel(variable)
@@ -381,7 +395,7 @@ def plot_daily_metrics_over_time(timeseries, save_path='./figures', title="Time 
         if ma is not None:
             half = window_days // 2
             ma_dates = dates_sorted[half:half + len(ma)]
-            axs[i].plot(ma_dates, ma, linewidth=1.2, label=f"{metric} {window_days}-day mean", color='gray')
+            axs[i].plot(ma_dates, ma, linewidth=1.5, label=f"{metric} {window_days}-day mean", color='k')
         axs[i].set_title(f"{metric}")
         axs[i].set_xlabel("Date")
         axs[i].set_ylabel(metric)
@@ -426,6 +440,7 @@ def compare_over_time(dict_data1, dict_data2, model1, model2, variable, save_pat
                 model1, model2, variable,
                 save_path=save_path, show=show,
                 fname_prefix="", freqs=("monthly", "weekly"), how="mean",
+                use_shaded=True,
             )
         except Exception as e:
             logger.warning(f"Failed to plot daily series dual figure: {e}")

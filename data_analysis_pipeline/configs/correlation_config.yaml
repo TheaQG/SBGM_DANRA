@@ -15,7 +15,10 @@ correlation:
     temp: zscore
     cape: log_zscore
     msl: zscore
+    z_pl_250: zscore
     z_pl_500: zscore
+    z_pl_850: zscore
+    z_pl_1000: zscore
   print_results: true
   normalize: true
 
