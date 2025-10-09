@@ -2,176 +2,185 @@
 import os
 import torch
 import logging
+import random
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sbgm.training_utils import get_model_string, get_model, get_optimizer, get_dataloader, get_scheduler
-from sbgm.plotting_utils import plot_sample
-from sbgm.training import TrainingPipeline_general
-from sbgm.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
+from dataclasses import dataclass
+from typing import Optional
+
+from sbgm_debug.training_utils import get_model_string, get_model, get_optimizer, get_dataloader, get_scheduler
+from sbgm_debug.plotting_utils import plot_sample
+from sbgm_debug.training import TrainingPipeline_general
+from sbgm_debug.score_unet import marginal_prob_std_fn, diffusion_coeff_fn
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-def train_main(cfg):
+
+# === Typed params (read once) ===
+@dataclass(frozen=True)
+class TrainParams:
+    experiment_name: str
+    device: str
+    seed: int
+    epochs: int
+    batch_size: int
+    verbose: bool
+    mixed_precision: bool
+    load_checkpoint: Optional[str]
+    eval_use_ema: bool
+
+    # paths
+    path_save: str
+    training_sample_dir: str
+    log_dir: str
+    checkpoint_dir: str
+
+    # visualization (lightweight flags only, not full cfg)
+    plot_initial_sample: bool
+    show_figs: bool
+
+    @staticmethod
+    def from_cfg(cfg: dict) -> "TrainParams":
+        t = cfg["training"]
+        p = cfg["paths"]
+        v = cfg.get("visualization", {})
+        exp = cfg.get("experiment_name", cfg.get("experiment", {}).get("name", "experiment"))
+        ema = t.get("ema", {})
+        return TrainParams(
+            experiment_name = exp,
+            device          = t.get("device", "cuda"),
+            seed            = t.get("seed", 0),
+            epochs          = int(t.get("epochs", 1)),
+            batch_size      = int(t.get("batch_size", 1)),
+            verbose         = bool(t.get("verbose", True)),
+            mixed_precision = bool(t.get("mixed_precision", t.get("use_mixed_precision", True))),
+            load_checkpoint = (t.get("load_checkpoint") if isinstance(t.get("load_checkpoint"), str) else None),
+            eval_use_ema    = bool(ema.get("eval_use_ema", True)),
+            path_save           = p.get("path_save", "."),
+            training_sample_dir = p.get("training_sample_dir", os.path.join(p.get("path_save", "."), "samples")),
+            log_dir             = p.get("log_dir", "./logs"),
+            checkpoint_dir      = p.get("checkpoint_dir", "./checkpoints"),
+            plot_initial_sample = bool(v.get("plot_initial_sample", True)),
+            show_figs           = bool(v.get("show_figs", False)),
+        )
+
+# === Wiring / boundary ===
+def set_global_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+# === Function for building and running the training pipeline ===
+def build_training_run(cfg: dict):
+    """ Read cfg once, construct all dependencies, return a bundle. """
+    P = TrainParams.from_cfg(cfg)
+
+    # Directories
+    model_str = get_model_string(cfg)
+
+    # Prefer explicit training_sample_dir if provided; otherwise derive from path_save
+    base_samples_root = P.training_sample_dir or os.path.join(P.path_save, "samples")
+    samples_dir = os.path.join(base_samples_root, model_str)
+    os.makedirs(samples_dir, exist_ok=True)
+    os.makedirs(P.log_dir, exist_ok=True)
+    os.makedirs(P.checkpoint_dir, exist_ok=True)
+
+    # Reproducibility
+    set_global_seed(P.seed)
+
+    # Device
+    device = torch.device("cuda" if P.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
+
+    # Build dependencies using existing helpers
+    model, _, _ = get_model(cfg)
+    model = model.to(device)
+    optimizer = get_optimizer(cfg, model)
+    scheduler = get_scheduler(cfg, optimizer) if "learning_rate" in cfg.get("training", {}) else None
+    train_dataloader, val_dataloader, gen_dataloader = get_dataloader(cfg)
+
+    # Trainer/pipeline
+    pipeline = TrainingPipeline_general(
+        model=model,
+        marginal_prob_std_fn=marginal_prob_std_fn,
+        diffusion_coeff_fn=diffusion_coeff_fn,
+        optimizer=optimizer,
+        device=device,
+        lr_scheduler=scheduler,
+        cfg=cfg
+    )
+
+    # NOTE: Below this return boundary: DO NOT ACCESS RAW CFG AGAIN!
+    return P, pipeline, train_dataloader, val_dataloader, gen_dataloader, samples_dir
+
+
+
+
+
+def train_main(cfg: dict):
     """
-    Main function to run the training process.
-    
-    Args:
-        cfg (dict): Configuration dictionary containing all necessary parameters.
+    Thin training entrypoint that respects the config boundary:
+        - Parse cfg once (handled in build_training_run)
+        - No raw cfg access below the boundary
+        - Uses TrainingPipeline_general which already parsed & cached settings
     """
 
     logger.info("\n\n=== Starting SBGM_SD Training Pipeline ===")
-    logger.info(f"          Experiment name: {cfg['experiment']['name']}")
 
-    # Set path to figures, samples, losses
-    save_str = get_model_string(cfg)
-    path_samples = os.path.join(cfg['paths']['path_save'], 'samples', save_str)
-    path_figures = os.path.join(path_samples, 'Figures')
-
-    # Make sure figures directory exists
-    os.makedirs(path_figures, exist_ok=True)
-
-    # Read device str from cfg
-    device_str = cfg['training']['device']
-
-    # Set device
-    if device_str == 'cuda':
-        if torch.cuda.is_available():
-            device = torch.device('cuda')
-            logger.info(f"          ▸ Using GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            device = torch.device('cpu')
-            logger.info(f"          ▸ CUDA is not available, using CPU instead.")
-    else:
-        device = torch.device('cpu')
-        logger.info(f"          ▸ Using CPU for training.")
-
-    # Load data
-    train_dataloader, val_dataloader, gen_dataloader = get_dataloader(cfg)
-
-    # # ------------------------------------------------------------------------
-    # # Quick data-loader throughput check: ~100 batches warm-up + timed 
-    # # ------------------------------------------------------------------------
-    # from time import perf_counter
-    # start = perf_counter()
-    # for i, _ in enumerate(train_dataloader):
-    #     if i == 100:
-    #         avg = (perf_counter() - start) / 100
-    #         logger.info(f"          ▸ Dataloader average fetch time ~{avg:.3f} s / batch\n\n")
-
-
-
-    # Examine sample from train dataloader (sample is full batch)
-    sample = train_dataloader.dataset[0]
-    for key, value in sample.items():
+    # Build everything once
+    P, pipeline, train_dataloader, val_dataloader, gen_dataloader, samples_dir = build_training_run(cfg)
+    
+    logger.info(f"          Experiment name: {P.experiment_name}")
+    if torch.cuda.is_available() and P.device.startswith("cuda"):
         try:
-            # Log the shape of the tensor
-            logger.info(f'          {key}: {value.shape}')
-            # Log the device of the tensor
-            logger.info(f'              {key} device: {value.device}')
-        except AttributeError:
-            logger.info(f'          {key}: {value}')
-        if key == 'classifier':
-            logger.info(f'          ▸ Classifier: {value}')
-
-
-    if cfg['visualization']['plot_initial_sample']:
-        fig, _ = plot_sample(sample, cfg)
-        if cfg['visualization']['show_figs']:
-            plt.show()
-        else:
-            plt.close(fig)
-        # Save the figure
-        SAVE_NAME = 'Initial_sample_plot.png'
-        save_path = os.path.join(path_figures, SAVE_NAME)
-        fig.savefig(save_path, bbox_inches='tight', dpi=300)
-        
-        logger.info(f"\n\n          ▸ Saved initial sample plot to {save_path}")
-    
-    
-    #Setup checkpoint path
-    checkpoint_dir = os.path.join(cfg['paths']['path_save'], cfg['paths']['checkpoint_dir'])
-
-    checkpoint_name = save_str + '.pth.tar'
-
-    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
-    
-    # Define the seed for reproducibility, and set seed for torch, numpy and random
-    torch.manual_seed(cfg['training']['seed'])
-    torch.cuda.manual_seed(cfg['training']['seed'])
-    np.random.seed(cfg['training']['seed'])
-
-    # Set torch to deterministic mode, meaning that the same input will always produce the same output
-    torch.backends.cudnn.deterministic = False
-    # Set torch to benchmark mode, meaning that the best algorithm will be chosen for the input
-    torch.backends.cudnn.benchmark = True
-    
-    # Get the model
-    model, checkpoint_path, checkpoint_name = get_model(cfg)
-    model = model.to(device)
-
-    # Get the optimizer
-    optimizer = get_optimizer(cfg, model)
-
-    # Get the learning rate scheduler (if applicable)
-    lr_scheduler_type = cfg['training'].get('lr_scheduler', None)
-    
-    if lr_scheduler_type is not None:
-        logger.info(f"          ▸ Using learning rate scheduler: {lr_scheduler_type}")
-        scheduler = get_scheduler(cfg, optimizer)
+            logger.info(f"          ▸ Using CUDA device: {torch.cuda.get_device_name(0)}")
+        except Exception:
+            logger.info("          ▸ Using CUDA device")
     else:
-        scheduler = None
-        logger.info(f"          ▸ No learning rate scheduler specified, using default learning rate.")
+        logger.info("          ▸ Using CPU device")
 
-    # Define the training pipeline
-    pipeline = TrainingPipeline_general(model=model,
-                                        marginal_prob_std_fn=marginal_prob_std_fn,
-                                        diffusion_coeff_fn=diffusion_coeff_fn,
-                                        optimizer=optimizer,
-                                        device=device,
-                                        lr_scheduler=scheduler,
-                                        cfg=cfg
-                                        )
+    # Peek at the first dataset element (debug-friendly, no cfg usage)
+    sample0 = None
+    try:
+        sample0 = train_dataloader.dataset[0]
+        for key, value in sample0.items():
+            try:
+                logger.info(f"          {key}: {getattr(value, 'shape', None)}")
+            except Exception:
+                logger.info(f"          {key}: {type(value)}")
 
-    
-    # Load checkpoint if it exists
-    if cfg['training']['load_checkpoint'] and os.path.exists(checkpoint_path):
-        logger.info(f"          ▸ Loading pretrained weights from checkpoint {checkpoint_path}")
+        # Optional quick-look plot of the initial sample (best-effort, no crash on failure)
+        if P.plot_initial_sample:
+            try:
+                fig, _ = plot_sample(sample0, cfg)  # plotting_utils currently expects cfg; safe to pass here only
+                save_path = os.path.join(samples_dir, 'Figures')
+                os.makedirs(save_path, exist_ok=True)
+                fig.savefig(os.path.join(save_path, 'Initial_sample_plot.png'), bbox_inches='tight', dpi=300)
+                if P.show_figs:
+                    plt.show()
+                else:
+                    plt.close(fig)
+                logger.info(f"\n\n          ▸ Saved initial sample plot to {os.path.join(save_path, 'Initial_sample_plot.png')}")
+            except Exception as e:
+                logger.warning(f"          ▸ Initial sample plotting failed (continuing): {e}")
+    except Exception as e:
+        logger.warning(f"          ▸ Could not inspect first training sample: {e}")
 
-        pipeline.load_checkpoint(checkpoint_path, load_ema=cfg['training']['load_ema'],)
-    else:
-        logger.info(f"          ▸ No checkpoint found at {checkpoint_path}. Starting training from scratch.")
-
-    
-    # If training on cuda, print device name and empty cache
-    if cfg['training']['device'] == 'cuda' and torch.cuda.is_available():
-        logger.info(f"\n\n          ▸ Using GPU: {torch.cuda.get_device_name(0)}")
-        logger.info(f"          ▸ Model is using {torch.cuda.memory_allocated() / 1e9:.2f} GB of GPU memory.")
-        logger.info(f"          ▸ Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-
-        logger.info(f"\n          ▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-        logger.info(f"          ▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
-        logger.info(f"          ▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
-        torch.cuda.empty_cache()
-    else:
-        logger.info("\n\n          ▸ Using CPU for training.")
-        logger.info(f"          ▸ Number of parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-        logger.info(f"          ▸ Number of trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad and p.requires_grad):,}")
-        logger.info(f"          ▸ Number of non-trainable parameters in model: {sum(p.numel() for p in model.parameters() if not p.requires_grad):,}")
-
-    # Perform training
+    # Start training (no raw cfg below)
     logger.info(f"\n\n          === STARTING TRAINING MAIN LOOP ===\n")
-    pipeline.train(train_dataloader,
-                   val_dataloader,
-                   gen_dataloader,
-                   cfg,
-                   epochs=cfg['training']['epochs'],
-                   verbose=cfg['training']['verbose'],
-                   use_mixed_precision= cfg['training']['use_mixed_precision'],
+    pipeline.train(
+        train_dataloader,
+        val_dataloader,
+        gen_dataloader,
+        epochs=P.epochs,
+        verbose=P.verbose,
+        use_mixed_precision=P.mixed_precision,
     )
-    logger.info("\n\n       === TRAINING COMPLETE ===\n\n")
+    logger.info(f"\n\n          === TRAINING COMPLETE ===\n")
 
 
 

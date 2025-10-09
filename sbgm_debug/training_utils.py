@@ -6,6 +6,7 @@ import logging
 
 import numpy as np
 
+from typing import Optional
 
 from torch.utils.data import DataLoader, Subset, SequentialSampler
 from torch.optim import Adam, SGD, AdamW
@@ -20,7 +21,20 @@ from sbgm.variable_utils import get_units
 from sbgm.special_transforms import build_back_transforms_from_stats
 # from sbgm.evaluation.evaluation import evaluate_model
 
-
+from sbgm_debug.cfg_params import (
+    PathsParams,
+    DataParams,
+    TrainParams,
+    EDMParams,
+    RainGateParams,
+    GuidanceParams,
+    DiagnosticsParams,
+    EndOfEpochParams,
+    VisualizationsParams,
+    ExtremePrcpParams,
+    MonitoringParams,
+    SamplerParams
+)
 
 
 # # Set up logging
@@ -1055,7 +1069,7 @@ def apply_cfg_dropout(
         topo: torch.Tensor | None,
         seasons: torch.Tensor | None,
         lr_ups: torch.Tensor | None,
-        cfg_guidance: dict | None
+        cfg_guidance: GuidanceParams | None = None,
 ):
     """
     Classifier-free guidance style dropout for conditioning signals.
@@ -1086,14 +1100,14 @@ def apply_cfg_dropout(
     Returns:
         Tuple[cond_images, lsm, topo, seasons, lr_ups] with per-sample drops applied.
     """
-    if not cfg_guidance or not cfg_guidance.get('enabled', False):
+    if not cfg_guidance or not cfg_guidance.enabled:
         return cond_images, lsm, topo, seasons, lr_ups # Always return 5 
     
     # Resolve per-group drop probabilities
-    p_cond = float(cfg_guidance.get('drop_prob_lr', 0.1))
-    p_geo = float(cfg_guidance.get('drop_prob_geo', 0.1))
-    null_label_id = int(cfg_guidance.get('null_label_id', 0))
-    null_scalar = float(cfg_guidance.get('null_scalar_value', 0.0))
+    p_cond = float(cfg_guidance.prob_drop_lr)
+    p_geo = float(cfg_guidance.drop_prob_geo)
+    null_label_id = int(cfg_guidance.null_label_id)
+    null_scalar = float(cfg_guidance.null_scalar_value)
 
     
     # Choose a reference tensor to get B/device
@@ -1127,7 +1141,7 @@ def apply_cfg_dropout(
         # Zero is a sensible "null" for continuous LR channels
         cond_images = torch.where(m, torch.zeros_like(cond_images), cond_images)
     
-    predict_residual = bool(cfg_guidance.get('predict_residual', False))
+    predict_residual = bool(cfg_guidance.predict_residual) if hasattr(cfg_guidance, 'predict_residual') else False
     if lr_ups is not None and not predict_residual:
         m = _expand_mask(mask_cond, lr_ups)
         lr_ups = torch.where(m, torch.zeros_like(lr_ups), lr_ups)
