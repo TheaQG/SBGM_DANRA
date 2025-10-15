@@ -332,6 +332,20 @@ class TrainingPipeline_general:
         
         logger.info(f"→ Rain gating head enabled: {self.rg_enabled}, c_hidden: {c_in if self.rg_enabled else 'N/A'}")
 
+    def _check_y_runtime(self, y: torch.Tensor | None) -> None:
+        """Runtime safeguard for seasonal label just before model forward (train and eval)"""
+        if y is None:
+            return
+        use_sincos = bool(self.cfg.get('stationary_conditions', {}).get('seasonal_conditions', {}).get('use_sin_cos_embedding', False))
+        if use_sincos:
+            assert torch.is_floating_point(y), f"[DOY-check/train] expected float y for sin/cos; got: {y.dtype}"
+            assert y.ndim == 2 and y.shape[1] == 2, f"[DOY-check/train] expected shape [B, 2] for sin/cos; got: {tuple(y.shape)}"
+            m = float(torch.min(y)); M = float(torch.max(y))
+            assert (m >= -1.05) and (M <= 1.05), f"[DOY-check/train] expected sin/cos in [-1, 1]; got min {m}, max {M}"
+        else:
+            assert y.dtype in (torch.long, torch.int64), f"[DOY-check/train] expected int64/long y for class labels; got: {y.dtype}"
+            assert (y.ndim == 1) or (y.ndim == 2 and y.shape[1] == 1), f"[DOY-check/train] expected shape [B] or [B, 1] for class labels; got: {tuple(y.shape)}"
+
     def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
         """
             Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
@@ -543,11 +557,12 @@ class TrainingPipeline_general:
 
         # Set the progress bar
         pbar = tqdm.tqdm(dataloader, desc=f"Epoch {current_epoch}/{epochs}", unit="batch")
-        # Iterate through batches in dataloader (tuple of images and seasons)
+        # Iterate through batches in dataloader (tuple of images and classifiers 'y')
         for idx, samples in enumerate(pbar):
-            # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
+            # Samples is a dict with following available keys: 'img', 'y', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
-            x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
+            x, y, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
+            self._check_y_runtime(y)
 
             # === EDM: build lr_ups_baseline if needed ===
             lr_ups_baseline = None
@@ -702,12 +717,12 @@ class TrainingPipeline_general:
             # # === CFG dropout (training) ===
             cfg_guidance = self.cfg_guidance
             cfg_dropout_result = apply_cfg_dropout(
-                cond_images, lsm, topo, seasons, lr_ups_baseline, cfg_guidance
+                cond_images, lsm, topo, y, lr_ups_baseline, cfg_guidance
             )
             if len(cfg_dropout_result) == 5:
-                cond_images, lsm, topo, seasons, lr_ups_baseline = cfg_dropout_result
+                cond_images, lsm, topo, y, lr_ups_baseline = cfg_dropout_result
             elif len(cfg_dropout_result) == 4:
-                cond_images, lsm, topo, seasons = cfg_dropout_result
+                cond_images, lsm, topo, y = cfg_dropout_result
             else:
                 raise ValueError(f"apply_cfg_dropout returned unexpected tuple length: {len(cfg_dropout_result)}")
 
@@ -715,7 +730,7 @@ class TrainingPipeline_general:
             self.optimizer.zero_grad()
 
             # Log the shapes of the inputs for debugging
-            for name, tensor in zip(['x', 'seasons', 'cond_images', 'lsm', 'topo'], [x, seasons, cond_images, lsm, topo]):
+            for name, tensor in zip(['x', 'y', 'cond_images', 'lsm', 'topo'], [x, y, cond_images, lsm, topo]):
                 if tensor is not None:
                     assert tensor.device == x.device, f"{name} is on device {tensor.device}, expected {x.device}"
             
@@ -724,7 +739,7 @@ class TrainingPipeline_general:
                     # Pass the score model and samples+conditions to the loss_fn
                     batch_loss = self.loss_fn(self.model, # NOTE: Is this correct? Should I set ema_model somewhere?
                                                x,
-                                               y=seasons,
+                                               y=y,
                                                cond_img=cond_images,
                                                lsm_cond=lsm,
                                                topo_cond=topo,
@@ -736,7 +751,7 @@ class TrainingPipeline_general:
                 # No mixed precision, just pass the score model and samples+conditions to the loss_fn
                 batch_loss = self.loss_fn(self.model,
                                            x,
-                                           y=seasons,
+                                           y=y,
                                            cond_img=cond_images,
                                            lsm_cond=lsm,
                                            topo_cond=topo,
@@ -759,7 +774,7 @@ class TrainingPipeline_general:
 
             if edm_on and log_every > 0 and (global_step % log_every == 0):
                 metrics = in_loop_metrics(loss_obj=self.loss_fn, model=self.model,
-                    x0=x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo,
+                    x0=x, y=y, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo,
                     lr_ups=lr_ups_baseline, eval_land_only=self.eval_land_only)
 
                 self.live_metrics['steps'].append(global_step)
@@ -946,11 +961,11 @@ class TrainingPipeline_general:
         rel_probs: list[torch.Tensor] = []
         rel_targets: list[torch.Tensor] = []
 
-        # Iterate through batches in dataloader (tuple of images and seasons)
+        # Iterate through batches in dataloader (tuple of images and classifiers 'y')
         for idx, samples in enumerate(pbar):
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
-            x, seasons, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
+            x, y, cond_images, lsm_hr, lsm, sdf, topo, hr_points, lr_points = extract_samples(samples, self.device)
 
 
 
@@ -1056,7 +1071,7 @@ class TrainingPipeline_general:
                         # Pass the score model and samples+conditions to the loss_fn
                         batch_loss = self.loss_fn(model_eval,
                                              x,
-                                             y=seasons,
+                                             y=y,
                                              cond_img=cond_images,
                                              lsm_cond=lsm,
                                              topo_cond=topo,
@@ -1068,7 +1083,7 @@ class TrainingPipeline_general:
                     # No mixed precision, just pass the score model and samples+conditions to the loss_fn
                     batch_loss = self.loss_fn(model_eval,
                                          x,
-                                         y=seasons,
+                                         y=y,
                                          cond_img=cond_images,
                                          lsm_cond=lsm,
                                          topo_cond=topo,
@@ -1085,7 +1100,7 @@ class TrainingPipeline_general:
                 log_every = monitor_cfg.get('edm_metrics_every', 50)
                 if edm_on and log_every > 0 and (idx % log_every == 0):
                     metrics = in_loop_metrics(loss_obj=self.loss_fn, model=self.model,
-                        x0=x, y=seasons, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo,
+                        x0=x, y=y, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo,
                         lr_ups=lr_ups_baseline, eval_land_only=self.eval_land_only)
                     if verbose and metrics is not None:
                         logger.info(f"→ [monitor][val] Step {idx}: EDM cosine metric: {metrics.get('edm_cosine', float('nan')):.4f}")
@@ -1208,7 +1223,7 @@ class TrainingPipeline_general:
 
             # Samples is a dict with following available keys: 'img', 'classifier', 'img_cond', 'lsm', 'sdf', 'topo', 'points'
             # Extract samples
-            x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
+            x_gen, y_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
             logger.info(f"→ Generating {len(x_gen)} samples at epoch {epoch}, batch {idx}...")
             logger.info(f"      Only plotting first {min(cfg['visualization'].get('n_plot_samples', 4), cfg['data_handling']['n_gen_samples'])} samples.")
 
@@ -1226,7 +1241,7 @@ class TrainingPipeline_general:
                                             num_steps=edm_cfg.get('sampling_steps', 18),
                                             device=self.device,
                                             img_size=cfg['highres']['data_size'][0],
-                                            y=seasons_gen,
+                                            y=y_gen,
                                             cond_img=cond_images_gen,
                                             lsm_cond=lsm_gen,
                                             topo_cond=topo_gen,
@@ -1249,7 +1264,7 @@ class TrainingPipeline_general:
                     num_steps=cfg['sampler']['n_timesteps'],
                     device=self.device,
                     img_size=cfg['highres']['data_size'][0],
-                    y=seasons_gen,
+                    y=y_gen,
                     cond_img=cond_images_gen,
                     lsm_cond=lsm_gen,
                     topo_cond=topo_gen,

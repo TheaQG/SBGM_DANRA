@@ -15,6 +15,7 @@ import re
 import random
 import torch
 import logging
+import math
 # import multiprocessing
 
 import numpy as np
@@ -416,12 +417,10 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 hr_variable:str = 'temp',           # Variable to load (temp or prcp)
                 hr_model:str = 'DANRA',             # Model name (e.g. 'DANRA', 'ERA5')
                 hr_scaling_method:str = 'zscore',   # Scaling method for high resolution data
-                # hr_scaling_params:dict = {'glob_mean':8.69251, 'glob_std':6.192434}, # Scaling parameters for high resolution data (if prcp, 'log_minus1_1' or 'log_01' include 'glob_min_log' and 'glob_max_log' and optional buffer_frac)
                 # LR conditions and their scaling parameters (not including geo variables. they are handled separately)
                 lr_conditions:list = ['temp'],      # Variables to load as low resolution conditions
                 lr_model:str = 'ERA5',              # Model name (e.g. 'DANRA', 'ERA5')
                 lr_scaling_methods:list = ['zscore'], # Scaling methods for low resolution conditions
-                # lr_scaling_params:list = [{'glob_mean':8.69251, 'glob_std':6.192434}], # Scaling parameters for low resolution conditions
                 lr_cond_dirs_zarr:Optional[dict] = None,      # Path to directories containing conditional data (in format dict({'condition1':dir1, 'condition2':dir2}))
                 # NEW: LR conditioning area size (if cropping is desired)
                 lr_data_size:Optional[tuple] = None,         # Size of low resolution data (2D image, tuple), e.g. (589,789) for full LR domain
@@ -432,6 +431,10 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 geo_variables:Optional[list] = ['lsm', 'topo'], # Geo variables to load
                 lsm_full_domain = None,             # Land-sea mask of full domain
                 topo_full_domain = None,            # Topography of full domain
+                # Seasonality variables for conditional sampling
+                conditional_seasons:bool = False,   # Whether to use seasonal conditional sampling
+                use_sin_cos_embedding: bool = False, # Whether to use sin-cos embedding for seasonal conditional sampling
+                use_leap_years: bool = True,      # Whether to use leap years for day-of-year conditional sampling
                 # Configuration information
                 cfg: dict | None = None,
                 split: str = "train",
@@ -445,7 +448,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 sdf_weighted_loss:bool = False,     # Whether to use weighted loss for SDF
                 scale:bool = True,                  # Whether to scale data to new interval
                 save_original:bool = False,         # Whether to save original data
-                conditional_seasons:bool = False,   # Whether to use seasonal conditional sampling
                 n_classes:Optional[int] = None,                # Number of classes for conditional sampling
                 fixed_cutout_hr: bool = False,         # Whether to use a fixed cutout (no random sampling)
                 fixed_cutout_lr: bool = False,         # Whether to use a fixed cutout (no random sampling)
@@ -572,6 +574,11 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.lsm_full_domain = lsm_full_domain
         self.topo_full_domain = topo_full_domain
 
+        # Cache seasonality parameters
+        self.conditional_seasons = conditional_seasons
+        self.use_sin_cos_embedding = use_sin_cos_embedding
+        self.use_leap_years = use_leap_years
+
         # Save classifier-free guidance parameters
         self.cfg = cfg
         self.split = split
@@ -587,7 +594,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.sdf_weighted_loss = sdf_weighted_loss
         self.scale = scale
         self.save_original = save_original
-        self.conditional_seasons = conditional_seasons
         self.n_classes = n_classes
         self.n_samples_w_cutouts = self.n_samples if n_samples_w_cutouts is None else n_samples_w_cutouts
 
@@ -730,6 +736,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             crop_region_lr_str = '_'.join(map(str, crop_region_lr)) # if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
             scaling_split = self.scaling_split
             stats_load_dir = cfg['paths']['stats_load_dir'] if cfg is not None else './stats'
+            self.hr_buffer_frac = cfg['highres'].get('buffer_frac', 0.05) if cfg is not None and 'highres' in cfg else 0.05
+            self.lr_buffer_frac = cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None and 'lowres' in cfg else 0.05
 
             for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
                 logger.info(f"LR condition: {cond_var}, scaling method: {trans_type}")
@@ -756,7 +764,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                                 crop_region_str=crop_region_lr_str,
                                 scaling_split=scaling_split,
                                 transform_type=trans_type,
-                                buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                buffer_frac=self.lr_buffer_frac,
                                 stats_file_path=stats_load_dir,
                                 eps=eps_val,
                             )
@@ -772,7 +780,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                                 crop_region_str=crop_region_lr_str,
                                 scaling_split=scaling_split,
                                 transform_type=trans_type,
-                                buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                buffer_frac=self.hr_buffer_frac,
                                 stats_file_path=stats_load_dir,
                                 eps=eps_val,
                             )
@@ -786,7 +794,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                             crop_region_str=crop_region_lr_str,
                             scaling_split=scaling_split,
                             transform_type=trans_type,
-                            buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                            buffer_frac=self.lr_buffer_frac,
                             stats_file_path=stats_load_dir,
                             eps=eps_val,
                         )
@@ -816,7 +824,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                                 crop_region_str=cr,
                                 scaling_split=scaling_split,
                                 transform_type=trans_type,
-                                buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                buffer_frac=self.lr_buffer_frac,
                                 stats_file_path=stats_load_dir,
                                 eps=eps_val,
                             )
@@ -834,7 +842,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                                     crop_region_str=crop_region_hr_str,
                                     scaling_split=scaling_split,
                                     transform_type=trans_type,
-                                    buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                    buffer_frac=self.hr_buffer_frac,
                                     stats_file_path=stats_load_dir,
                                     eps=eps_val,
                                 )
@@ -849,7 +857,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                                     crop_region_str=crop_region_lr_str,
                                     scaling_split=scaling_split,
                                     transform_type=trans_type,
-                                    buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                                    buffer_frac=self.lr_buffer_frac,
                                     stats_file_path=stats_load_dir,
                                     eps=eps_val,
                                 )
@@ -865,7 +873,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                             crop_region_str=crop_region_lr_str,
                             scaling_split=scaling_split,
                             transform_type=trans_type,
-                            buffer_frac=cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None else 0.05,
+                            buffer_frac=self.lr_buffer_frac,
                             stats_file_path=stats_load_dir,
                             eps=eps_val,
                         )
@@ -878,7 +886,6 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 SafeToTensor(),
                 ResizeTensor(self.hr_size_reduced)
             ]
-            hr_buff = cfg['highres'].get('buffer_frac', 0.5) if cfg is not None else 0.5
             hr_transform_list.append(get_transforms_from_stats(
                 variable=self.hr_variable,
                 model=self.hr_model,
@@ -886,7 +893,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 crop_region_str=crop_region_hr_str,
                 scaling_split=scaling_split,
                 transform_type=self.hr_scaling_method,
-                buffer_frac=hr_buff,
+                buffer_frac=self.hr_buffer_frac,
                 stats_file_path=stats_load_dir,
                 eps=self.glob_prcp_epsilon if self.hr_variable in ['prcp', 'tp'] else 0.0,
             ))
@@ -1090,7 +1097,81 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 self.cache.pop(key_to_remove, None) # Safe removal, in case key is not found
             # Add data to cache
             self.cache[idx] = data
-    
+
+    @staticmethod
+    def _validate_season_y(y: torch.Tensor, use_sincos: bool, where: str = ""):
+        """
+            Strict runtime validation of seasonal label encoding. Raises on mismatch.
+            'where' is a short tag to identify the call site in error messages.
+        """
+        if y is None:
+            return
+        if use_sincos:
+            if not torch.is_floating_point(y):
+                raise TypeError(f"[DOY-check{where}] Expected float sin/cos tensor, got {y.dtype}.")
+            # Tolerate [1,2] from some collates: squeeze batch if present
+            if y.ndim == 2 and y.shape[0] == 1 and y.shape[1] == 2:
+                y = y.squeeze(0)
+            if y.ndim != 1 or y.shape[0] != 2:
+                raise ValueError(f"[DOY-check{where}] Expected shape [2] for sin/cos tensor, got {y.shape}.")
+            m = float(torch.min(y)); M = float(torch.max(y))
+            if m < -1.05 or M > 1.05:
+                raise ValueError(f"[DOY-check{where}] Sin/cos values out of range [-1,1]: min {m}, max {M}.")
+        else:
+            # Categorical season expected as Long scalar (keep 1..4 convention)
+            if y.dtype not in (torch.long, torch.int64):
+                raise TypeError(f"[DOY-check{where}] Expected Long season index, got dype {y.dtype}.")
+            # Accept scalar or 1-element tensor (including [1] from some collates)
+            if y.ndim > 1 or (y.ndim == 1 and y.numel() != 1):
+                raise ValueError(f"[DOY-check{where}] Expected scalar or 1-element tensor for season index, got shape {y.shape}.")
+
+    def _build_seasonal_label(self, hr_file_name: str) -> torch.Tensor:
+        """
+            Single source of truth for seasonal label construction.
+            Returns:
+                y: 
+                  - Float[2] in [-1,1] if self.use_sin_cos_embedding is True
+                  - Long scalar for categorical, depending on self.n_classes (4, 12, 365, 366)
+        """
+        # 1) Parse date once
+        dateObj = DateFromFile(hr_file_name)
+
+        # 2) Sin/cos embedding
+        if self.use_sin_cos_embedding:
+            doy = dateObj.determine_day()
+            if self.use_leap_years:
+                N = 366 if DateFromFile.is_leap_year(dateObj.year) else 365
+                theta = 2.0 * math.pi * float(doy - 1) / float(N) 
+            else:
+                # Avoid 2*pi wrap: fold Feb 29 onto Feb 28 in leap years
+                if doy == 60 and DateFromFile.is_leap_year(dateObj.year):
+                    doy = 59
+                theta = 2.0 * math.pi * float(doy - 1) / 365.0
+            y = torch.tensor([math.sin(theta), math.cos(theta)], dtype=torch.float32)
+            self._validate_season_y(y, use_sincos=True, where=" /dataset-build")
+            return y
+        
+        # 3) Categorical encoding - zero-based
+        n_classes = 12 if (self.n_classes is None) else int(self.n_classes)
+
+        if n_classes == 4:
+            cls = dateObj.determine_season() - 1  # 0..3
+        elif n_classes == 12:
+            cls = dateObj.determine_month() - 1  # 0..11
+        elif n_classes in (365, 366):
+            doy = dateObj.determine_day()
+            if n_classes == 365:
+                # Merge Feb 29 into Feb 28 for non-leap-year encoding
+                if DateFromFile.is_leap_year(dateObj.year) and doy == 60: # Feb 29
+                    doy = 59
+            cls = doy - 1  # 0..364 or 0..365
+        else:
+            raise ValueError(f"Unsupported n_classes={n_classes}. Supported: 4, 12, 365, 366.")
+        
+        y = torch.tensor(cls, dtype=torch.long)
+        self._validate_season_y(y, use_sincos=False, where=" /dataset-build")
+        return y
+
     def __getitem__(self, idx:int):
         '''
             For each sample:
@@ -1220,43 +1301,14 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                         geo_data = (geo_data > 0.5).to(geo_data.dtype)  # Ensure binary mask (0 and 1)
 
                 sample_dict[geo] = geo_data
-
-        use_sincos = bool(self.cfg.get('stationary_conditions', {}).get('seasonal_conditions', {}).get('use_sin_cos_embedding', True)) if self.cfg is not None else True
-        use_leap = bool(self.cfg.get('stationary_conditions', {}).get('seasonal_conditions', {}).get('use_leap_years', True)) if self.cfg is not None else True
         
+        # Seasonal/DOY sin-cos label construction 
         if self.conditional_seasons:
-            dateObj = DateFromFile(hr_file_name)
-
-            if use_sincos:
-                # Leap-aware day-of-year sin-cos embedding
-                doy = dateObj.determine_day() # 1 to 366
-                is_leap = DateFromFile.is_leap_year(dateObj.year) if use_leap else False
-                nday = 366 if is_leap else 365
-                theta = 2.0 * np.pi * float(doy - 1) / float(nday)  # -1 to make doy zero-based
-                seasons = torch.tensor([np.sin(theta), np.cos(theta)], dtype=torch.float32) # shape [2]
-                sample_dict['seasons'] = seasons
-            else:
-                # Categorical fall back 
-                if self.n_classes is not None:
-                    # Seasonal condittion
-                    if self.n_classes == 4:
-                        classifier = dateObj.determine_season()
-                    # Monthly condition
-                    elif self.n_classes == 12:
-                        classifier = dateObj.determine_month()
-                    # Daily condition
-                    elif self.n_classes == 366:
-                        classifier = dateObj.determine_day()
-                    else:
-                        raise ValueError('n_classes must be 4, 12 or 365/366')
-                else:
-                    logger.warning("n_classes is not provided, using date as classifier. This will default to daily condition.")
-                    # If n_classes is not provided, use the date as a classifier
-                    classifier = dateObj.determine_month()  # Default to daily condition if n_classes is not specified
-                # Convert classifier to tensor
-                sample_dict['classifier'] = torch.tensor(classifier, dtype=torch.long)
-        # else:
-            # A batch cannot contain None, so if no classifier is used, don't add it to the sample_dict
+            y = self._build_seasonal_label(hr_file_name)
+            sample_dict['y'] = y
+        else:
+            if 'y' in sample_dict:
+                del sample_dict['y']
             
 
         # For SDF, ensure that it is computed for the HR mask (lsm_hr) to get it in same shape as HR

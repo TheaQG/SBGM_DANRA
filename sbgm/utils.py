@@ -340,10 +340,33 @@ def extract_samples(samples, device=None):
     # if len(hr_keys) > 1:
     #     logger.warning(f'Multiple HR images found. Using the first one: {hr_keys[0]}')
     
-    # Classifier (if available)
-    classifier = samples.get('classifier', samples.get('seasons'))
+    # Seasonal label (unified): prefer 'y' only; warn and fallback to legacy keys if needed
+    classifier = samples.get('y', None)
+    if classifier is None:
+        for _legacy_key in ['classifier', 'seasons', 'season']:
+            if _legacy_key in samples:
+                logger.warning("[seasonal] Found legacy key '%s' in samples; prefer using unified key 'y' in future.", _legacy_key)
+                logger.warning("         For now: using '%s' as classifier.", _legacy_key)
+                classifier = samples[_legacy_key]
+                break
     if classifier is not None:
-        classifier = classifier.to(device, non_blocking=True)#.float()
+        classifier = classifier.to(device, non_blocking=True)
+        # Normalzie accepatble shapes/dtypes
+        #   - categorical: Long [B] or [B,1]
+        #   - sin/cos: Float [B,2]
+        if classifier.ndim == 1:
+            classifier = classifier.unsqueeze(1)
+        if classifier.ndim != 2:
+            raise ValueError(f"[extract_samples] y has ndim={classifier.ndim}, but expected 2D [B,1] or [B,2].")
+        C = classifier.shape[1]
+        if torch.is_floating_point(classifier):
+            if C != 2:
+                raise ValueError(f"[extract_samples] float y must have shape [B,2] for sin/cos encoding; got {classifier.shape}.")
+        else:
+            if classifier.dtype not in (torch.long, torch.int64):
+                raise TypeError(f"[extract_samples] categorical y must be Long; got {classifier.dtype}.")
+            if C != 1:
+                raise ValueError(f"[extract_samples] categorical y must have shape [B,1]; got {classifier.shape}.")
 
     # LR conditions: if multiple, stack along channel dimensio
     lr_keys = [k for k in samples.keys() if k.endswith('_lr') and not k.endswith('_original')]

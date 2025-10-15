@@ -21,12 +21,7 @@ from tqdm import tqdm
 
 from sbgm.special_transforms import build_back_transforms_from_stats, lr_baseline_to_hr_zspace
 from sbgm.utils import extract_samples, get_model_string
-from sbgm.score_sampling import (
-    edm_sampler,
-    pc_sampler,
-    Euler_Maruyama_sampler,
-    ode_sampler
-)
+from sbgm.score_sampling import edm_sampler
 from sbgm.monitoring import (
     report_precip_extremes,
 )
@@ -297,7 +292,7 @@ class GenerationRunner:
             date0 = dates[0]  # use first date for naming
             logger.info(f"[generation] Generating for date {date0} ({idx+1}/{len(gen_dataloader)}) with ensemble size {M}.")
             # Extract model-space tensors
-            x_gen, seasons_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
+            x_gen, y_gen, cond_images_gen, lsm_hr_gen, lsm_gen, sdf_gen, topo_gen, hr_points_gen, lr_points_gen = extract_samples(samples, self.device)
 
             # --- Save/check land-sea mask(s) ---
             try:
@@ -333,16 +328,16 @@ class GenerationRunner:
             # Freeze conditioning to a single date and tile to M samples
             if x_gen is not None and x_gen.shape[0] != 1:
                 logger.warning(f"[generation] x_gen batch size {x_gen.shape[0]} != 1; freezing to first item and tiling to ensemble size {M}.")
-            
-            
-            seasons_1 = seasons_gen[:1] if seasons_gen is not None else None
+
+
+            y_1 = y_gen[:1] if y_gen is not None else None
             cond_img_1 = cond_images_gen[:1] if cond_images_gen is not None else None
             lsm_1 = lsm_gen[:1] if lsm_gen is not None else None
             topo_1 = topo_gen[:1] if topo_gen is not None else None
             lr_ups_1 = lr_ups_baseline[:1] if lr_ups_baseline is not None else None
             x_hr_1 = x_gen[:1] if x_gen is not None else None
 
-            seasons_M = _repeat_to_M(seasons_1, M)
+            y_M = _repeat_to_M(y_1, M)
             cond_images_M = _repeat_to_M(cond_img_1, M)
             lsm_M = _repeat_to_M(lsm_1, M)
             topo_M = _repeat_to_M(topo_1, M)
@@ -356,7 +351,7 @@ class GenerationRunner:
                     num_steps=steps,
                     device=self.device,
                     img_size=img_size,
-                    y=seasons_M,
+                    y=y_M,
                     cond_img=cond_images_M,
                     lsm_cond=lsm_M,
                     topo_cond=topo_M,

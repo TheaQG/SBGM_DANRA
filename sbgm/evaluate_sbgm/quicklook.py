@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from sbgm.training_utils import get_model
 from sbgm.evaluate_sbgm.generation_main import get_final_gen_dataloader
 from sbgm.evaluate_sbgm.generation import GenerationRunner, GenerationConfig
-from sbgm.utils import get_model_string, extract_samples
+from sbgm.utils import get_model_string
 
 logger = logging.getLogger(__name__)
 
