@@ -1155,16 +1155,16 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         n_classes = 12 if (self.n_classes is None) else int(self.n_classes)
 
         if n_classes == 4:
-            cls = dateObj.determine_season() - 1  # 0..3
+            cls = dateObj.determine_season()   # 1..4
         elif n_classes == 12:
-            cls = dateObj.determine_month() - 1  # 0..11
+            cls = dateObj.determine_month()   # 1..12
         elif n_classes in (365, 366):
             doy = dateObj.determine_day()
             if n_classes == 365:
                 # Merge Feb 29 into Feb 28 for non-leap-year encoding
                 if DateFromFile.is_leap_year(dateObj.year) and doy == 60: # Feb 29
                     doy = 59
-            cls = doy - 1  # 0..364 or 0..365
+            cls = doy   # 0..365 or 0..366
         else:
             raise ValueError(f"Unsupported n_classes={n_classes}. Supported: 4, 12, 365, 366.")
         

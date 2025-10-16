@@ -47,14 +47,67 @@ def edm_sampler(score_model,
     cfg_enabled = True
     base_scale = float(cfg_guidance.get('guidance_scale', 0.0))
     null_label_id = int(cfg_guidance.get('null_label_id', 0))
+    null_scalar = float(cfg_guidance.get('null_scalar_value', 0.0))
+    null_geo_value = float(cfg_guidance.get('null_geo_value', -5.0))
+    lr_null_strategy = str(cfg_guidance.get('null_lr_strategy', 'zero')).lower()
+    lr_null_scalar = float(cfg_guidance.get('null_lr_scalar', 0.0))
   else:
     cfg_enabled = False
     base_scale = 0.0
     null_label_id = 0
+    null_scalar = 0.0
+    null_geo_value = -5.0
+    lr_null_strategy = 'zero'
+    lr_null_scalar = 0.0
 
+  # Sampler logging
+  if cfg_enabled and cfg_guidance is not None:
+    logger.info(f"[sampler] CFG enabled: base_scale={base_scale}, sigma_weighted={bool(cfg_guidance.get('sigma_weighted', True))}, "
+                f"drop_lr_ups_in_uncond={bool(cfg_guidance.get('drop_lr_ups_in_uncond', False))}")
+
+  # Set the max guidance scale and make sure that base_scale <= gmax
+  gmax = float(cfg_guidance.get('guidance_scale_max', base_scale)) if (cfg_enabled and cfg_guidance is not None) else base_scale
+  base_scale = min(base_scale, gmax)
+
+
+  def _make_null_y(y_in):
+    if y_in is None:
+      return None
+    # float -> sin/cos DOY
+    if y_in.dtype in (torch.float16, torch.float32, torch.float64):
+      return torch.zeros_like(y_in).fill_(null_scalar)
+    # int/long -> categorical (4, 12, 365 classes)
+    return torch.full_like(y_in, null_label_id)
+  def _null_lr_like(t):
+      if t is None: return None
+      if lr_null_strategy == 'noise':
+          return torch.randn_like(t)
+      if lr_null_strategy == 'scalar':
+          return t.new_full(t.shape, lr_null_scalar)
+      return torch.zeros_like(t)  # 'zero'
+
+  def _null_geo_like(t):
+      if t is None: return None
+      if t.ndim >= 2 and t.shape[1] >= 2:
+          out = t.clone()
+          out[:, 0, ...] = null_geo_value
+          out[:, 1, ...] = 0.0
+          return out
+      return t.new_full(t.shape, null_geo_value)
+  
   device = torch.device(device)
 
-  # Build Karras sigme (noise) schedule (decreasing)
+
+  # Build nulls for unconditional branch
+  null_img = _null_geo_like(cond_img) if (cfg_enabled and cond_img is not None) else None
+  null_lsm = _null_geo_like(lsm_cond) if (cfg_enabled and lsm_cond is not None) else None
+  null_topo = _null_geo_like(topo_cond) if (cfg_enabled and topo_cond is not None) else None
+  null_y = _make_null_y(y) if (cfg_enabled and y is not None) else None
+
+  drop_lr_ups_in_uncond = bool(cfg_guidance and cfg_guidance.get('drop_lr_ups_in_uncond', False))
+  null_lr_ups = _null_lr_like(lr_ups) if (cfg_enabled and lr_ups is not None and drop_lr_ups_in_uncond) else lr_ups
+
+  # Build Karras sigma (noise) schedule (decreasing)
   def get_sigmas_K(n_steps, s_min, s_max, rho_):
     i = torch.arange(n_steps, device=device, dtype=torch.float32) # 0, ..., n_steps-1
     ramp = i / max(n_steps - 1, 1) # in [0, 1]
@@ -89,14 +142,6 @@ def edm_sampler(score_model,
 
   if lr_ups is not None and (lr_ups.shape[0] != x.shape[0] or lr_ups.shape[2:] != x.shape[2:]):
       raise ValueError(f"lr_ups shape {lr_ups.shape} does not match the expected batch size {x.shape[0]} and spatial shape {x.shape[2:]}")
-
-  # Prepare unconditional inputs (cached tensors)
-  null_img = torch.zeros_like(cond_img) if (cfg_enabled and cond_img is not None) else None
-  null_lsm = torch.zeros_like(lsm_cond) if (cfg_enabled and lsm_cond is not None) else None
-  null_topo = torch.zeros_like(topo_cond) if (cfg_enabled and topo_cond is not None) else None
-  null_y = torch.full_like(y, null_label_id) if (cfg_enabled and y is not None) else None
-  drop_lr_ups_in_uncond = bool(cfg_guidance and cfg_guidance.get('drop_lr_ups_in_uncond', False))
-  null_lr_ups = (torch.zeros_like(lr_ups) if (cfg_enabled and lr_ups is not None and drop_lr_ups_in_uncond) else lr_ups)
 
   def _denoise_with_cfg(x_in, sigma_vec):
     if cfg_enabled and base_scale > 0.0:

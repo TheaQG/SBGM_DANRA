@@ -143,6 +143,12 @@ class TrainingPipeline_general:
         self.weight_init = cfg['training']['weight_init']
         self.custom_weight_initializer = cfg['training']['custom_weight_initializer']
         self.sdf_weighted_loss = cfg['training']['sdf_weighted_loss']
+
+        # Set device
+        if device is None:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device
         
         # EMA parameters
         self.with_ema = cfg['training']['with_ema']
@@ -152,12 +158,15 @@ class TrainingPipeline_general:
 
         # Classifier free guidance config
         self.cfg_guidance = self.cfg.get('classifier_free_guidance', {})
+        if self.cfg_guidance.get('enabled', False):
+            logger.info("→ Classifier-free guidance enabled")
+            logger.info(f"      → drop_prob_lr: {self.cfg_guidance.get('drop_prob_lr', 0.1)}")
+            logger.info(f"      → drop_prob_geo   = {self.cfg_guidance.get('drop_prob_geo', self.cfg_guidance.get('drop_prob_lr', 0.1))}")
+            logger.info(f"      → drop_prob_class = {self.cfg_guidance.get('drop_prob_class', 0.0)}")
+            logger.info(f"      → null_lr_strategy= {self.cfg_guidance.get('null_lr_strategy','zero')} (scalar={self.cfg_guidance.get('null_lr_scalar',0.0)})")
+            logger.info(f"      → null_geo_value  = {self.cfg_guidance.get('null_geo_value', -5.0)}")
+            logger.info(f"      → null_label_id   = {self.cfg_guidance.get('null_label_id', 0)}, null_scalar_value = {self.cfg_guidance.get('null_scalar_value', 0.0)}")
 
-        # Set device
-        if device is None:
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        else:
-            self.device = device
 
         # Initialize weights if needed
         if self.weight_init:
@@ -716,15 +725,16 @@ class TrainingPipeline_general:
 
             # # === CFG dropout (training) ===
             cfg_guidance = self.cfg_guidance
-            cfg_dropout_result = apply_cfg_dropout(
-                cond_images, lsm, topo, y, lr_ups_baseline, cfg_guidance
+            cond_images, lsm, topo, y, lr_ups_baseline, drop_info = apply_cfg_dropout(
+                cond_images=cond_images,
+                lsm_cond=lsm,
+                topo_cond=topo,
+                y=y,
+                lr_ups=lr_ups_baseline,
+                cfg_guidance=self.cfg_guidance,
             )
-            if len(cfg_dropout_result) == 5:
-                cond_images, lsm, topo, y, lr_ups_baseline = cfg_dropout_result
-            elif len(cfg_dropout_result) == 4:
-                cond_images, lsm, topo, y = cfg_dropout_result
-            else:
-                raise ValueError(f"apply_cfg_dropout returned unexpected tuple length: {len(cfg_dropout_result)}")
+
+            self._check_y_runtime(y) # re-check y after potential modification
 
             # Zero gradients
             self.optimizer.zero_grad()
@@ -829,7 +839,7 @@ class TrainingPipeline_general:
         # === Classifier-Free Guidance (CFG) parameters ===
         logger.info(f"→ Classifier-Free Guidance (CFG) enabled: {self.cfg_guidance.get('enabled', False)}")
         if self.cfg_guidance.get('enabled', False):
-            logger.info(f"   ▸ Dropout probability for LR conditions: {self.cfg_guidance.get('drop_prob', 0.1)}")
+            logger.info(f"   ▸ Dropout probability for LR conditions: {self.cfg_guidance.get('drop_prob_lr', 0.1)}")
             logger.info(f"   ▸ Dropout probability for static geo: {self.cfg_guidance.get('drop_prob_geo', self.cfg_guidance.get('drop_prob', 0.1))}")
 
         # Log EMA

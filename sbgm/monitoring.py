@@ -472,24 +472,39 @@ def in_loop_metrics(loss_obj, model, x0, *, cond_img=None, lsm_cond=None, topo_c
     # Model is EDMPrecondUNet, predict x0_hat
     x0_hat = model(x_t, sigma, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond, y=y, lr_ups=lr_ups)
 
-    if land_mask is not None:
-        mask_use = land_mask
-    else:
-        mask_use = lsm_cond # Use lsm_cond as land mask if available
-        logger.warning("land_mask is None. Using lsm_cond as land mask for eval_land_only metrics. Ensure lsm_cond is a valid land mask.")
+    # --- Fallback for HR–LR correlation ---
+    # If lr_ups is not provided, try to derive it from cond_img (first channel),
+    # which is already upsampled to HR size in the dataloader.
+    lr_for_corr = lr_ups
+    if (lr_for_corr is None) and (cond_img is not None):
+        try:
+            if cond_img.ndim == 4 and cond_img.shape[1] >= 1:
+                lr_for_corr = cond_img[:, :1, :, :]
+        except Exception:
+            lr_for_corr = None
 
+    # Choose mask (prefer explicit land_mask, then lsm_cond); fall back to unmasked if none
+    mask_use = land_mask if land_mask is not None else lsm_cond
+    have_mask = mask_use is not None
 
-    if eval_land_only:
-        cos = masked_cosine_similarity(x0_hat, x0, mask=mask_use, weighted=True) 
-        # Optional HR-LR correlation if lr_ups is provided
-        if lsm_cond is None:
-            logger.warning("eval_land_only=True but lsm_cond is None. Cannot mask for land-only correlation. Returning NaN for hr_lr_corr.")
-            r = float('nan')
-        else:
-            r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=lsm_cond) if lr_ups is not None else float('nan')
+    if eval_land_only and have_mask:
+        # Land-only metrics using the available mask
+        cos = masked_cosine_similarity(x0_hat, x0, mask=mask_use, weighted=True)
+        r = masked_corrcoef_per_sample(
+            x0_hat,
+            lr_for_corr.expand_as(x0_hat) if lr_for_corr is not None else x0_hat,
+            mask=mask_use
+        ) if lr_for_corr is not None else float('nan')
     else:
+        # Either eval_land_only=False or we lack a mask → compute *unmasked* metrics
+        if eval_land_only and not have_mask:
+            logger.info("eval_land_only=True but no land mask available; falling back to unmasked cosine/correlation.")        
         cos = masked_cosine_similarity(x0_hat, x0, mask=None, weighted=False)
-        r = masked_corrcoef_per_sample(x0_hat, lr_ups.expand_as(x0_hat), mask=None) if lr_ups is not None else float('nan')
+        r = masked_corrcoef_per_sample(
+            x0_hat,
+            lr_for_corr.expand_as(x0_hat) if lr_for_corr is not None else x0_hat,
+            mask=None
+        ) if lr_for_corr is not None else float('nan')
 
     return {'edm_cosine': float(cos), 'hr_lr_corr': float(r)}
 

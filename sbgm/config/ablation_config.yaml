@@ -90,7 +90,7 @@ stationary_conditions:
     sample_w_geo: false # Whether to sample with geographic conditions
     sample_w_sdf: false # Whether to sample with SDF (Signed Distance Function)
     geo_variables: ['lsm', 'topo'] # Geographic variables to include, 'slope' can be added
-    with_mask: false # Whether to include classifier-free guidance mask
+    with_mask: true # Whether to include classifier-free guidance mask
     topo_min: -12 # Minimum value for topography visualization
     topo_max: 12 # Maximum value for topography visualization
     norm_min: -1 # Minimum normalization value for topography and slope
@@ -178,12 +178,18 @@ classifier_free_guidance:
   enabled: false # Whether to use classifier-free guidance
   drop_prob_lr: 0.1 # Dropout probability for guidance on LR conditions, [0.1 - 0.2]. If over-conditioning (model copies LR too much), increase.
   drop_prob_geo: 0.1 # Optional: lower drop for static geo; else omit and use drop_prob [0.05-0.1]. If spatial artifacts when geo present, reduce.. Keep drop_prob_geo <= drop_prob
+  drop_prob_class: 0.0 # Optional: dropout probability for class labels (if any)
   guidance_scale: 1.0 # Scale for guidance 
-  null_label_id: 0 # Use 0 as "null" in label embedding 
-  null_scalar_value: 0.0 # Use -1 as "null" for continuous scalar conditions (e.g. seasons as cos/sin)
   guidance_scale_max: 3.0 # Maximum scale for guidance
   sigma_weighted: true # Whether to weight guidance scale with sigma (True recommended, False for ablation)
   drop_lr_ups_in_uncond: true # Whether to drop lr_ups in unconditional branch (True recommended, False for ablation)
+  
+  # Robust nulls
+  null_label_id: 0 # Use 0 as "null" in label embedding  NOTE: Should be -1?
+  null_scalar_value: -2.0 # NOTE: Should be -2.0??
+  null_lr_strategy: "noise" # Strategy for nulling LR conditions: 'noise' (set to random noise), 'zeros' (set to zeros), 'scalar' (set to fixed scalar value)
+  null_lr_scalar: 0.0 # Scalar value to use if null_lr_strategy is 'scalar'
+  null_geo_value: -5.0 # value channel when GEO dropped; mask channel set to 0.0
 
 edm:
   enabled: true # Whether to use EDM (Elucidated Diffusion Models)

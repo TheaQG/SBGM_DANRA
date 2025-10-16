@@ -33,6 +33,11 @@ class SigmaEmbed(nn.Module):
             nn.Linear(time_dim, time_dim)
         )
     def forward(self, c_noise: torch.Tensor) -> torch.Tensor:
+        # must be [B, 1]
+        if not (c_noise.ndim == 2 and c_noise.shape[1] == 1):
+            raise ValueError(
+                f"[SigmaEmbed] c_noise must be [B, 1], got {tuple(c_noise.shape)}."
+            )
         # c_noise: [B, 1]
         return self.net(c_noise)
 
@@ -58,15 +63,23 @@ class EDMPrecondUNet(nn.Module):
         self.sigma_emb = SigmaEmbed(time_dim)
 
     def _precond(self, sigma: torch.Tensor):
-        """ Compute preconditioning coefficients. (as in Karras et al. 2022) """
+        """ Compute preconditioning coefficients. (as in Karras et al. 2022) with strict shape control for """
+        # Accept sigma of shape [B] or [B, 1], [B, 1, 1, 1] - coerce to [B]
+        if sigma.ndim == 0:
+            sigma = sigma.unsqueeze(0)
+        if sigma.ndim > 1:
+            sigma = sigma.reshape(sigma.shape[0]) # -> [B]
+
         # sigma: [B]
         s2 = sigma**2
         sd = self.sigma_data
         sd2 = sd**2
-        c_in    = 1.0 / torch.sqrt(s2 + sd2)
-        c_skip  = sd2 / (s2 + sd2)
-        c_out   = sigma * sd / torch.sqrt(s2 + sd2)  # corrected formula
-        # c_noise = 0.25 * log(sigma^2) = 0.25 * 2 * log(sigma)
+
+        c_in    = 1.0 / torch.sqrt(s2 + sd2)            # [B]
+        c_skip  = sd2 / (s2 + sd2)                      # [B]
+        c_out   = sigma * sd / torch.sqrt(s2 + sd2)     # [B] corrected formula
+        # c_noise = 0.25 * log(sigma^2) = 0.25 * 2 * log(sigma) 
+        # c_noise = 0.5 * log(sigma) as a scalar feature -> [B,1]
         c_noise = (sigma.log() * 0.5).unsqueeze(-1)  # [B, 1]   
         return c_in, c_skip, c_out, c_noise
     
@@ -81,7 +94,12 @@ class EDMPrecondUNet(nn.Module):
                 lr_ups: torch.Tensor | None = None # <- needed if predict_residual = True
                 ) -> torch.Tensor:
         B = x_t.shape[0]
-        c_in, c_skip, c_out, c_noise = self._precond(sigma)
+        c_in, c_skip, c_out, c_noise = self._precond(sigma) # c_noise is [B, 1]
+
+        # Validate shapes
+        t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
+        assert t_emb.ndim == 2 and t_emb.shape[1] == self.encoder.time_embedding, \
+            f"[EDMPrecondUnet] Expected t_emb to be [B, {self.encoder.time_embedding}], got {tuple(t_emb.shape)}."
 
         # === Residual-aware preconditioning ===
         # NOTE: LR upsampled must be scaled in HR space!
@@ -328,12 +346,34 @@ class Encoder(ResNet):
         #delete unwanted layers, i.e. maxpool(=self.maxpool), fully connected layer(=self.fc) and average pooling(=self.avgpool
         del self.maxpool, self.fc, self.avgpool
 
+    def _add_time_bias(self, fmap: torch.Tensor, proj: nn.Module, t_vec: torch.Tensor, where: str) -> torch.Tensor:
+        """
+        Project t_vec -> [B, C], reshape to [B, C, 1, 1] and add to fmap.
+        Enforces a strict 2-D [B, time_embedding] input to the projection.
+        """
+        assert fmap.ndim == 4, f"{where}: expected fmap to be 4D NCHW, got {tuple(fmap.shape)}"
+
+        # --- Hard enforcement: make t_vec strictly [B, time_embedding] ---
+        if t_vec.ndim != 2:
+            t_vec = t_vec.reshape(t_vec.shape[0], -1)
+
+        if t_vec.shape[1] != self.time_embedding:
+            raise ValueError(
+                f"{where}: time vector must be [B,{self.time_embedding}] but got {tuple(t_vec.shape)}. "
+                f"Check where you build the time/class/season embeddings."
+            )
+
+        bias = proj(t_vec)  # [B, C]
+        if bias.ndim != 2:
+            raise ValueError(f"{where}: projection produced {tuple(bias.shape)}; expected [B, C].")
+
+        bias = bias.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
+        return fmap + bias
 
     def forward(self,  # type: ignore
                 x:torch.Tensor, 
                 t:torch.Tensor, 
                 y:Optional[torch.Tensor]=None, 
-                doy_vec:Optional[torch.Tensor]=None,
                 cond_img:Optional[torch.Tensor]=None, 
                 lsm_cond:Optional[torch.Tensor]=None, 
                 topo_cond:Optional[torch.Tensor]=None
@@ -342,120 +382,112 @@ class Encoder(ResNet):
             Forward function for the class. The input x and time embedding t are used to calculate the output.
             The output is the encoded input x.
             Input:
-                - x: input tensor, noised image
-                - t: time embedding tensor, time step
-                - y: label tensor, optional
-                - cond_img: conditional image tensor, optional (must be concatenated correctly, if multiple channels)
-                - lsm_cond: conditional tensor for land-sea mask, optional
-                - topo_cond: conditional tensor for elevation, optional
+                x:          [B, C_hr, H, W] input tensor, noised image (+ already concatenated channels if any)
+                t:          [B] | [B, 1] scalar times, or pre-embedded [B, time_embedding]
+                y:          label tensor, optional:
+                                - Long [B] for categorical labels (dtype long/int) (season/month/day id) -> label_emb
+                                - Float [B, 2] for continuous scalar labels (e.g. sin/cos DOY) -> temporal_emb
+                cond_img:   [B, C_lr, H, W] conditional image tensor, optional (must be concatenated correctly, if multiple channels)
+                lsm_cond:   [B, 1, H, W] conditional tensor for land-sea mask, optional
+                topo_cond:  [B, 1, H, W] conditional tensor for topography, optional
 
             Output:
                 - fmap1, fmap2, fmap3, fmap4, fmap5: feature maps
 
         '''
         dev = x.device
-        t = t.to(dev)
 
+
+        # === 1) Canonicalize time to [B, time_embedding] ===
+        t = t.to(dev)
+        if t.ndim == 2 and t.shape[1] == self.time_embedding:
+            t_base = t  # Already embedded
+        elif (t.ndim == 1) or (t.ndim == 2 and t.shape[1] == 1):
+            t_base = self.sinusoidal_embedding(t.view(-1))  # [B, time_embedding]
+        else:
+            raise ValueError(f"[Encoder.forward] Unexpected t shape {tuple(t.shape)}. Must be [B], [B,1], or [B,{self.time_embedding}].")
+
+        # === 2) Add optional label (categorical) or sin/cos (continuous) to time ===
+        if (self.num_classes is not None) and (y is not None) and y.dtype in (torch.long, torch.int64, torch.int32):
+            y_in = y.to(dev)
+            # Accept [B] or [B,1]; reject anything else
+            if y_in.ndim == 2 and y_in.shape[1] == 1:
+                y_in = y_in[:, 0]          # -> [B]
+            elif y_in.ndim != 1:
+                raise ValueError(f"[Encoder.forward] categorical y must be [B] or [B,1], got {tuple(y.shape)}")
+            y_emb = self.label_emb(y_in)    # [B, time_embedding]
+            t_comb = t_base + y_emb         # stays [B, time_embedding]
+        elif (y is not None) and torch.is_floating_point(y):
+            # sin/cos DOY: y shape [B, 2]
+            ycont = y.to(dev)
+            if ycont.dim() > 2:
+                ycont = ycont.view(ycont.shape[0], -1)
+            assert ycont.shape[-1] == 2, f"Expected sin/cos with last dim==2, got shape {tuple(ycont.shape)}."
+            t_comb = t_base + self.temporal_emb(ycont)  # [B, time_embedding]
+        else:
+            t_comb = t_base  # [B, time_embedding]
+        # Final safety: must be strictly 2-D [B, time_embedding]
+        if not (t_comb.ndim == 2 and t_comb.shape[1] == self.time_embedding):
+            raise ValueError(
+                f"[Encoder.forward] t_comb must be [B,{self.time_embedding}], got {tuple(t_comb.shape)}. "
+                f"Check sigma_emb/cfg and label embedding inputs."
+            )
+
+        # === 3) Concatenate optional conditional inputs to x ===
         if lsm_cond is not None:
             if lsm_cond.shape[0] != x.shape[0]:
                 raise ValueError(f"Batch mismatch: x= {x.shape[0]}, lsm_cond={lsm_cond.shape[0]}.")
-            lsm_cond = lsm_cond.to(dev)
-            x = torch.cat([x, lsm_cond], dim=1)
+            x = torch.cat([x, lsm_cond.to(dev)], dim=1)
         if topo_cond is not None:
             if topo_cond.shape[0] != x.shape[0]:
                 raise ValueError(f"Batch mismatch: x= {x.shape[0]}, topo_cond={topo_cond.shape[0]}.")
-            topo_cond = topo_cond.to(dev)
-            x = torch.cat([x, topo_cond], dim=1)
-
+            x = torch.cat([x, topo_cond.to(dev)], dim=1)
         if cond_img is not None:
-
-            cond_img = cond_img.to(dev)
-            # logger.debug('\n\nCond image shape: ', cond_img.shape)
-            # logger.debug('Input shape: ', x.shape)
-            # logger.debug('Concatenating conditional image to input')
-            # Concatenate the conditional image to the input
-            x = torch.cat((x, cond_img), dim=1)
-            #x = x.to(torch.double)
-            #logger.info('Conditional image added to input with dtype: ', x.dtype, '\n')
+            if cond_img.shape[0] != x.shape[0]:
+                raise ValueError(f"Batch mismatch: x= {x.shape[0]}, cond_img={cond_img.shape[0]}.")
+            x = torch.cat([x, cond_img.to(dev)], dim=1)
 
 
-        # Send the inputs to the device
-        if y is not None:
-            y = y.to(dev)
-        
 
-        # For time-embedding: allow pre-embedded t (for EDM compatibility):
-        if t.dim() == 2 and t.shape[-1] == self.time_embedding:
-            t = t.to(dev)
-        else:
-            # Embed the time positions
-            t = t.unsqueeze(-1).type(torch.float)
-            # t = self.pos_encoding(t, self.time_embedding)#self.num_classes)
-            t = self.sinusoidal_embedding(t.view(-1)) # Use the sinusoidal embedding instead of the positional encoding (to align with Decoder)
+        # === 4) Validate shape/channels ===
+        if x.ndim != 4:
+            raise ValueError(f"Encoder expects NCHW input; got {x.shape}")
+        if x.shape[1] != self.input_channels:
+            raise ValueError(f"In-channel mismatch: got {x.shape[1]}, expected {self.input_channels}. "
+                            "Check dual_lr / geo with_mask and dataset stacking.")
 
-        # y can be categorical (Long) OR temporal vector (Float with last dim==2)
-        if y is not None:
-            if y.dtype in (torch.long, torch.int64, torch.int32):
-                if hasattr(self, 'label_emb'):
-                    t = t + self.label_emb(y.to(dev))
-            else:
-                # Treat as continuous; accept [B,2] or [B,1,2]
-                ycont = y.to(dev)
-                if ycont.dim() > 2:
-                    ycont = ycont.view(ycont.shape[0], -1)
-                assert ycont.shape[-1] == 2, f"Expected 2D continuous labels, got shape {tuple(ycont.shape)}."
-                t = t + self.temporal_emb(ycont)
+        assert t_comb.shape == (x.shape[0], self.time_embedding), \
+            f"[Encoder] bad t_comb: {tuple(t_comb.shape)} vs (B,{self.time_embedding}) with B={x.shape[0]}"
 
-        # Prepare fmap1, the first feature map, by applying the first convolutional layer to the input x
+        # === 5) Encoder path with time-bias at each stage ===
+        # fmap1
         fmap1 = self.conv1(x)
-        # Project the time embedding onto fmap1
-        t_emb = self.time_projection_layers[0](t)
-        # Add the projected time embedding to fmap1
-        fmap1 = fmap1 + t_emb[:, :, None, None]
-        # Calculate the attention for fmap1
+        fmap1 = self._add_time_bias(fmap1, self.time_projection_layers[0], t_comb, "after conv1")
         fmap1 = self.attention_layers[0](fmap1)
-        
-        # Prepare fmap2, the second feature map, by applying the second convolutional layer to fmap1
-        x = self.conv2(fmap1)
-        # Normalize fmap2 with batch normalization
-        x = self.bn1(x)
-        # Apply the ReLU activation function to fmap2
-        x = self.relu(x)
-        
-        # Prepare fmap2, the second feature map, by applying the first layer of blocks to fmap2
-        fmap2 = self.layer1(x)
-        # Project the time embedding onto fmap2 
-        t_emb = self.time_projection_layers[1](t)
-        # Add the projected time embedding to fmap2
-        fmap2 = fmap2 + t_emb[:, :, None, None]
-        # Calculate the attention for fmap2
+
+        # conv2 -> bn1 -> relu
+        x2 = self.conv2(fmap1)
+        x2 = self.bn1(x2)
+        x2 = self.relu(x2)
+
+        # fmap2
+        fmap2 = self.layer1(x2)
+        fmap2 = self._add_time_bias(fmap2, self.time_projection_layers[1], t_comb, "at fmap2")
         fmap2 = self.attention_layers[1](fmap2)
         
-        # Prepare fmap3, the third feature map, by applying the second layer of blocks to fmap2
+        # fmap3
         fmap3 = self.layer2(fmap2)
-        # Project the time embedding onto fmap3
-        t_emb = self.time_projection_layers[2](t)
-        # Add the projected time embedding to fmap3
-        fmap3 = fmap3 + t_emb[:, :, None, None]
-        # Calculate the attention for fmap3
+        fmap3 = self._add_time_bias(fmap3, self.time_projection_layers[2], t_comb, "at fmap3")
         fmap3 = self.attention_layers[2](fmap3)
         
-        # Prepare fmap4, the fourth feature map, by applying the third layer of blocks to fmap3
+        # fmap4
         fmap4 = self.layer3(fmap3)
-        # Project the time embedding onto fmap4
-        t_emb = self.time_projection_layers[3](t)
-        # Add the projected time embedding to fmap4
-        fmap4 = fmap4 + t_emb[:, :, None, None]
-        # Calculate the attention for fmap4
+        fmap4 = self._add_time_bias(fmap4, self.time_projection_layers[3], t_comb, "at fmap4")
         fmap4 = self.attention_layers[3](fmap4)
-        
-        # Prepare fmap5, the fifth feature map, by applying the fourth layer of blocks to fmap4
+
+        # fmap5
         fmap5 = self.layer4(fmap4)
-        # Project the time embedding onto fmap5
-        t_emb = self.time_projection_layers[4](t)
-        # Add the projected time embedding to fmap5
-        fmap5 = fmap5 + t_emb[:, :, None, None]
-        # Calculate the attention for fmap5
+        fmap5 = self._add_time_bias(fmap5, self.time_projection_layers[4], t_comb, "at fmap5")
         fmap5 = self.attention_layers[4](fmap5)
         
         # Return the feature maps

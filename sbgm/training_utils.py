@@ -885,7 +885,7 @@ def infer_in_channels(cfg: dict) -> int:
     n_lr = len(cfg['lowres']['condition_variables']) if cfg['lowres']['condition_variables'] is not None else 0
 
     if cfg['lowres']['dual_lr']:
-        n_lr += 1 # Add one channel for the dual-res mask
+        n_lr += 1 # Add one extra LR channel (dual LR)
 
     n_geo = 0
     if cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']:
@@ -1068,115 +1068,219 @@ def get_device(verbose=True):
 
 
 def apply_cfg_dropout(
+        *,
         cond_images: torch.Tensor | None,
-        lsm: torch.Tensor | None,
-        topo: torch.Tensor | None,
-        seasons: torch.Tensor | None,
+        lsm_cond: torch.Tensor | None,
+        topo_cond: torch.Tensor | None,
+        y: torch.Tensor | None,
         lr_ups: torch.Tensor | None,
-        cfg_guidance: dict | None
-):
+        cfg_guidance: dict | None) -> tuple[
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+            dict]:
     """
-    Classifier-free guidance style dropout for conditioning signals.
-    - Supports separate drop probabilities for LR dynamic conditions and geo/static conditions 
-    - Drops all LR channels per sample together, using Bernoulli masks (good for CFG)
-    - Drops lsm and topo together per sample (so "geo off" really means no geography)
-    - Handles seasons whther it is categorical (LongTensor labels) or continuous scalars (e.g. cos/sin day-of-year),
-      using null_label_id or null_scalar_value from cfg_guidance respectively.
-    - Works with any tensor shapes by broadcasting the per-sample mask to [B, 1, ...] as needed.
-
-    Args:
-        cond_images: Low-res dynamic conditions [B, C_lr, H, W] (already upsampled/aligned to model grid).
-        lsm:         Land-sea mask or static mask(s)         [B, C_geo1, H, W] or [B,1,H,W] (may be None).
-        topo:        Topography/static feature(s)            [B, C_geo2, H, W] or [B,1,H,W] (may be None).
-        seasons:     Seasonal condition. Can be:
-                     - Long tensor of class indices [B] or [B, 1]
-                     - Float tensor of scalar(s)   [B] or [B, 1] (e.g., cos(day), sin(day))
-        lr_ups:      Low-res conditions upsampled to high-res grid [B, C_lr, H_hr, W_hr] (may be None).
-        cfg_guidance: Dict with keys:
-            {
-              'enabled': bool,
-              'drop_prob_lr': float,     # drop probability for LR dynamic conditions (+ seasons)
-              'drop_prob_geo': float,    # drop probability for geo/static conditions
-              'null_label_id': int,      # category id for "null" label (for long seasons)
-              'null_scalar_value': float # value to use when dropping scalar seasons
-            }
-
-    Returns:
-        Tuple[cond_images, lsm, topo, seasons, lr_ups] with per-sample drops applied.
+        Apply classifier-free guidance drops independently to LR (cond_imgs, lr_ups), GEO (lsm/topo)
+        and CLASS (y). Returns possibly modified tensors and an info dict.
+        cfg_guidance keys used:
+            'enabled': bool,
+            'drop_prob_lr': float,              drop probability for LR dynamic conditions (+ seasons)
+            'drop_prob_geo': float,             drop probability for geo/static conditions
+            'drop_prob_class': float,           drop probability for class conditions
+            'null_label_id': int,               category id for "null" label (for long seasons)
+            'null_scalar_value': float          value to use when dropping scalar seasons
+            'null_geo_value': float             value to use when dropping static geo (topo)
+            'null_lr_strategy': str             'zero' | 'noise' | 'scalar' (how to drop LR conds)
+            'null_lr_scalar': float             value to use when null_lr_strategy is 'scalar'
     """
-    if not cfg_guidance or not cfg_guidance.get('enabled', False):
-        return cond_images, lsm, topo, seasons, lr_ups # Always return 5 
+    enabled = bool(cfg_guidance.get('enabled', False)) if cfg_guidance is not None else False
+    if not enabled:
+        return cond_images, lsm_cond, topo_cond, y, lr_ups, {'dropped_lr': False, 'dropped_geo': False, 'dropped_class': False} # Always return 5 + info dict
     
-    # Resolve per-group drop probabilities
-    p_cond = float(cfg_guidance.get('drop_prob_lr', 0.1))
-    p_geo = float(cfg_guidance.get('drop_prob_geo', 0.1))
-    null_label_id = int(cfg_guidance.get('null_label_id', 0))
-    null_scalar = float(cfg_guidance.get('null_scalar_value', 0.0))
+    # Probabilities
+    p_lr        = float(cfg_guidance.get('drop_prob_lr', 0.1)) if cfg_guidance is not None else 0.1
+    p_geo       = float(cfg_guidance.get('drop_prob_geo', p_lr)) if cfg_guidance is not None else p_lr
+    p_class     = float(cfg_guidance.get('drop_prob_class', 0.0)) if cfg_guidance is not None else 0.0
 
-    
-    # Choose a reference tensor to get B/device
-    ref = None
-    for t in (cond_images, lsm, topo, seasons):
-        if t is not None:
-            ref = t
-            break
+    # Null strategies/constants
+    null_label_id       = int(cfg_guidance.get('null_label_id', 0)) if cfg_guidance is not None else 0
+    null_scalar         = float(cfg_guidance.get('null_scalar_value', 0.0)) if cfg_guidance is not None else 0.0
+    null_geo_value      = float(cfg_guidance.get('null_geo_value', -5.0)) if cfg_guidance is not None else -5.0
+    lr_null_strategy    = str(cfg_guidance.get('null_lr_strategy', 'zero')) if cfg_guidance is not None else 'zero'
+    lr_null_scalar      = float(cfg_guidance.get('null_lr_scalar', 0.0)) if cfg_guidance is not None else 0.0
 
-    if ref is None:
-        # No drop possible
-        return cond_images, lsm, topo, seasons
-    B = ref.shape[0]
-    device = ref.device
-    
-    # === Build per-sample Bernoulli masks ===
-    # LR dynamic (and seasons share p_cond)
-    mask_cond = (torch.rand(B, device=device) < p_cond)  # True -> drop this sample's LR (+season)
-    # Geo/static (drop lsm/topo together per sample)
-    mask_geo  = (torch.rand(B, device=device) < p_geo)   # True -> drop this sample's geo
+    # Draw Bernoulli once per batch (keeps branches balanced and cheaper)
+    dev_available = 'cuda' if torch.cuda.is_available() else 'cpu'
+    dev_lr  = cond_images.device if cond_images is not None else (lr_ups.device if lr_ups is not None else dev_available)
+    dev_geo = lsm_cond.device if lsm_cond is not None else (topo_cond.device if topo_cond is not None else dev_available)
+    dev_cls = y.device if isinstance(y, torch.Tensor) else dev_available
 
-    # Helper to expand [B] -> broadcast shape of a target tensor
-    def _expand_mask(m: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # Target can be [B, ...]. We want mask shaped [B,1,1,1] or [B,1] etc. to broadcast.
-        view_shape = [B] + [1] * (target.dim() - 1)
-        return m.view(*view_shape)
+    drop_lr_batch    = (torch.rand((), device=dev_lr) < p_lr).item()
+    drop_geo_batch   = (torch.rand((), device=dev_geo) < p_geo).item()
+    drop_class_batch = (torch.rand((), device=dev_cls) < p_class).item() if isinstance(y, torch.Tensor) else False
 
-    # === Apply to LR dynamic conditions ===
-    if cond_images is not None:
-        m = _expand_mask(mask_cond, cond_images)
-        # Zero is a sensible "null" for continuous LR channels
-        cond_images = torch.where(m, torch.zeros_like(cond_images), cond_images)
-    
-    predict_residual = bool(cfg_guidance.get('predict_residual', False))
-    if lr_ups is not None and not predict_residual:
-        m = _expand_mask(mask_cond, lr_ups)
-        lr_ups = torch.where(m, torch.zeros_like(lr_ups), lr_ups)
+    # === LR group (cond_ims + LR_ups) ===
+    def _null_lr_like(t):
+        if t is None:
+            return None
+        if lr_null_strategy == 'noise':
+            return torch.randn_like(t)
+        elif lr_null_strategy == 'scalar':
+            return t.new_full(t.shape, lr_null_scalar)
+        return torch.zeros_like(t) # 'zero' or default
 
-    # === Apply to static geo (drop together) ===
-    if lsm is not None:
-        m_geo = _expand_mask(mask_geo, lsm)
-        lsm = torch.where(m_geo, torch.zeros_like(lsm), lsm)
-    if topo is not None:
-        m_geo = _expand_mask(mask_geo, topo)
-        topo = torch.where(m_geo, torch.zeros_like(topo), topo)
+    if drop_lr_batch:
+        cond_images = _null_lr_like(cond_images)
+        lr_ups      = _null_lr_like(lr_ups)
 
-    # === Apply to seasonal condition (shares LR mask) ===
-    if seasons is not None:
-        # Accept [B], [B,1], or more
-        if seasons.dtype in (torch.long, torch.int64, torch.int32):
-            # categorical labels
-            if seasons.dim() == 1:
-                seasons = seasons.clone()
-                seasons[mask_cond] = null_label_id
-            else:
-                # e.g., [B,1]
-                m = _expand_mask(mask_cond, seasons)
-                seasons = torch.where(m, torch.full_like(seasons, null_label_id), seasons)
+
+
+    # === GEO group (lsm + topo, value || mask convention) ===
+    def _null_geo_like(t):
+        if t is None:
+            return None
+        if t.ndim >= 2 and t.shape[1] >= 2:
+            # Assume value + mask convention, set value to null_geo_value, keep mask as is
+            out = t.clone()
+            out[:, 0, ...] = null_geo_value # Set value channel to null_geo_value
+            out[:, 1, ...] = 0.0 # Set mask channel to zero (no land)
+            return out
+        return t.new_full(t.shape, null_geo_value)
+
+    if drop_geo_batch:
+        lsm_cond  = _null_geo_like(lsm_cond)
+        topo_cond = _null_geo_like(topo_cond)
+
+    # === CLASS group (y, either categorical or cos/sin) ===
+    if drop_class_batch and isinstance(y, torch.Tensor):
+        if y.dtype in (torch.float16, torch.float32, torch.float64):
+            # Scalar seasons (e.g. cos/sin day-of-year)
+            y = torch.zeros_like(y).fill_(null_scalar) # sin/cos DOY (both == null_scalar)
         else:
-            # float scalar(s)
-            fill_val = null_scalar
-            if seasons.dim() == 1:
-                m = mask_cond
-            else:
-                m = _expand_mask(mask_cond, seasons)
-            seasons = torch.where(m, torch.full_like(seasons, fill_val), seasons)
+            # Categorical seasons (long tensor of class indices)
+            y = torch.full_like(y, null_label_id) # categorical DOY/season/month
+    # Info dict
+    info = {
+        'dropped_lr': bool(drop_lr_batch),
+        'dropped_geo': bool(drop_geo_batch),
+        'dropped_class': bool(drop_class_batch)
+    }
 
-    return cond_images, lsm, topo, seasons, lr_ups
+    return cond_images, lsm_cond, topo_cond, y, lr_ups, info
+
+
+# def apply_cfg_dropout(
+#         cond_images: torch.Tensor | None,
+#         lsm: torch.Tensor | None,
+#         topo: torch.Tensor | None,
+#         seasons: torch.Tensor | None,
+#         lr_ups: torch.Tensor | None,
+#         cfg_guidance: dict | None
+# ):
+#     """
+#     Classifier-free guidance style dropout for conditioning signals.
+#     - Supports separate drop probabilities for LR dynamic conditions and geo/static conditions 
+#     - Drops all LR channels per sample together, using Bernoulli masks (good for CFG)
+#     - Drops lsm and topo together per sample (so "geo off" really means no geography)
+#     - Handles seasons whther it is categorical (LongTensor labels) or continuous scalars (e.g. cos/sin day-of-year),
+#       using null_label_id or null_scalar_value from cfg_guidance respectively.
+#     - Works with any tensor shapes by broadcasting the per-sample mask to [B, 1, ...] as needed.
+
+#     Args:
+#         cond_images: Low-res dynamic conditions [B, C_lr, H, W] (already upsampled/aligned to model grid).
+#         lsm:         Land-sea mask or static mask(s)         [B, C_geo1, H, W] or [B,1,H,W] (may be None).
+#         topo:        Topography/static feature(s)            [B, C_geo2, H, W] or [B,1,H,W] (may be None).
+#         seasons:     Seasonal condition. Can be:
+#                      - Long tensor of class indices [B] or [B, 1]
+#                      - Float tensor of scalar(s)   [B] or [B, 1] (e.g., cos(day), sin(day))
+#         lr_ups:      Low-res conditions upsampled to high-res grid [B, C_lr, H_hr, W_hr] (may be None).
+#         cfg_guidance: Dict with keys:
+#             {
+#               'enabled': bool,
+#               'drop_prob_lr': float,     # drop probability for LR dynamic conditions (+ seasons)
+#               'drop_prob_geo': float,    # drop probability for geo/static conditions
+#               'null_label_id': int,      # category id for "null" label (for long seasons)
+#               'null_scalar_value': float # value to use when dropping scalar seasons
+#             }
+
+#     Returns:
+#         Tuple[cond_images, lsm, topo, seasons, lr_ups] with per-sample drops applied.
+#     """
+#     if not cfg_guidance or not cfg_guidance.get('enabled', False):
+#         return cond_images, lsm, topo, seasons, lr_ups # Always return 5 
+    
+#     # Resolve per-group drop probabilities
+#     p_cond = float(cfg_guidance.get('drop_prob_lr', 0.1))
+#     p_geo = float(cfg_guidance.get('drop_prob_geo', 0.1))
+#     null_label_id = int(cfg_guidance.get('null_label_id', 0))
+#     null_scalar = float(cfg_guidance.get('null_scalar_value', 0.0))
+
+    
+#     # Choose a reference tensor to get B/device
+#     ref = None
+#     for t in (cond_images, lsm, topo, seasons):
+#         if t is not None:
+#             ref = t
+#             break
+
+#     if ref is None:
+#         # No drop possible
+#         return cond_images, lsm, topo, seasons
+#     B = ref.shape[0]
+#     device = ref.device
+    
+#     # === Build per-sample Bernoulli masks ===
+#     # LR dynamic (and seasons share p_cond)
+#     mask_cond = (torch.rand(B, device=device) < p_cond)  # True -> drop this sample's LR (+season)
+#     # Geo/static (drop lsm/topo together per sample)
+#     mask_geo  = (torch.rand(B, device=device) < p_geo)   # True -> drop this sample's geo
+
+#     # Helper to expand [B] -> broadcast shape of a target tensor
+#     def _expand_mask(m: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+#         # Target can be [B, ...]. We want mask shaped [B,1,1,1] or [B,1] etc. to broadcast.
+#         view_shape = [B] + [1] * (target.dim() - 1)
+#         return m.view(*view_shape)
+
+#     # === Apply to LR dynamic conditions ===
+#     if cond_images is not None:
+#         m = _expand_mask(mask_cond, cond_images)
+#         # Zero is a sensible "null" for continuous LR channels
+#         cond_images = torch.where(m, torch.zeros_like(cond_images), cond_images)
+    
+#     predict_residual = bool(cfg_guidance.get('predict_residual', False))
+#     if lr_ups is not None and not predict_residual:
+#         m = _expand_mask(mask_cond, lr_ups)
+#         lr_ups = torch.where(m, torch.zeros_like(lr_ups), lr_ups)
+
+#     # === Apply to static geo (drop together) ===
+#     if lsm is not None:
+#         m_geo = _expand_mask(mask_geo, lsm)
+#         lsm = torch.where(m_geo, torch.zeros_like(lsm), lsm)
+#     if topo is not None:
+#         m_geo = _expand_mask(mask_geo, topo)
+#         topo = torch.where(m_geo, torch.zeros_like(topo), topo)
+
+#     # === Apply to seasonal condition (shares LR mask) ===
+#     if seasons is not None:
+#         # Accept [B], [B,1], or more
+#         if seasons.dtype in (torch.long, torch.int64, torch.int32):
+#             # categorical labels
+#             if seasons.dim() == 1:
+#                 seasons = seasons.clone()
+#                 seasons[mask_cond] = null_label_id
+#             else:
+#                 # e.g., [B,1]
+#                 m = _expand_mask(mask_cond, seasons)
+#                 seasons = torch.where(m, torch.full_like(seasons, null_label_id), seasons)
+#         else:
+#             # float scalar(s)
+#             fill_val = null_scalar
+#             if seasons.dim() == 1:
+#                 m = mask_cond
+#             else:
+#                 m = _expand_mask(mask_cond, seasons)
+#             seasons = torch.where(m, torch.full_like(seasons, fill_val), seasons)
+
+#     return cond_images, lsm, topo, seasons, lr_ups
