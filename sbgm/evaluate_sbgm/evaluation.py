@@ -23,10 +23,12 @@ import logging
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Iterable, Dict, Any
+from contextlib import contextmanager
+from typing import Optional, Iterable, Dict, Any, List
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
 from sbgm.utils import get_model_string
 # from sbgm.training_utils import load_land_mask_if_any  # if you have something similar; else set mask=None
@@ -47,10 +49,61 @@ from sbgm.evaluate_sbgm.metrics_univariate import (
     rxk_series,
     fit_gev_block_maxima_with_ci,
     fit_pot_gpd_with_ci,
-    compute_isotropic_psd
+    compute_isotropic_psd,
+    compute_and_save_pooled_pixel_distributions,
+    compute_and_save_yearly_maps,
+)
+
+from sbgm.evaluate_sbgm.plot_utils import (
+    plot_pooled_pixel_distributions,
+    plot_yearly_maps,
+    plot_reliability,
+    plot_spread_skill,
+    plot_fss_curves,
+    plot_psd_slope_bar,
+    plot_psd_curves_eval,
+    plot_pit_and_rank,
 )
 
 logger = logging.getLogger(__name__)
+
+# --- helpers for robust date parsing and season filtering ---
+def _to_datetime64(d: str) -> np.datetime64:
+    """Accept 'YYYY-MM-DD' or 'YYYYMMDD' stems and return np.datetime64('YYYY-MM-DD')."""
+    try:
+        if isinstance(d, str):
+            s = d.strip()
+            if len(s) == 8 and s.isdigit():
+                s = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+            return np.datetime64(s)
+        return np.datetime64(d)
+    except Exception:
+        # Fallback: treat as NaT so caller can skip
+        return np.datetime64('NaT')
+def _season_of_month(m: int) -> str:
+    # DJF, MAM, JJA, SON
+    if m in (12, 1, 2):
+        return "DJF"
+    if m in (3, 4, 5):
+        return "MAM"
+    if m in (6, 7, 8):
+        return "JJA"
+    return "SON"
+def _filter_dates_by_season(dates: Iterable[str], season: str) -> list[str]:
+    """Return only those date stems belonging to the requested climatological season."""
+    if season.upper() == "ALL":
+        return list(dates)
+    out = []
+    for d in dates:
+        dt = _to_datetime64(d)
+        if str(dt) == "NaT":
+            continue
+        # works because np.datetime64 -> 'YYYY-MM-DD'
+        s = str(dt)
+        m = int(s[5:7])
+        if _season_of_month(m) == season.upper():
+            out.append(d)
+    return out
 
 
 # === Helpers for baseline evaluation metrics implementation ===
@@ -170,8 +223,16 @@ class EvaluationConfig:
     pit_bins: int = 10  # Number of bins for PIT histograms
     psd_ignore_low_k_bins: int = 1  # Number of lowest k bins to ignore in PSD slope fitting
     random_ref_kind: str = "phase_randomized"  # Kind of random reference for FSS, "iid_marginal" | "spatial_shuffle" | "phase_randomized"
+    seasonal_summaries: bool = True
+    region_mask_path: Optional[str] = None
+    pixel_dist_n_bins: int = 100        # Number of bins for pooled pixel distributions
+    pixel_dist_vmax_percentile: float = 99.5  # Max value percentile for pooled pixel distributions
+    pixel_dist_save_cap: int = 2_000_000  # Max number of pixel samples to save for pooled pixel distributions
+    yearly_maps: tuple = ("mean", "sum", "rx1", "rx5")  # Types of yearly maps to compute
     seasons: tuple = ("ALL", "DJF", "MAM", "JJA", "SON")  # Seasons to consider for seasonal analysis
+    add_yearly_ratio_diff: bool = True
     seed: int = 504                  # Random seed for reproducibility
+    eval_land_only: bool = True    # Whether to evaluate only over land pixels if a land mask is provided
 
 
 class EvaluationRunner:
@@ -180,12 +241,14 @@ class EvaluationRunner:
                  eval_cfg: EvaluationConfig,
                  device: torch.device,
                  mask: Optional[torch.Tensor] = None,
-                 baseline_data: Optional[Dict[str, Dict[str, Any]]] = None):
+                 baseline_data: Optional[Dict[str, Dict[str, Any]]] = None,
+                 baseline_eval_dirs: Optional[Dict[str, str]] = None):
         self.cfg_yaml = cfg_yaml
         self.eval_cfg = eval_cfg
         self.device = device
         self.mask = mask  # [H,W] bool or None
         self.baseline_data = baseline_data
+        self.baseline_eval_dirs = baseline_eval_dirs
 
         self.gen_root = Path(eval_cfg.gen_dir)
         # Prefer physical-space outputs; fall back to model-space if needed
@@ -212,6 +275,44 @@ class EvaluationRunner:
         (self.out_root / "tables").mkdir(parents=True, exist_ok=True)
         (self.out_root / "figures").mkdir(parents=True, exist_ok=True)
 
+        self.eval_land_only = bool(getattr(self.eval_cfg, 'eval_land_only', True))
+        logger.info("[eval] Masking mode: eval_land_only=%s", self.eval_land_only)
+
+        # Optional ROI mask (e.g., Denmark-only)
+        self.roi_mask: Optional[torch.Tensor] = None
+        try:
+            roi_path = eval_cfg.region_mask_path
+            if isinstance(roi_path, str):
+                p = Path(roi_path)
+                if p.suffix.lower() in {".npz", ".npy"} and p.exists():
+                    arr = np.load(p, allow_pickle=True)
+                    if isinstance(arr, np.lib.npyio.NpzFile): # type: ignore
+                        # try common keys
+                        a = arr.get("mask", None)
+                        if a is None: a = arr.get("lsm_hr", None)
+                        if a is None: a = arr.get("roi", None)
+                        if a is None: a = arr.get("data", None)
+                    else:
+                        a = arr
+                    if a is not None:
+                        m = torch.from_numpy(np.asarray(a)).to(torch.bool)
+                        # normalize to [H,W]
+                        if m.dim() == 4 and m.shape[:2] == (1, 1): m = m.squeeze(0).squeeze(0)
+                        elif m.dim() == 3 and m.shape[0] == 1:     m = m.squeeze(0)
+                        self.roi_mask = m
+                        logger.info("[eval] Loaded ROI mask from %s with shape %s", p, tuple(self.roi_mask.shape))
+        except Exception as e:
+            logger.warning(f"[eval] Could not load region mask: {e}")
+
+    # Helper to point to seasonal subfolders
+    def _get_baseline_eval_dirs(self) -> Optional[Dict[str, str]]:
+        """Return baseline eval dirs aligned to the current output folder (append season if applicable)."""
+        if not self.baseline_eval_dirs:
+            return None
+        season = self.out_root.name.lower()
+        if season in {"all", "djf", "mam", "jja", "son"}:
+            return {k: str(Path(v) / season) for k, v in self.baseline_eval_dirs.items()}
+        return self.baseline_eval_dirs
 
     # ---------- I/O helpers --------
     def _list_dates(self) -> Iterable[str]:
@@ -279,11 +380,124 @@ class EvaluationRunner:
         else:
             logger.warning("[eval] Unexpected mask shape %s; coercing last two dims as HxW.", tuple(m.shape))
             m = m.reshape(m.shape[-2], m.shape[-1])
+        
+        # Intersect with ROI if provided
+        if hasattr(self, "roi_mask") and (self.roi_mask is not None):
+            try:
+                rm = self.roi_mask
+                if rm.shape != m.shape:
+                    # attempt to coerce to same HxW if leading singleton dims exist
+                    if rm.dim() == 4 and rm.shape[:2] == (1, 1): rm = rm.squeeze(0).squeeze(0)
+                    elif rm.dim() == 3 and rm.shape[0] == 1:     rm = rm.squeeze(0)
+                if rm.shape == m.shape:
+                    m = (m & rm)
+                else:
+                    logger.warning("[eval] ROI mask shape %s did not match mask %s; skipping ROI intersection.", tuple(rm.shape), tuple(m.shape))
+            except Exception:
+                pass
+        
         return m
     
+    def _eval_distributions(self):
+        """
+            Compute pooled pixel distributions and yearly maps using already-generated artifacts.
+            Reuses same implementations as baseline eval for consistency.
+        """
+        tables_dir = self.out_root / "tables"
+        figs_dir = self.out_root / "figures"
+
+        try:
+            logger.info("[eval] Computing pooled pixel distributions...")
+            # knobs (inherit defaults from EvaluationConfig or cfg_yaml.evaluation if present)
+            n_bins = self.eval_cfg.pixel_dist_n_bins
+            vmax_pct = self.eval_cfg.pixel_dist_vmax_percentile
+            save_cap = self.eval_cfg.pixel_dist_save_cap
+
+            logger.info("[eval] Computing pooled pixel distributions (land-only=%s)...", self.eval_land_only)
+            ok = compute_and_save_pooled_pixel_distributions(
+                gen_root=self.gen_root,
+                out_root=self.out_root,
+                mask_global=(self.mask_global if self.eval_land_only else None),
+                include_lr=True,
+                n_bins=n_bins,
+                vmax_percentile=vmax_pct,
+                save_samples_cap=save_cap,
+            )
+            if ok:
+                logger.info("[eval] Wrote pooled pixel distributions under %s", self.out_root / "tables")
+            else:
+                logger.warning("[eval] Failed to compute pooled pixel distributions (empty or missing inputs).")
+            
+            # Optional plots
+            try:
+                plot_pooled_pixel_distributions(
+                    eval_root=str(self.out_root),
+                    baseline_eval_dirs=None,)
+            except Exception as e:
+                logger.warning(f"[eval] Could not plot pooled pixel distributions: {e}")
+
+        except Exception as e:
+            logger.warning(f"[eval] Exception during pooled pixel distributions computation: {e}")
+
+    def _eval_yearly_maps(self):
+        """
+            Compute yearly maps using already-generated artifacts.
+            Reuses same implementations as baseline eval for consistency.
+        """
+        try:
+            logger.info("[eval] Computing yearly maps...")
+            which_maps = tuple(self.eval_cfg.yearly_maps)
+            
+            # Build a static mask (land-only or ROI) if needed
+            mask_for_maps = None
+            if self.eval_land_only and (self.mask_global is not None):
+                mask_for_maps = self.mask_global
+            
+            if getattr(self, "roi_mask", None) is not None:
+                rm = self.roi_mask
+                # normalize rm to [H,W]
+                if rm is None or not hasattr(rm, "dim"):
+                    logger.warning("[eval] ROI mask is not a tensor-like object; skipping ROI intersection for yearly maps.")
+                else:
+                    if rm.dim() == 4 and rm.shape[:2] == (1, 1):   # [1,1,H,W]
+                        rm = rm.squeeze(0).squeeze(0)
+                    elif rm.dim() == 3 and rm.shape[0] == 1:       # [1,H,W]
+                        rm = rm.squeeze(0)
+                    if mask_for_maps is None:
+                        mask_for_maps = rm
+                    elif mask_for_maps.shape == rm.shape:
+                        mask_for_maps = (mask_for_maps & rm)
+                        logger.info("[eval] Combined ROI mask for yearly maps.")
+                    else:
+                        logger.warning("[eval] ROI mask shape %s did not match existing mask %s; skipping ROI intersection for yearly maps.", tuple(rm.shape), tuple(mask_for_maps.shape))
+                    
+
+            ok = compute_and_save_yearly_maps(
+                gen_root=self.gen_root,
+                out_root=self.out_root,
+                which=which_maps,
+                include_lr=True,
+                mask=mask_for_maps, # To help function mask HR/PMM/LR consistently
+            )
+            if ok:
+                logger.info("[eval] Wrote yearly maps under %s", self.out_root / "tables")
+                try:
+                    plot_yearly_maps(
+                        eval_root=str(self.out_root),
+                        years=None,
+                        which=which_maps,
+                        baselines=self._get_baseline_eval_dirs(),
+                    )
+                except Exception as e:
+                    logger.warning(f"[eval] Could not plot yearly maps: {e}")
+            else:
+                logger.warning("[eval] Failed to compute yearly maps (insufficient accumulation?).")
+        
+        except Exception as e:
+            logger.warning(f"[eval] Exception during yearly maps computation: {e}")
 
     # ---------- Probabilistic metrics (per day) ----------
-    def eval_probabilistic(self):
+    def eval_probabilistic(self, dates_subset: Optional[List[str]] = None):
         """
         Compute per-day probabilistic metrics and save tables/figures
         Evaluates: 
@@ -294,7 +508,10 @@ class EvaluationRunner:
         Outputs CSV tables and NPZ files for PIT/rank histograms
         """
         tables_dir = self.out_root / "tables"
-        figs_dir = self.out_root / "figures"
+        figs_dir   = self.out_root / "figures"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        figs_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("[eval] Probabilistic -> tables: crps_daily.csv, reliability_bins.csv, spread_skill.csv; figs: pit_hist.png, rank_hist.png")
 
         rows_crps = []
         rows_rel = []
@@ -303,7 +520,7 @@ class EvaluationRunner:
         pit_values_all = []
         rank_counts = None
 
-        for date in self._list_dates():
+        for date in (dates_subset if dates_subset is not None else self._list_dates()):
             obs = self._load_obs(date)      # [H,W] or None
             ens = self._load_ens(date)      # [M,H,W] or None
             if obs is None or ens is None: 
@@ -312,8 +529,7 @@ class EvaluationRunner:
 
             # Prefer mask saved during generation (stationary canonical or per-date),
             # fall back to user-provided mask.
-            m = self._load_mask(date)
-            mask = m if (m is not None) else self.mask
+            mask = self._load_mask(date) if self.eval_land_only else None
 
             # CRPS (mean over masked pixels)
             crps_val = crps_ensemble(obs, ens, mask=mask, reduction="mean")
@@ -443,10 +659,27 @@ class EvaluationRunner:
             np.savez_compressed(figs_dir / "rank_hist_counts.npz", counts=rank_counts.cpu().numpy())
             logger.info("[eval] Saved rank histogram counts → %s", figs_dir / "rank_hist_counts.npz")
 
+        # === Plots (with baseline overlays if available) ===
+        try: 
+            plot_reliability(eval_root=str(self.out_root),
+                             thr_mm_list=self.eval_cfg.thresholds_mm,
+                             baseline_eval_dirs=self._get_baseline_eval_dirs())
+        except Exception as e:
+            logger.warning(f"[eval] Could not plot reliability diagrams: {e}")
+        try:
+            plot_spread_skill(eval_root=str(self.out_root))
+        except Exception as e:
+            logger.warning(f"[eval] Could not plot spread–skill: {e}")
+        try:
+            plot_pit_and_rank(eval_root=str(self.out_root),
+                              pit_bins=int(self.eval_cfg.pit_bins))
+        except Exception as e:
+            logger.warning(f"[eval] Could not plot PIT/rank histograms: {e}")
+
 
 
     # ---------- Capability metrics on PMM (across all days) ----------
-    def eval_capability(self):
+    def eval_capability(self, dates_subset: Optional[List[str]] = None):
         """
         Compute capability metrics using daily PMM fields and save tables/figures
         Evaluates: 
@@ -456,10 +689,13 @@ class EvaluationRunner:
         Outputs tables (CSV/JSON) and figures
         """
         tables_dir = self.out_root / "tables"
-        figs_dir = self.out_root / "figures"
+        figs_dir   = self.out_root / "figures"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        figs_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("[eval] Capability -> FSS, PSD slope, p95/p99+wet; yearly_maps=%s", ",".join(self.eval_cfg.yearly_maps))
 
         PMM, HR, dates_used = [], [], []
-        for date in self._list_dates():
+        for date in (dates_subset if dates_subset is not None else self._list_dates()):
             pmm = self._load_pmm(date)   # [H,W]
             obs = self._load_obs(date)   # [H,W]
             if pmm is None or obs is None:
@@ -486,7 +722,7 @@ class EvaluationRunner:
             mask_list = []
             all_have_mask = True
             for d in dates_used:
-                m = self._load_mask(d)
+                m = self._load_mask(d) if self.eval_land_only else None
                 if m is None:
                     m = self.mask
                 if m is None:
@@ -624,9 +860,22 @@ class EvaluationRunner:
             w.writeheader(); w.writerow(tails_row)
         logger.info("[eval] Wrote flat tails CSV to %s : %s", tails_csv, tails_row)
 
+        # === Plots (with baseline overlays if available) ===
+        try:
+            plot_fss_curves(eval_root=str(self.out_root),
+                            thr_mm_list=self.eval_cfg.thresholds_mm,
+                            baseline_eval_dirs=self._get_baseline_eval_dirs())
+        except Exception as e:
+            logger.warning(f"[eval] Could not plot FSS curves: {e}")
+        try:
+            plot_psd_curves_eval(eval_root=str(self.out_root),
+                            baseline_eval_dirs=self._get_baseline_eval_dirs())
+        except Exception as e:
+            logger.warning(f"[eval] Could not plot PSD curves: {e}")
+
 
     # ---------- Extremes (basin-mean series) ----------
-    def eval_extremes(self):
+    def eval_extremes(self, dates_subset: Optional[List[str]] = None):
         """
         Compute extreme value metrics using basin-mean daily series and save tables/figures
         Evaluates: 
@@ -636,9 +885,12 @@ class EvaluationRunner:
         """
         tables_dir = self.out_root / "tables"
         figs_dir = self.out_root / "figures"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        figs_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("[eval] Extremes -> GEV (Rx1day/Rx5day), POT/GPD; tables: gev_*.json, pot_*.json")
 
         # Build daily basin-mean series from HR + PMM
-        dates = list(self._list_dates())
+        dates = list(dates_subset if dates_subset is not None else self._list_dates())
         HR = []
         PMM = []
         for date in dates:
@@ -661,7 +913,7 @@ class EvaluationRunner:
             # Intersect all per-date masks (logical AND) so extremes compare the same area
             masks = []
             for d in dates:
-                md = self._load_mask(d)
+                md = self._load_mask(d) if self.eval_land_only else None
                 if md is not None:
                     masks.append(md)
             basin = None
@@ -744,9 +996,29 @@ class EvaluationRunner:
         else:
             logger.warning("[eval] Too few wet HR days (N=%d) to set a robust POT threshold; skipping POT.", wet_hr.size)
 
+    @contextmanager
+    def _season_out(self, season_name: str):
+        old_root = self.out_root
+        try:
+            sroot = old_root / 'seasonal' / season_name.lower()
+            (sroot / "tables").mkdir(parents=True, exist_ok=True)
+            (sroot / "figures").mkdir(parents=True, exist_ok=True)
+            self.out_root = sroot
+            yield sroot
+        finally:
+            self.out_root = old_root
 
     # ---------- Orchestrator ----------
     def run_all(self, do_prob=True, do_cap=True, do_ext=True):
+        logger.info("[Eval] === Evaluation plan ===")
+        logger.info("       - Probabilistic metrics: %s (CRPS, reliability@%s mm, spread-skill, PIT/rank histograms)",
+                    do_prob, ",".join(str(x) for x in self.eval_cfg.thresholds_mm))
+        logger.info("       - Capability metrics:    %s (FSS@%s km, PSD slope and curves, P95/P99/wet freq, pooled dists, yearly maps=%s)",
+                    do_cap, ",".join(str(x) for x in self.eval_cfg.fss_scales_km), ",".join(self.eval_cfg.yearly_maps))
+        logger.info("       - Extremes metrics:      %s (GEV for Rx1day/Rx5day, POT/GPD over threshold %.1f mm)",
+                    do_ext, self.eval_cfg.wet_threshold_mm)
+        logger.info("       - Seasonal sub-evaluations: %s over %s",
+                    self.eval_cfg.seasonal_summaries, ",".join(self.eval_cfg.seasons or []))
 
         if do_prob: self.eval_probabilistic()
         if do_cap:  self.eval_capability()
@@ -764,3 +1036,36 @@ class EvaluationRunner:
         }
         (self.out_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
         logger.info("[eval] Wrote manifest to %s", self.out_root / "manifest.json")
+
+
+        # Optional pooled pixel distributions and yearly maps (ALL + seasonal)
+        try:
+            self._eval_distributions()
+        except Exception as e:
+            logger.warning(f"[eval] Exception during pooled pixel distributions eval: {e}")
+        try:
+            self._eval_yearly_maps()
+        except Exception as e:
+            logger.warning(f"[eval] Exception during yearly maps eval: {e}")
+
+        # Optional seasonal subfolders
+        do_seasonal = self.eval_cfg.seasons is not None and len(self.eval_cfg.seasons) > 0
+        if do_seasonal:
+            self.run_seasonal(do_prob=do_prob, do_cap=do_cap, do_ext=do_ext)
+
+
+    def run_seasonal(self, do_prob=True, do_cap=True, do_ext=True):
+        for season in self.eval_cfg.seasons:
+            sel = _filter_dates_by_season(self._list_dates(), season)
+            logger.info("[eval][%s] %d dates selected", season, len(sel))
+            with self._season_out(season):
+                logger.info("[eval][%s] Outputs under: %s", season, self.out_root)
+                if do_prob:
+                    logger.info("[eval][%s] Running probabilistic metrics...", season)
+                    self.eval_probabilistic(dates_subset=sel)
+                if do_cap:
+                    logger.info("[eval][%s] Running capability metrics...", season)
+                    self.eval_capability(dates_subset=sel)
+                if do_ext:
+                    logger.info("[eval][%s] Running extremes metrics...", season)
+                    self.eval_extremes(dates_subset=sel)

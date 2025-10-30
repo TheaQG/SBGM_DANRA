@@ -897,7 +897,13 @@ def plot_yearly_maps(eval_root: str,
                      years: Optional[Sequence[int]] = None,
                      which: Sequence[str] = ("mean","sum","rx1","rx5"),
                      baselines: Optional[Dict[str, str]] = None,
-                     cmap: str = "Blues"):
+                     cmap: str = "Blues",
+                     *,
+                     add_ratio: bool = False,
+                     ratio_metrics: Sequence[str] = ("mean","sum"),
+                     ratio_clip: float = 100.0,
+                     ratio_cmap: str = "RdBu_r", # diverging
+                     ):
     """
     Read maps from <eval_root>/maps/year_YYYY_*.npz and plot side-by-side panels:
       HR | PMM | (LR if present)
@@ -1038,6 +1044,39 @@ def plot_yearly_maps(eval_root: str,
             fig.suptitle(f"{int(y)} • Yearly {metric}")
             fig.savefig(str(figs_dir / f"year_{int(y)}_{metric}.png"), dpi=200)
             plt.close(fig)
+
+            # Optional: percent-difference panel (PMM vs HR) 
+            if add_ratio and (metric in set(ratio_metrics)):
+                # require both HR and PMM to compute percent difference
+                if hr is None or pmm is None:
+                    logger.warning("Skipping ratio plot for year %s metric %s: missing HR or PMM", y, metric)
+                else:
+                    hr_safe = np.copy(hr)
+                    eps = 1e-8
+                    mask_valid = np.isfinite(hr_safe) & (np.abs(hr_safe) > eps) & np.isfinite(pmm)
+                    ratio = np.full_like(pmm, np.nan, dtype=np.float32)
+                    ratio[mask_valid] = 100.0 * (pmm[mask_valid]/hr_safe[mask_valid] - 1.0)
+
+                    # Symmetric color scaling around 0
+                    if np.isfinite(ratio).any():
+                        vmax_auto = np.nanpercentile(np.abs(ratio[np.isfinite(ratio)]), 99.0)
+                        vmax = float(min(max(vmax_auto, 1.0), float(ratio_clip)))
+                    else:
+                        vmax = float(ratio_clip)
+                    vmin = -vmax
+
+                    _nice()
+                    fig_r, ax_r = plt.subplots(1, 1, figsize=(5,4), constrained_layout=True)
+                    imr = ax_r.imshow(ratio, origin="lower", vmin=vmin, vmax=vmax, cmap=ratio_cmap)
+                    ax_r.set_title(f"PMM vs HR (% difference)")
+                    ax_r.set_xticks([]); ax_r.set_yticks([])
+                    cbar = fig_r.colorbar(imr, ax=ax_r, shrink=0.8)
+                    cbar.set_label("% difference (PMM/HR - 1) * 100")
+                    fig_r.suptitle(f"{int(y)} • Yearly {metric} Percent Difference")
+                    out_name = figs_dir / f"year_{int(y)}_{metric}_ratio.png"
+                    fig_r.savefig(str(out_name), dpi=200)
+                    plt.close(fig_r)
+
 
 
 

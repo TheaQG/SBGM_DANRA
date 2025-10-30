@@ -302,6 +302,11 @@ class GenerationRunner:
                     lsm_cpu = (lsm.detach().cpu() > 0.5).to(torch.bool)
                     # assume B==1 in generation; take [0]
                     lsm0 = lsm_cpu[0, 0] if lsm_cpu.dim() == 4 else lsm_cpu.squeeze()
+                    # Always save per-date mask if saving is enabled
+                    if save:
+                        _save_npz(self.out_root / 'lsm' / f'{dates[0]}.npz', lsm_hr=lsm0.numpy())
+                        logger.info("[generation] Saved per-date land mask → %s", self.out_root / 'lsm' / f'{dates[0]}.npz')
+                    # Set/compare canonical mask, and save canonical on first encounter if saving
                     if self._first_lsm is None:
                         self._first_lsm = lsm0.clone()
                         if self.stationary_cutout:
@@ -312,11 +317,6 @@ class GenerationRunner:
                     else:
                         if not torch.equal(self._first_lsm, lsm0):
                             self._lsm_stationary_ok = False
-                    # Always save per-date mask if not stationary or user asked for non-stationary
-                    if (not self.stationary_cutout) or (self.stationary_cutout and not self._lsm_stationary_ok):
-                        if save:
-                            _save_npz(self.out_root / 'lsm' / f'{dates[0]}.npz', lsm_hr=lsm0.numpy())
-                            logger.info("[generation] Saved per-date land mask → %s", self.out_root / 'lsm' / f'{dates[0]}.npz')
             except Exception as e:
                 logger.warning(f"[generation] Could not record LSM for {dates[0]}: {e}")
 

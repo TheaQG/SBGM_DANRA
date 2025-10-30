@@ -71,8 +71,16 @@ def evaluation_main(cfg):
         pit_bins=int(cfg_full_gen_eval.get("pit_bins", 20)),
         psd_ignore_low_k_bins=int(cfg_full_gen_eval.get("psd_ignore_low_k_bins", 1)),
         random_ref_kind=str(cfg_full_gen_eval.get("random_ref_kind", "phase_randomized")),
+        seasonal_summaries=bool(cfg_full_gen_eval.get("seasonal_summaries", True)),
+        region_mask_path=cfg_full_gen_eval.get("region_mask_path", None),
+        pixel_dist_n_bins=int(cfg_full_gen_eval.get("pixel_dist_n_bins", 100)),
+        pixel_dist_vmax_percentile=float(cfg_full_gen_eval.get("pixel_dist_vmax_percentile", 99.5)),
+        pixel_dist_save_cap=int(cfg_full_gen_eval.get("pixel_dist_save_cap", 2_000_000)),
+        add_yearly_ratio_diff=bool(cfg_full_gen_eval.get("add_yearly_ratio_diff", True)),
+        yearly_maps=tuple(cfg_full_gen_eval.get("yearly_maps", ("mean", "sum", "rx1", "rx5"))),
         seasons=tuple(cfg_full_gen_eval.get("seasons", ("ALL","DJF","MAM","JJA","SON"))),
         seed=seed,
+        eval_land_only=bool(cfg_full_gen_eval.get("eval_land_only", False)),
     )
 
     # Set up baselines
@@ -82,11 +90,24 @@ def evaluation_main(cfg):
 
     baseline_data = None
     if use_baselines:
-
         baseline_data = load_all_baselines(cfg, split=split, names=baseline_names)
         logger.info(f"[evaluation_main] Loaded baseline data for {len(baseline_data)} baselines: {list(baseline_data.keys())}")
 
-    runner = EvaluationRunner(cfg_yaml=cfg, eval_cfg=ev_cfg, device=device, mask=mask, baseline_data=baseline_data)
+    # NEW: build baseline eval directories map (name -> eval dir)
+    baseline_eval_dirs = None
+    if use_baselines:
+        base_root = Path(cfg["paths"]["sample_dir"]) / "evaluation" / "baselines"
+        names = baseline_names or (list(baseline_data.keys()) if baseline_data else [])
+        baseline_eval_dirs = {name: str(base_root / name / split) for name in names}
+
+    runner = EvaluationRunner(
+        cfg_yaml=cfg,
+        eval_cfg=ev_cfg,
+        device=device,
+        mask=mask,
+        baseline_data=baseline_data,
+        baseline_eval_dirs=baseline_eval_dirs,  # <-- now actually populated
+    )
     runner.run_all(do_prob=do_prob, do_cap=do_cap, do_ext=do_ext)
 
     logger.info(f"[evaluation_main] Done. Outputs at: {eval_root}")

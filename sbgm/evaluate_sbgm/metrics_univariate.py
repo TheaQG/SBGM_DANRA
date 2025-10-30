@@ -963,41 +963,71 @@ def compute_and_save_yearly_maps(
     out_root: str | Path,
     which: Sequence[str] = ("mean","sum","rx1","rx5"),
     include_lr: bool = True,
+    mask: Optional[torch.Tensor] = None,
 ) -> bool:
     """
     Aggregate daily HR/PMM (and optional LR) into yearly maps and save under:
-      <out_root>/maps/year_YYYY_{means,sums,rx1,rx5}.npz
+      <out_root>/maps/year_YYYY_{mean|sum|rx1|rx5}.npz
     Each NPZ contains keys: 'hr', 'pmm', and optionally 'lr'.
     Returns True iff at least one year's maps were written.
     """
+
     gen_root = Path(gen_root)
     out_root = Path(out_root)
+
+    # Prefer physical-space folders if present
+    pmm_dir  = (gen_root / "pmm_phys") if (gen_root / "pmm_phys").exists() else (gen_root / "pmm")
+    lrhr_dir = (gen_root / "lr_hr_phys") if (gen_root / "lr_hr_phys").exists() else (gen_root / "lr_hr")
+
+    # Create out dirs
     maps_dir = out_root / "maps"
     maps_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir = out_root / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
 
-    pmm_dir  = gen_root / "pmm_phys"
-    lrhr_dir = gen_root / "lr_hr_phys"
-    if not pmm_dir.exists():  pmm_dir  = gen_root / "pmm"
-    if not lrhr_dir.exists(): lrhr_dir = gen_root / "lr_hr"
+    # Optional static mask normalization
+    mask_np: np.ndarray | None = None
+    if mask is not None:
+        if isinstance(mask, torch.Tensor):
+            m = mask
+            if m.dtype != torch.bool:
+                m = m > 0.5
+            # normalize to [H,W]
+            if m.dim() == 4 and m.shape[:2] == (1, 1):
+                m = m.squeeze(0).squeeze(0)
+            elif m.dim() == 3 and m.shape[0] == 1:
+                m = m.squeeze(0)
+            mask_np = m.detach().cpu().numpy().astype(bool)
+        else:
+            mask_np = np.asarray(mask, dtype=bool)
+    logger.info("[metrics] yearly-maps: pmm_dir=%s lrhr_dir=%s mask=%s", pmm_dir, lrhr_dir, "yes" if mask_np is not None else "no")
 
     dates = sorted([p.stem for p in pmm_dir.glob("*.npz")])
-    logger.info("[metrics] yearly-maps: pmm_dir=%s lrhr_dir=%s n_dates=%d", pmm_dir, lrhr_dir, len(dates))
+    logger.info("[metrics] yearly-maps: n_dates=%d", len(dates))
     if len(dates) == 0:
         logger.warning("[metrics] yearly-maps: no dates found → nothing written")
         return False
 
     @dataclass
     class YearAgg:
-        sum_hr: Optional[np.ndarray] = None
-        sum_pmm: Optional[np.ndarray] = None
-        sum_lr: Optional[np.ndarray] = None
-        n: int = 0
-        rx1_hr: Optional[np.ndarray] = None
-        rx1_pmm: Optional[np.ndarray] = None
-        rx1_lr: Optional[np.ndarray] = None
-        rx5_hr: Optional[np.ndarray] = None
-        rx5_pmm: Optional[np.ndarray] = None
-        rx5_lr: Optional[np.ndarray] = None
+        # running sums for mean & sum (NaN-masked)
+        sum_hr: np.ndarray | None = None
+        sum_pmm: np.ndarray | None = None
+        sum_lr: np.ndarray | None = None
+        # valid-pixel counters for mean (per-pixel), NaN-safe
+        cnt_hr: np.ndarray | None = None
+        cnt_pmm: np.ndarray | None = None
+        cnt_lr: np.ndarray | None = None
+        # day counter (for provenance)
+        n_days: int = 0
+        # Rx1 (daily max) accumulators (NaN-aware)
+        rx1_hr: np.ndarray | None = None
+        rx1_pmm: np.ndarray | None = None
+        rx1_lr: np.ndarray | None = None
+        # Rx5 (rolling 5-day sum) accumulators and buffers
+        rx5_hr: np.ndarray | None = None
+        rx5_pmm: np.ndarray | None = None
+        rx5_lr: np.ndarray | None = None
         last5_hr: Deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=5))
         last5_pmm: Deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=5))
         last5_lr: Deque[np.ndarray] = field(default_factory=lambda: deque(maxlen=5))
@@ -1010,100 +1040,185 @@ def compute_and_save_yearly_maps(
 
     acc: DefaultDict[int, YearAgg] = defaultdict(YearAgg)
 
-    def _get_np(folder: Path, date: str, key: str):
-        p = folder / f"{date}.npz"
-        if not p.exists(): return None
+    def _get_np(date: str, src: str, key: str):
+        """Safe npz loader with dir/key logic."""
+        p = (pmm_dir if src == "pmm" else lrhr_dir) / f"{date}.npz"
+        if not p.exists():
+            return None
         try:
             d = np.load(p, allow_pickle=True)
             a = d.get(key, None)
-            if a is None: return None
-            return np.nan_to_num(a.squeeze(), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+            if a is None:
+                return None
+            x = np.nan_to_num(a.squeeze().astype(np.float32), nan=np.nan, posinf=np.nan, neginf=np.nan)
+            if mask_np is not None:
+                # Apply spatial mask → invalid pixels set to NaN
+                if mask_np.shape != x.shape:
+                    try:
+                        m = np.broadcast_to(mask_np, x.shape)
+                    except Exception:
+                        logger.warning("[metrics] yearly-maps: mask shape %s not compatible with %s; ignoring mask.", mask_np.shape, x.shape)
+                        m = None
+                else:
+                    m = mask_np
+                if m is not None:
+                    x = np.where(m, x, np.nan)
+            # We also clamp negatives to zero for precip fields to avoid NaN propagation in sums
+            x = np.where(np.isfinite(x), np.maximum(x, 0.0), np.nan)
+            return x
         except Exception:
             return None
 
+    # Accumulate per year
+    n_loaded = 0
+
     for d in dates:
         y = _year_from(d)
-        if y < 0: continue
-        pmm = _get_np(pmm_dir,  d, "pmm")
-        hr  = _get_np(lrhr_dir, d, "hr")
+        if y < 0:
+            continue
+        pmm = _get_np(d, "pmm", "pmm")
+        hr  = _get_np(d, "lrhr", "hr")
         if pmm is None or hr is None:
             continue
-        lr = _get_np(lrhr_dir, d, "lr") if include_lr else None
+        lr = _get_np(d, "lrhr", "lr") if include_lr else None
 
         A = acc[y]
-        # sums / count
-        A.sum_hr  = hr  if A.sum_hr  is None else (A.sum_hr  + hr)
-        A.sum_pmm = pmm if A.sum_pmm is None else (A.sum_pmm + pmm)
-        if lr is not None:
-            A.sum_lr = lr if A.sum_lr is None else (A.sum_lr + lr)
-        A.n += 1
+        H, W = hr.shape
+        # initialize counters on first valid day
+        if A.sum_hr is None:
+            A.sum_hr  = np.zeros((H, W), dtype=np.float32)
+            A.sum_pmm = np.zeros((H, W), dtype=np.float32)
+            A.cnt_hr  = np.zeros((H, W), dtype=np.float32)
+            A.cnt_pmm = np.zeros((H, W), dtype=np.float32)
+            A.rx1_hr  = np.full((H, W), np.nan, dtype=np.float32)
+            A.rx1_pmm = np.full((H, W), np.nan, dtype=np.float32)
+            if include_lr and (lr is not None):
+                A.sum_lr = np.zeros((H, W), dtype=np.float32)
+                A.cnt_lr = np.zeros((H, W), dtype=np.float32)
+                A.rx1_lr = np.full((H, W), np.nan, dtype=np.float32)
 
-        # Rx1 (daily max)
-        A.rx1_hr  = hr  if A.rx1_hr  is None else np.maximum(A.rx1_hr,  hr)
-        A.rx1_pmm = pmm if A.rx1_pmm is None else np.maximum(A.rx1_pmm, pmm)
-        if lr is not None:
-            A.rx1_lr = lr if A.rx1_lr is None else np.maximum(A.rx1_lr, lr)
+        # --- sums + per-pixel counts (NaN-aware) ---
+        A.sum_hr  += np.nan_to_num(hr,  nan=0.0)
+        A.sum_pmm += np.nan_to_num(pmm, nan=0.0)
+        if A.cnt_hr is not None:
+            A.cnt_hr  += np.isfinite(hr).astype(np.float32)
+        else:
+            # initialize if unexpectedly None (defensive)
+            A.cnt_hr = np.isfinite(hr).astype(np.float32)
 
-        # Rx5 (rolling 5-day sum over time)
-        A.last5_hr.append(hr); A.last5_pmm.append(pmm)
-        if lr is not None: A.last5_lr.append(lr)
+        if A.cnt_pmm is not None:
+            A.cnt_pmm += np.isfinite(pmm).astype(np.float32)
+        else:
+            # initialize if unexpectedly None (defensive)
+            A.cnt_pmm = np.isfinite(pmm).astype(np.float32)
+
+        if include_lr and (lr is not None):
+            A.sum_lr += np.nan_to_num(lr, nan=0.0)
+            if A.cnt_lr is not None:
+                A.cnt_lr += np.isfinite(lr).astype(np.float32)
+            else:
+                # initialize if unexpectedly None (defensive)
+                A.cnt_lr = np.isfinite(lr).astype(np.float32)
+
+        # --- Rx1 (NaN-aware max) ---
+        if A.rx1_hr is None:
+            A.rx1_hr = hr.copy()
+        else:
+            A.rx1_hr = np.fmax(cast(np.ndarray, A.rx1_hr), hr)
+
+        if A.rx1_pmm is None:
+            A.rx1_pmm = pmm.copy()
+        else:
+            A.rx1_pmm = np.fmax(cast(np.ndarray, A.rx1_pmm), pmm)
+
+        if include_lr and (lr is not None):
+            if A.rx1_lr is None:
+                A.rx1_lr = lr.copy()
+            else:
+                A.rx1_lr = np.fmax(cast(np.ndarray, A.rx1_lr), lr)
+
+        # --- Rx5 (rolling 5-day sums, then NaN-aware max over window sums) ---
+        A.last5_hr.append(hr);  A.last5_pmm.append(pmm)
+        if include_lr and (lr is not None): A.last5_lr.append(lr)
+
         if len(A.last5_hr) == 5:
-            s5_hr  = np.sum(np.stack(list(A.last5_hr)),  axis=0)
-            s5_pmm = np.sum(np.stack(list(A.last5_pmm)), axis=0)
-            A.rx5_hr  = s5_hr  if A.rx5_hr  is None else np.maximum(A.rx5_hr,  s5_hr)
-            A.rx5_pmm = s5_pmm if A.rx5_pmm is None else np.maximum(A.rx5_pmm, s5_pmm)
-            if len(A.last5_lr) == 5:
-                s5_lr = np.sum(np.stack(list(A.last5_lr)), axis=0)
-                A.rx5_lr = s5_lr if A.rx5_lr is None else np.maximum(A.rx5_lr, s5_lr)
+            # nansum across the 5-day window
+            s5_hr  = np.nansum(np.stack(list(A.last5_hr),  axis=0), axis=0)
+            s5_pmm = np.nansum(np.stack(list(A.last5_pmm), axis=0), axis=0)
+            if A.rx5_hr is None:
+                A.rx5_hr  = s5_hr.copy()
+                A.rx5_pmm = s5_pmm.copy()
+            else:
+                A.rx5_hr  = np.fmax(cast(np.ndarray, A.rx5_hr),  s5_hr)
+                A.rx5_pmm = np.fmax(cast(np.ndarray, A.rx5_pmm), s5_pmm)
+            if include_lr and (lr is not None) and (len(A.last5_lr) == 5):
+                s5_lr = np.nansum(np.stack(list(A.last5_lr), axis=0), axis=0)
+                if A.rx5_lr is None:
+                    A.rx5_lr = s5_lr.copy()
+                else:
+                    A.rx5_lr = np.fmax(cast(np.ndarray, A.rx5_lr), s5_lr)
+
+        A.n_days += 1
+        n_loaded += 1
+
+    if n_loaded == 0:
+        logger.warning("[metrics] yearly-maps: nothing to aggregate (no valid HR/PMM pairs).")
+        return False
+
+    def _nan_div(num: np.ndarray | None, den: np.ndarray | None) -> np.ndarray | None:
+        if num is None or den is None:
+            return None
+        out = np.divide(num, den, out=np.full_like(num, np.nan), where=den > 0.0)
+        return out
 
     wrote_any = False
     for y, A in acc.items():
-        if A.n <= 0:
+        if A.n_days <= 0:
             logger.warning("[metrics] yearly-maps: year %d has no valid days → skipping", y)
             continue
         wrote_any = True
-        n = max(1, int(A.n))
 
-        # --- MEAN ---
+        # --- MEAN (per-pixel using valid counts ---
         if "mean" in which:
             out = {}
-            if A.sum_hr  is not None: out["hr"]  = (A.sum_hr  / n).astype(np.float32)
-            if A.sum_pmm is not None: out["pmm"] = (A.sum_pmm / n).astype(np.float32)
-            if A.sum_lr  is not None: out["lr"]  = (A.sum_lr  / n).astype(np.float32)
+            hr_mean  = _nan_div(A.sum_hr,  A.cnt_hr)
+            pmm_mean = _nan_div(A.sum_pmm, A.cnt_pmm)
+            if hr_mean  is not None: out["hr"]  = hr_mean.astype(np.float32)
+            if pmm_mean is not None: out["pmm"] = pmm_mean.astype(np.float32)
+            if include_lr and (A.sum_lr is not None) and (A.cnt_lr is not None):
+                lr_mean = _nan_div(A.sum_lr, A.cnt_lr)
+                if lr_mean is not None:
+                    out["lr"] = lr_mean.astype(np.float32)
             if out:
-                p1 = maps_dir / f"year_{y}_means.npz"
-                p2 = maps_dir / f"year_{y}_mean.npz"
-                np.savez_compressed(p1, **out)
-                np.savez_compressed(p2, **out)
-                logger.info("[metrics] yearly-maps: wrote %s and %s", p1.name, p2.name)
+                p = maps_dir / f"year_{y}_mean.npz"
+                np.savez_compressed(p, **out)
+                logger.info("[metrics] yearly-maps: wrote %s", p.name)
 
-        # --- SUM ---
+        # --- SUM (NaN treated as zero contribution) ---
         if "sum" in which:
             out = {}
             if A.sum_hr  is not None: out["hr"]  = A.sum_hr.astype(np.float32)
             if A.sum_pmm is not None: out["pmm"] = A.sum_pmm.astype(np.float32)
-            if A.sum_lr  is not None: out["lr"]  = A.sum_lr.astype(np.float32)
+            if include_lr and (A.sum_lr is not None): out["lr"] = A.sum_lr.astype(np.float32)
             if out:
-                p1 = maps_dir / f"year_{y}_sums.npz"
-                p2 = maps_dir / f"year_{y}_sum.npz"
-                np.savez_compressed(p1, **out)
-                np.savez_compressed(p2, **out)
-                logger.info("[metrics] yearly-maps: wrote %s and %s", p1.name, p2.name)
+                p = maps_dir / f"year_{y}_sum.npz"
+                np.savez_compressed(p, **out)
+                logger.info("[metrics] yearly-maps: wrote %s", p.name)
 
-        # --- RX1 ---
-        if "rx1" in which and A.rx1_hr is not None:
+        # --- RX1 (daily max, NaN-aware) ---
+        if "rx1" in which and (A.rx1_hr is not None):
             out = {"hr": A.rx1_hr.astype(np.float32)}
             if A.rx1_pmm is not None: out["pmm"] = A.rx1_pmm.astype(np.float32)
-            if A.rx1_lr  is not None: out["lr"]  = A.rx1_lr.astype(np.float32)
+            if include_lr and (A.rx1_lr is not None): out["lr"] = A.rx1_lr.astype(np.float32)
             p = maps_dir / f"year_{y}_rx1.npz"
             np.savez_compressed(p, **out)
             logger.info("[metrics] yearly-maps: wrote %s", p.name)
 
-        # --- RX5 ---
-        if "rx5" in which and A.rx5_hr is not None:
+        # --- RX5 (max 5-day sum, NaN-aware) ---
+        if "rx5" in which and (A.rx5_hr is not None):
             out = {"hr": A.rx5_hr.astype(np.float32)}
             if A.rx5_pmm is not None: out["pmm"] = A.rx5_pmm.astype(np.float32)
-            if A.rx5_lr  is not None: out["lr"]  = A.rx5_lr.astype(np.float32)
+            if include_lr and (A.rx5_lr is not None): out["lr"] = A.rx5_lr.astype(np.float32)
             p = maps_dir / f"year_{y}_rx5.npz"
             np.savez_compressed(p, **out)
             logger.info("[metrics] yearly-maps: wrote %s", p.name)

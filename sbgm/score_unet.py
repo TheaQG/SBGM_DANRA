@@ -62,6 +62,39 @@ class EDMPrecondUNet(nn.Module):
         time_dim = getattr(encoder, "time_embedding", 128)
         self.sigma_emb = SigmaEmbed(time_dim)
 
+    def _combine_with_labels(self, t_emb: torch.Tensor, y: torch.Tensor | None) -> torch.Tensor:
+        """
+        Build a season-aware embedding t_comb by adding either a categorical label embedding
+        or a continuous DOY sin/cos projection to the sigma embedding t_emb.
+
+        Uses the encoder's embedding modules (label_emb / temporal_emb) to guarantee consistency.
+        """
+        if y is None:
+            return t_emb
+
+        enc = self.encoder
+        longs = (torch.long, torch.int64, torch.int32)
+
+        # Categorical labels
+        if getattr(enc, "num_classes", None) is not None and y.dtype in longs:
+            y_in = y
+            if y_in.ndim == 2 and y_in.shape[1] == 1:
+                y_in = y_in[:, 0]
+            elif y_in.ndim != 1:
+                raise ValueError(f"[EDMPrecondUNet] categorical y must be [B] or [B,1], got {tuple(y.shape)}")
+            y_emb = enc.label_emb(y_in.to(t_emb.device))
+            return t_emb + y_emb
+
+        # Continuous DOY sin/cos
+        if torch.is_floating_point(y):
+            y2 = y.view(y.shape[0], -1)
+            if y2.shape[1] != 2:
+                raise ValueError(f"[EDMPrecondUNet] expected DOY sin/cos with last dim==2, got {tuple(y2.shape)}")
+            return t_emb + enc.temporal_emb(y2.to(t_emb.device))
+
+        # Otherwise leave unchanged
+        return t_emb
+
     def _precond(self, sigma: torch.Tensor):
         """ Compute preconditioning coefficients. (as in Karras et al. 2022) with strict shape control for """
         # Accept sigma of shape [B] or [B, 1], [B, 1, 1, 1] - coerce to [B]
@@ -96,13 +129,17 @@ class EDMPrecondUNet(nn.Module):
         B = x_t.shape[0]
         c_in, c_skip, c_out, c_noise = self._precond(sigma) # c_noise is [B, 1]
 
-        # Validate shapes
+        # Sigmaa embedding [B, time_dim]
         t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
         assert t_emb.ndim == 2 and t_emb.shape[1] == self.encoder.time_embedding, \
             f"[EDMPrecondUnet] Expected t_emb to be [B, {self.encoder.time_embedding}], got {tuple(t_emb.shape)}."
 
         # === Residual-aware preconditioning ===
         # NOTE: LR upsampled must be scaled in HR space!
+
+        # Build combined time for decoder FiLM (season-aware)
+        t_comb = self._combine_with_labels(t_emb, y)  # [B, time_dim]
+
         if self.predict_residual:
             if lr_ups is None:
                 raise ValueError("lr_ups must be provided when predict_residual is True.")
@@ -111,10 +148,9 @@ class EDMPrecondUNet(nn.Module):
             x_shift = x_t - lr_ups
             x_in = c_in.view(B, 1, 1, 1) * x_shift  # [B, C, H, W] Scale residual input
 
-            # Reuse encoder/decoder, they already take t-emb
-            t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
+            # Encoder gets (t_emb,y) so it will add label/DOY internally; decoder gets season-aware t_comb
             enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
-            out = self.decoder(*enc_fmaps, t=t_emb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+            out = self.decoder(*enc_fmaps, t=t_comb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
 
             # Predict x0 as: baseline + preconditioned skip residual + network residual head
             x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_shift + c_out.view(B, 1, 1, 1) * out # As in Karras et al. (2022)
@@ -122,9 +158,8 @@ class EDMPrecondUNet(nn.Module):
         else:
             # Standard EDM preconditioning (no residual awareness)
             x_in = c_in.view(B, 1, 1, 1) * x_t  # [B, C, H, W] Scale input
-            t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
             enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
-            out = self.decoder(*enc_fmaps, t=t_emb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+            out = self.decoder(*enc_fmaps, t=t_comb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
             x0_hat = c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out
 
         return x0_hat
@@ -312,6 +347,14 @@ class Encoder(ResNet):
         # Set the attention layers, for calculating the attention for each feature map
         self.attention_layers = self.make_attention_layers(fmap_channels)
         
+        # === FiLM (scale & shift by DOY feature) layers per feature map ===
+        self.film_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(self.time_embedding, 2 * ch)  # -> [B, 2*C]
+            ) for ch in fmap_channels
+        ])
+
         # Set the first convolutional layer, with N input channels(=input_channels) and 64 output channels
         self.conv1 = nn.Conv2d(
             self.input_channels, 64, 
@@ -369,6 +412,29 @@ class Encoder(ResNet):
 
         bias = bias.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
         return fmap + bias
+
+    def _apply_film(self, fmap: torch.Tensor, film_mlp: nn.Module, t_vec: torch.Tensor, where: str) -> torch.Tensor:
+        """
+        FiLM modulation: produce per-channel gamma,beta from t_vec and apply:
+            y = (1 + gamma) * x + beta
+        Expects t_vec to be strictly [B, time_embedding].
+        """
+        assert fmap.ndim == 4, f"{where}: expected fmap to be 4D NCHW, got {tuple(fmap.shape)}"
+
+        if t_vec.ndim != 2:
+            t_vec = t_vec.reshape(t_vec.shape[0], -1)
+        if t_vec.shape[1] != self.time_embedding:
+            raise ValueError(f"{where}: t_vec must be [B,{self.time_embedding}] but got {tuple(t_vec.shape)}.")
+
+        gb = film_mlp(t_vec)  # [B, 2*C]
+        C = fmap.shape[1]
+        if gb.ndim != 2 or gb.shape[1] != 2 * C:
+            raise ValueError(f"{where}: FiLM MLP output must be [B,{2*C}], got {tuple(gb.shape)}.")
+
+        gamma, beta = torch.chunk(gb, 2, dim=1)      # each [B, C]
+        gamma = gamma.unsqueeze(-1).unsqueeze(-1)    # [B, C, 1, 1]
+        beta  = beta.unsqueeze(-1).unsqueeze(-1)     # [B, C, 1, 1]
+        return fmap * (1.0 + gamma) + beta
 
     def forward(self,  # type: ignore
                 x:torch.Tensor, 
@@ -462,7 +528,7 @@ class Encoder(ResNet):
         # === 5) Encoder path with time-bias at each stage ===
         # fmap1
         fmap1 = self.conv1(x)
-        fmap1 = self._add_time_bias(fmap1, self.time_projection_layers[0], t_comb, "after conv1")
+        fmap1 = self._apply_film(fmap1, self.film_layers[0], t_comb, "Encoder FiLM after conv1")
         fmap1 = self.attention_layers[0](fmap1)
 
         # conv2 -> bn1 -> relu
@@ -472,26 +538,58 @@ class Encoder(ResNet):
 
         # fmap2
         fmap2 = self.layer1(x2)
-        fmap2 = self._add_time_bias(fmap2, self.time_projection_layers[1], t_comb, "at fmap2")
+        fmap2 = self._apply_film(fmap2, self.film_layers[1], t_comb, "Encoder FiLM after fmap2")
         fmap2 = self.attention_layers[1](fmap2)
         
         # fmap3
         fmap3 = self.layer2(fmap2)
-        fmap3 = self._add_time_bias(fmap3, self.time_projection_layers[2], t_comb, "at fmap3")
+        fmap3 = self._apply_film(fmap3, self.film_layers[2], t_comb, "Encoder FiLM after fmap3")
         fmap3 = self.attention_layers[2](fmap3)
         
         # fmap4
         fmap4 = self.layer3(fmap3)
-        fmap4 = self._add_time_bias(fmap4, self.time_projection_layers[3], t_comb, "at fmap4")
+        fmap4 = self._apply_film(fmap4, self.film_layers[3], t_comb, "Encoder FiLM after fmap4")
         fmap4 = self.attention_layers[3](fmap4)
 
         # fmap5
         fmap5 = self.layer4(fmap4)
-        fmap5 = self._add_time_bias(fmap5, self.time_projection_layers[4], t_comb, "at fmap5")
+        fmap5 = self._apply_film(fmap5, self.film_layers[4], t_comb, "Encoder FiLM after fmap5")
         fmap5 = self.attention_layers[4](fmap5)
         
         # Return the feature maps
         return fmap1, fmap2, fmap3, fmap4, fmap5
+        # # fmap1
+        # fmap1 = self.conv1(x)
+        # fmap1 = self._add_time_bias(fmap1, self.time_projection_layers[0], t_comb, "after conv1")
+        # fmap1 = self.attention_layers[0](fmap1)
+
+        # # conv2 -> bn1 -> relu
+        # x2 = self.conv2(fmap1)
+        # x2 = self.bn1(x2)
+        # x2 = self.relu(x2)
+
+        # # fmap2
+        # fmap2 = self.layer1(x2)
+        # fmap2 = self._add_time_bias(fmap2, self.time_projection_layers[1], t_comb, "at fmap2")
+        # fmap2 = self.attention_layers[1](fmap2)
+        
+        # # fmap3
+        # fmap3 = self.layer2(fmap2)
+        # fmap3 = self._add_time_bias(fmap3, self.time_projection_layers[2], t_comb, "at fmap3")
+        # fmap3 = self.attention_layers[2](fmap3)
+        
+        # # fmap4
+        # fmap4 = self.layer3(fmap3)
+        # fmap4 = self._add_time_bias(fmap4, self.time_projection_layers[3], t_comb, "at fmap4")
+        # fmap4 = self.attention_layers[3](fmap4)
+
+        # # fmap5
+        # fmap5 = self.layer4(fmap4)
+        # fmap5 = self._add_time_bias(fmap5, self.time_projection_layers[4], t_comb, "at fmap5")
+        # fmap5 = self.attention_layers[4](fmap5)
+        
+        # # Return the feature maps
+        # return fmap1, fmap2, fmap3, fmap4, fmap5
     
     
     def make_time_projections(self, fmap_channels:Iterable[int]):
@@ -625,12 +723,13 @@ class DecoderBlock(nn.Module):
         self.activation = activation()
 
         # -------------------------------
-        # (C) Time embedding path
+        # (C) Time embedding path (FiLM)
         # -------------------------------
         self.sinusoidal_embedding = SinusoidalEmbedding(self.time_embedding)
+        # Produce gamma || beta for FiLM (2 * output_channels)
         self.time_projection_layer = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(self.time_embedding, self.output_channels)
+                nn.Linear(self.time_embedding, 2 * self.output_channels)
             )
         
         # -------------------------------
@@ -685,17 +784,25 @@ class DecoderBlock(nn.Module):
                 prev_fmap = prev_fmap.to(x.device)
             x = x + prev_fmap
 
-        # === time embedding/projection (broadcast add) ===
+        # === FiLM modulation from time embedding ===
         if t is not None:
             # Accept either raw timesteps [B] or pre-embedded [B, time_dim]
             if t.dim() == 1 or (t.dim() == 2 and t.shape[-1] != getattr(self, "time_embedding", self.time_embedding)):
                 t_emb = self.sinusoidal_embedding(t.view(-1))  # [B, time_dim]
             else:
                 t_emb = t
-            t_proj = self.time_projection_layer(t_emb).unsqueeze(-1).unsqueeze(-1)  # [B, C_out, 1, 1]
-            if t_proj.device != x.device:
-                t_proj = t_proj.to(x.device)
-            x = x + t_proj  # broadcast add
+            gb = self.time_projection_layer(t_emb)  # [B, 2*C_out]
+            C = x.shape[1]
+            if gb.shape[1] != 2 * C:
+                raise ValueError(f"Time projection output {tuple(gb.shape)} must be [B,{2*C}] to match x with {C} channels.")
+            gamma, beta = torch.chunk(gb, 2, dim=1)      # each [B, C_out]
+            gamma = gamma.unsqueeze(-1).unsqueeze(-1)    # [B, C_out, 1, 1]
+            beta  = beta.unsqueeze(-1).unsqueeze(-1)     # [B, C_out, 1, 1]
+            x = x * (1.0 + gamma) + beta
+            # t_proj = self.time_projection_layer(t_emb).unsqueeze(-1).unsqueeze(-1)  # [B, C_out, 1, 1]
+            # if t_proj.device != x.device:
+            #     t_proj = t_proj.to(x.device)
+            # x = x + t_proj  # broadcast add
 
         # === Non-linearity ===
         x = self.activation(x)
@@ -809,7 +916,7 @@ class Decoder(nn.Module):
                 output = block(output, fmaps[idx+1], t)
         # No previous fmap is passed to the final decoder block
         # and no attention is computed
-        output = self.final_layer(output)
+        output = self.final_layer(output, t=t)
         return output
 
       
@@ -900,7 +1007,11 @@ class ScoreNet(nn.Module):
         dev = x.device
         t = t.to(dev).float()
         if y is not None:
-            y = y.to(dev).long() # long for embedding lookup
+            # either categorical (long) or continuous (float)
+            if y.dtype in (torch.long, torch.int64, torch.int32):
+                y = y.to(dev).long()
+            else:
+                y = y.to(dev)
         if cond_img is not None:
             cond_img = cond_img.to(dev)
         if lsm_cond is not None:
@@ -915,8 +1026,34 @@ class ScoreNet(nn.Module):
         # Optional sanity check (helps catch shape/order mismatches early)
         # assert isinstance(enc_fmaps, (list, tuple)) and len(enc_fmaps) >= 2, "Encoder must return a list/tuple of >=2 feature maps"
 
-        # === Decode ===
-        score = self.decoder(*enc_fmaps, t=t)
+        # === Decode with season-aware FiLM ===
+        time_dim = getattr(self.encoder, "time_embedding", 128)
+        # Build t_emb (if not already embedded)
+        if t.ndim == 2 and t.shape[1] == time_dim:
+            t_emb = t
+        else:
+            t_emb = self.encoder.sinusoidal_embedding(t.view(-1))
+
+        # Reuse the encoder's embedding heads for consistency
+        def _combine_with_labels(t_in: torch.Tensor, y_in: torch.Tensor | None) -> torch.Tensor:
+            if y_in is None:
+                return t_in
+            if getattr(self.encoder, "num_classes", None) is not None and y_in.dtype in (torch.long, torch.int64, torch.int32):
+                yi = y_in
+                if yi.ndim == 2 and yi.shape[1] == 1:
+                    yi = yi[:, 0]
+                elif yi.ndim != 1:
+                    raise ValueError(f"[ScoreNet] categorical y must be [B] or [B,1], got {tuple(y_in.shape)}")
+                return t_in + self.encoder.label_emb(yi.to(t_in.device))
+            if torch.is_floating_point(y_in):
+                y2 = y_in.view(y_in.shape[0], -1)
+                if y2.shape[1] != 2:
+                    raise ValueError(f"[ScoreNet] expected DOY sin/cos with last dim==2, got {tuple(y2.shape)}")
+                return t_in + self.encoder.temporal_emb(y2.to(t_in.device))
+            return t_in
+
+        t_comb = _combine_with_labels(t_emb, y)
+        score = self.decoder(*enc_fmaps, t=t_comb)
 
         # === DEBUG: Distribution before sigma-division ===
         if getattr(self, "debug_pre_sigma_div", True):

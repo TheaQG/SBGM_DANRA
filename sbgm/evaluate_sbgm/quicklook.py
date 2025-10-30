@@ -11,6 +11,7 @@ from sbgm.training_utils import get_model
 from sbgm.evaluate_sbgm.generation_main import get_final_gen_dataloader
 from sbgm.evaluate_sbgm.generation import GenerationRunner, GenerationConfig
 from sbgm.utils import get_model_string
+from sbgm.variable_utils import get_cmap_for_variable
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,12 @@ def _outdir_quicklook(cfg) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
-def _imshow(ax, arr2d, title, vmin=None, vmax=None):
+def _imshow(ax, arr2d, title, vmin=None, vmax=None, cmap=None):
     """Draw a 2D array with provided vmin/vmax (can be shared across panels)."""
     if vmin is None and vmax is None:
-        im = ax.imshow(arr2d, origin="upper")
+        im = ax.imshow(arr2d, origin="upper", cmap=cmap)
     else:
-        im = ax.imshow(arr2d, origin="upper", vmin=vmin, vmax=vmax)
+        im = ax.imshow(arr2d, origin="upper", vmin=vmin, vmax=vmax, cmap=cmap)
     ax.set_title(title, fontsize=10)
     ax.set_xticks([]); ax.set_yticks([])
     return im
@@ -130,6 +131,16 @@ def quicklook_from_runner(cfg):
     out_dir = _outdir_quicklook(cfg)
     vmax = None if vmax_mm is None else float(vmax_mm)
 
+    # --- Resolve colormap: quicklook override or variable-specific default ---
+    try:
+        hr_var = cfg["highres"]["variable"]
+    except Exception:
+        hr_var = None
+    cmap_name = ql.get("cmap", None)
+    if cmap_name is None:
+        # Fallback to registry based on the HR variable (e.g., "prcp" -> "inferno")
+        cmap_name = get_cmap_for_variable(hr_var) if hr_var is not None else "viridis"
+
     # --- Render figures ---
     for item in results:
         date = item["date"]
@@ -230,23 +241,27 @@ def quicklook_from_runner(cfg):
             cols.append((f"m{i+1}", arr))
 
         ncols = len(cols)
-        fig, axes = plt.subplots(1, ncols, figsize=(3.0*ncols, 3.2))
+        fig, axes = plt.subplots(1, ncols, figsize=(3.0*ncols, 3.2), constrained_layout=True)
+        if not isinstance(axes, (list, np.ndarray)):
+            axes = [axes]
+
         ims = []
         for ax, (title, arr2d) in zip(axes, cols):
             if arr2d is None:
                 ax.axis("off"); ax.set_title(f"{title} (n/a)", fontsize=10)
             else:
-                ims.append(_imshow(ax, arr2d, title, vmin=shared_vmin, vmax=shared_vmax))
+                ims.append(_imshow(ax, arr2d, title, vmin=shared_vmin, vmax=shared_vmax, cmap=cmap_name))
         # Shared colorbar spanning all axes (use the last image handle)
         if ims:
-            cbar = fig.colorbar(ims[-1], ax=axes.ravel().tolist(), orientation="vertical",
-                                fraction=0.046, pad=0.04)
+            cbar = fig.colorbar(ims[-1], ax=axes, location="right", pad=0.02)
             # optional label from cfg
             if "cbar_label" in ql:
                 cbar.set_label(str(ql["cbar_label"]))
 
         fig.suptitle(f"{date}", fontsize=11)
-        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        # With constrained_layout=True, avoid tight_layout to prevent engine conflicts with colorbar.
+        # Adjust top margin to make space for the suptitle.
+        fig.subplots_adjust(top=0.90)
 
         if bool(save_png):
             fig.savefig(str(out_dir / f"{date}_quicklook.png"), dpi=150)
