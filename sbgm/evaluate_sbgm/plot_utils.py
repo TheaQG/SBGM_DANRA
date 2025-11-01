@@ -66,7 +66,20 @@ def _axes_as_list(axs_obj: Any) -> List[Axes]:
 
 def plot_reliability(eval_root: str,
                      thr_mm_list=(1,5,10),
-                     baseline_eval_dirs: Optional[Dict[str, str]] = None):
+                     baseline_eval_dirs: Optional[Dict[str, str]] = None,
+                     *,
+                     min_count_to_show: int = 300, # hide dots with few samples
+                     rebin_edges: Optional[Sequence[float]] = None # e.g. [0, .02, .05, .1, .15, .2, .3, 1.0]
+                     ):
+    """
+        Plot reliability diagrams from evaluation CSV, **count-weighted**.
+        Reads reliability_bins.csv from eval_root/tables/. Contains one row per day per bin.
+        Then:
+            1) group by threshold and bin_center
+            2) *weight* prob_pred and freq_obs by 'count'
+            3) optionally rebin to provided edges (to avoid super-sparse tail bins)
+            4) Limit the axes to [0, max_prob + 0.05] if max_prob<1.0 for better visibility.
+    """
     tdir = Path(eval_root) / "tables"
     fdir = _ensure_dir(Path(eval_root) / "figures")
     # read CSV without pandas
@@ -85,45 +98,125 @@ def plot_reliability(eval_root: str,
                 })
             except Exception:
                 continue
+    
+    if rebin_edges is not None:
+        rebin_edges = list(rebin_edges)
+    else:
+        # Sensible default for precipitation: finer at low probs
+        rebin_edges = [0.0, 0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 1.0]
 
     for thr in thr_mm_list:
-        # aggregate by bin_center
-        bins = {}
-        for r in rows:
-            if abs(r["thr"] - float(thr)) > 1e-9:
-                continue
+        # 1) Collect rows for this threshold
+        rel = [r for r in rows if abs(r["thr"] - float(thr)) < 1e-9]
+
+        # 2) Firdt group by original bin_center, count-weighted
+        tmp = {}
+        for r in rel:
             bc = r["bin_center"]
-            if bc not in bins:
-                bins[bc] = {"prob_sum":0.0, "freq_sum":0.0, "cnt_sum":0, "n":0}
-            bins[bc]["prob_sum"] += r["prob_pred"]
-            bins[bc]["freq_sum"] += r["freq_obs"]
-            bins[bc]["cnt_sum"]  += r["count"]
-            bins[bc]["n"]        += 1
-        gb = []
-        for bc, dct in bins.items():
-            n = max(dct["n"], 1)
-            gb.append({
-                "bin_center": bc,
-                "prob_pred": dct["prob_sum"] / n,
-                "freq_obs":  dct["freq_sum"] / n,
-                "count":     dct["cnt_sum"],
+            cnt = max(r["count"], 0)
+            if bc not in tmp:
+                tmp[bc] = {
+                    "prob_wsum": 0.0,
+                    "freq_wsum": 0.0,
+                    "count": 0,
+                }
+            tmp[bc]["prob_wsum"] += r["prob_pred"] * cnt
+            tmp[bc]["freq_wsum"] += r["freq_obs"] * cnt
+            tmp[bc]["count"] += cnt
+        
+        # 3) Turn into list of (prob_pred, freq_obs, count)
+        agg = []
+        for bc, d in tmp.items():
+            c = d["count"]
+            if c == 0:
+                continue
+            agg.append({
+                "p": d["prob_wsum"] / c,
+                "f": d["freq_wsum"] / c,
+                "c": c,
             })
-        gb.sort(key=lambda x: x["bin_center"])  # <- list of dicts
+        
+        # 4) Rebin to custom edges (also count-weighted)
+        # bins: [e0, e1), [e1, e2), ..., [en-1, en]
+        rbins = []
+        for i in range(len(rebin_edges)-1):
+            e0, e1 = rebin_edges[i], rebin_edges[i+1]
+            num_p = num_f = tot_c = 0.0
+            for item in agg:
+                # include right edge in last bin
+                if e0 <= item["p"] < e1 or (i == len(rebin_edges) - 2 and item["p"] == e1):
+                    num_p += item["p"] * item["c"]
+                    num_f += item["f"] * item["c"]
+                    tot_c += item["c"]
+            if tot_c > 0:
+                mid = 0.5 * (e0 + e1)
+                rbins.append({
+                    "p": num_p / tot_c,
+                    "f": num_f / tot_c,
+                    "c": tot_c,
+                })
 
         _nice()
         fig, ax = plt.subplots()
-        ax.plot([0,1], [0,1], "--", lw=1, label="Perfect")
-        xs = [row["prob_pred"] for row in gb]
-        ys = [row["freq_obs"] for row in gb]
-        cs = [row["count"] for row in gb]
-        ax.plot(xs, ys, marker="o", lw=1.5, label=f"Thr ≥ {thr} mm")
+        ax.plot([0, 1], [0, 1], "--", lw=1, label="Perfect")
+
+        # 3-level visibility thresholds
+        high_N = max(500, min_count_to_show)   # include more bins
+        mid_N  = max(100, int(0.3 * high_N))   # allow smaller bins to show faintly
+
+        # split bins
+        hi  = [b for b in rbins if b["c"] >= high_N]
+        mid = [b for b in rbins if mid_N <= b["c"] < high_N]
+        low = [b for b in rbins if b["c"] < mid_N]
+
+        # --- high-count (trustworthy) ---
+        if hi:
+            xs_hi = np.array([b["p"] for b in hi], dtype=float)
+            ys_hi = np.array([b["f"] for b in hi], dtype=float)
+            Ns_hi = np.array([b["c"] for b in hi], dtype=float)
+
+            # sort by x so line doesn't jump
+            order = np.argsort(xs_hi)
+            xs_hi = xs_hi[order]
+            ys_hi = ys_hi[order]
+            Ns_hi = Ns_hi[order]
+
+            # approximate binomial std for observed freq
+            # se = sqrt( p * (1 - p) / N )
+            se_hi = np.sqrt(np.clip(ys_hi * (1.0 - ys_hi) / np.maximum(Ns_hi, 1.0), 0.0, 1.0))
+
+            # connect line + dots
+            ax.plot(xs_hi, ys_hi, "--", color="black", lw=1.0, marker="o", ms=5, label=f"Thr ≥ {thr} mm")
+
+            # error bars (make them faint)
+            ax.errorbar(xs_hi, ys_hi, yerr=se_hi,
+                        fmt="none", ecolor="0.4", elinewidth=0.8, alpha=0.6, capsize=2)
+        else:
+            xs_hi = ys_hi = Ns_hi = np.array([])
+
+        # --- mid-count (ok, but not great) ---
+        if mid:
+            ax.scatter([b["p"] for b in mid],
+                       [b["f"] for b in mid],
+                       s=28, alpha=0.6, edgecolor="none")
+
+        # --- low-count (just to show the trend) ---
+        if low:
+            ax.scatter([b["p"] for b in low],
+                       [b["f"] for b in low],
+                       s=18, alpha=0.25, edgecolor="none")
+
+        # Right axis: put bars for bins we actually drew (hi+mid)
         ax2 = ax.twinx()
-        ax2.bar(xs, cs, width=0.07, alpha=0.25)
-        ax2.set_ylim(0, max(max(cs)*1.2 if cs else 1, 1))
-        ax.set_xlim(0,1); ax.set_ylim(0,1)
-        ax.set_xlabel("Forecast probability")
-        ax.set_ylabel("Observed frequency")
-        ax.set_title(f"Reliability diagram (≥ {thr} mm/day)")
+        counts_for_bar = hi + mid
+        if counts_for_bar:
+            ax2.bar([b["p"] for b in counts_for_bar],
+                    [b["c"] for b in counts_for_bar],
+                    width=0.03, alpha=0.25)
+            ax2.set_ylim(0, max(b["c"] for b in counts_for_bar) * 1.15)
+        else:
+            ax2.set_ylim(0, 1.0)
+        ax2.set_ylabel("Bin count")  # <-- label for 2nd y-axis
         
         # === Overlays from baselines ===
         if baseline_eval_dirs:
@@ -147,45 +240,73 @@ def plot_reliability(eval_root: str,
                                 })
                             except Exception:
                                 continue
-                    bbins = {}
+
+                    # Repeat same aggregation for baseline
+                    tmpb = {}
                     for r in browz:
-                        if abs(r["thr"] - float(thr)) > 1e-9:
+                        if abs(r["thr"] - float(thr)) >= 1e-9:
                             continue
                         bc = r["bin_center"]
-                        if bc not in bbins:
-                            bbins[bc] = {"prob_sum":0.0, "freq_sum":0.0, "cnt_sum":0, "n":0}
-                        bbins[bc]["prob_sum"] += r["prob_pred"]
-                        bbins[bc]["freq_sum"] += r["freq_obs"]
-                        bbins[bc]["cnt_sum"]  += r["count"]
-                        bbins[bc]["n"]        += 1
-                    bgb = []
-                    for bc, dct in bbins.items():
-                        n = max(dct["n"], 1)
-                        bgb.append({
-                            "bin_center": bc,
-                            "prob_pred": dct["prob_sum"] / n,
-                            "freq_obs":  dct["freq_sum"] / n,
-                            "count":     dct["cnt_sum"],
+                        cnt = max(r["count"], 0)
+                        if bc not in tmpb:
+                            tmpb[bc] = {
+                                "prob_wsum": 0.0,
+                                "freq_wsum": 0.0,
+                                "count": 0,
+                            }
+                        tmpb[bc]["prob_wsum"] += r["prob_pred"] * cnt
+                        tmpb[bc]["freq_wsum"] += r["freq_obs"] * cnt
+                        tmpb[bc]["count"] += cnt
+                    agg_b = []
+                    for bc, d in tmpb.items():
+                        c = d["count"]
+                        if c == 0:
+                            continue
+                        agg_b.append({
+                            "p": d["prob_wsum"] / c,
+                            "f": d["freq_wsum"] / c,
+                            "c": c,
                         })
-                    bgb.sort(key=lambda x: x["bin_center"])
-                    xs_b = [row["prob_pred"] for row in bgb]
-                    ys_b = [row["freq_obs"] for row in bgb]
-                    ax.plot(xs_b, ys_b, marker="x", linestyle="--", linewidth=1.2, label=f"{name} (≥ {thr} mm)")
+                    # Optional: no rebin for baseline, just plot directly
+                    xb = [a["p"] for a in agg_b if a["c"] >= min_count_to_show]
+                    yb = [a["f"] for a in agg_b if a["c"] >= min_count_to_show]
+                    ax.plot(xb, yb, marker="x", linestyle="--", linewidth=1.0, label=f"{name} (≥ {thr} mm)")
                 except Exception:
-                    logger.warning(f"Could not plot baseline reliability for {name} at thr {thr} mm")
+                    logger.warning(f"Could not plot baseline reliability for {name}")
                     continue
-
+        x_max = max([b["p"] for b in rbins], default=1.0)
+        y_max = max([b["f"] for b in rbins], default=1.0)
+        ax.set_xlim(0, 1)#ax.set_xlim(0, x_max)
+        ax.set_ylim(0, 1)#ax.set_ylim(0, y_max)
+        ax.set_xlabel("Model probability")
+        ax.set_ylabel("Observed frequency")
+        ax.set_title(f"Reliability diagram (Thr ≥ {thr} mm/day)")
         ax.legend(loc="lower right")
         fig.tight_layout()
         fig.savefig(str(fdir / f"reliability_{int(thr)}mm.png"), dpi=200)
         plt.close(fig)
 
-
 # ---------- spread–skill ----------
 
-def plot_spread_skill(eval_root: str):
+def plot_spread_skill(eval_root: str,
+                      *,
+                      n_plot_bins: int = 20,
+                      min_count_to_show: int = 1000,
+                      make_skill_vs_spread: bool = True
+                      ):
+    """
+        Read spread_skill.csv and make clean plot
+
+        CSV has rows per day per bin. Here:
+            1) Aggregate by bin_center, **count-weighted**
+            2) Rebin to ~n_plot_bins evenly over x
+            3) Plot spread and skill vs bin_center as two lines
+            4) Optionally: separate skill-vs-spread scatter to see underdispersion.
+    """
     tdir = Path(eval_root) / "tables"
     fdir = _ensure_dir(Path(eval_root) / "figures")
+    
+    # Read
     rows = []
     with open(tdir / "spread_skill.csv", 'r') as f:
         reader = csv.DictReader(f)
@@ -199,42 +320,184 @@ def plot_spread_skill(eval_root: str):
                 })
             except Exception:
                 continue
+    
+    if not rows:
+        logger.warning("No valid rows found in spread_skill.csv. Skipping plot.")
+        return
 
-    bins = {}
+    # 1) Group by original bin_center, count-weighted
+    tmp = {}
     for r in rows:
-        bc = r["bin_center"]
-        if bc not in bins:
-            bins[bc] = {"spread_sum":0.0, "skill_sum":0.0, "count_sum":0, "n":0}
-        bins[bc]["spread_sum"] += r["spread"]
-        bins[bc]["skill_sum"]  += r["skill"]
-        bins[bc]["count_sum"]  += r["count"]
-        bins[bc]["n"]          += 1
+        x = r["bin_center"]
+        c = max(r["count"], 0)
+        if x not in tmp:
+            tmp[x] = {
+                "spread_wsum": 0.0,
+                "skill_wsum": 0.0,
+                "count": 0,
+            }
+        tmp[x]["spread_wsum"] += r["spread"] * c
+        tmp[x]["skill_wsum"]  += r["skill"]  * c
+        tmp[x]["count"]       += c
 
-    gb = []
-    for bc, d in bins.items():
-        n = max(d["n"], 1)
-        gb.append({
-            "bin_center": bc,
-            "spread": d["spread_sum"]/n,
-            "skill":  d["skill_sum"]/n,
-            "count":  d["count_sum"],
+    pts = []
+    for x, d in tmp.items():
+        c = d["count"]
+        if c == 0:
+            continue
+        pts.append({
+            "x": x,
+            "spread": d["spread_wsum"] / c,
+            "skill":  d["skill_wsum"]  / c,
+            "count":  c,
         })
-    gb.sort(key=lambda x: x["bin_center"])
+
+    # Sort by x
+    pts.sort(key=lambda z: z["x"])
+    xs_all = np.array([p["x"] for p in pts], dtype=float)
+    spread_all = np.array([p["spread"] for p in pts], dtype=float)
+    skill_all = np.array([p["skill"] for p in pts], dtype=float)
+    count_all = np.array([p["count"] for p in pts], dtype=float)
+
+    # 2) Rebin to fixed number of bins (even in x)
+    x_min, x_max = xs_all.min(), xs_all.max()
+    edges = np.linspace(x_min, x_max + 1e-9, n_plot_bins + 1)
+    Xb, Sb, Kb, Cb = [], [], [], []
+    for i in range(n_plot_bins):
+        e0, e1 = edges[i], edges[i+1]
+        m = (xs_all >= e0) & (xs_all < e1)
+        if not np.any(m):
+            continue
+        cnt = count_all[m].sum()
+        if cnt == 0:
+            continue
+        Xb.append((e0 + e1) / 2)
+        Sb.append((spread_all[m] * count_all[m]).sum() / cnt)
+        Kb.append((skill_all[m] * count_all[m]).sum() / cnt)
+        Cb.append(cnt)
 
     _nice()
     fig, ax = plt.subplots()
-    xs  = [r["bin_center"] for r in gb]
-    ys1 = [r["spread"] for r in gb]
-    ys2 = [r["skill"]  for r in gb]
-    ax.plot(xs, ys1, marker="o", label="Spread")
-    ax.plot(xs, ys2, marker="s", label="Skill (MAE vs obs)")
-    ax.set_xlabel("Ensemble mean (bin) • or another binning variable")
-    ax.set_ylabel("Value (units of mm/day)")
-    ax.set_title("Spread–skill")
+    Xb = np.array(Xb)
+    Sb = np.array(Sb)
+    Kb = np.array(Kb)
+    Cb = np.array(Cb)
+
+    # draw lines only through well-populated bins
+    mask_good = Cb >= min_count_to_show
+    mask_low  = ~mask_good
+
+    # main lines
+    ax.plot(Xb[mask_good], Sb[mask_good],
+            marker="o", label="Spread")
+    ax.plot(Xb[mask_good], Kb[mask_good],
+            marker="s", label="Skill (MAE vs obs)")
+
+    # faint background points (to show that there *is* data there)
+    if np.any(mask_low):
+        ax.scatter(Xb[mask_low], Sb[mask_low],
+                   s=14, alpha=0.25, edgecolor="none")
+        ax.scatter(Xb[mask_low], Kb[mask_low],
+                   s=14, alpha=0.25, edgecolor="none")
+
+    ax.set_xlabel("Ensemble mean (bin)")
+    ax.set_ylabel("Value (mm/day)")
+    ax.set_title("Spread-skill")
+    ax.legend()
+    
+    ax.set_xlabel("Ensemble mean (bin)")
+    ax.set_ylabel("Value (mm/day)")
+    ax.set_title("Spread-skill")
     ax.legend()
     fig.tight_layout()
     fig.savefig(str(fdir / "spread_skill.png"), dpi=200)
     plt.close(fig)
+
+    if make_skill_vs_spread:
+        _nice()
+        fig, ax = plt.subplots()
+
+        # We have: Sb (mean spread), Kb (mean skill), Cb (counts) per rebinned bin.
+        # We DON'T have per-bin raw rows here, so we estimate a simple SE from the
+        # rebinned values as: se ~ (value * 0.35) / sqrt(N), which just gives you
+        # a visual idea of stability (you can swap to a better formula if you later
+        # keep per-row std in the CSV).
+        eps = 1e-6
+        rel_spread_se = 0.35   # heuristic
+        rel_skill_se  = 0.35
+
+        se_S = (np.abs(Sb) * rel_spread_se) / np.sqrt(np.maximum(Cb, 1.0))
+        se_K = (np.abs(Kb) * rel_skill_se)  / np.sqrt(np.maximum(Cb, 1.0))
+
+        # sort by spread so the line is clean
+        order = np.argsort(Sb)
+        Sb_s = Sb[order]
+        Kb_s = Kb[order]
+        se_S = se_S[order]
+        se_K = se_K[order]
+        Cb_s = Cb[order]
+
+        # main line + markers
+        ax.plot(Sb_s, Kb_s, "--", color="black", lw=1.0, marker="o", ms=4, label="Binned points")
+
+        # error bars (vertical) to show variance in skill
+        ax.errorbar(Sb_s, Kb_s, yerr=se_K,
+                    fmt="none", ecolor="0.4", elinewidth=0.7, alpha=0.5, capsize=2)
+
+        # faint background “size” info — optional
+        if Cb_s.size and Cb_s.max() > 0:
+            ax.scatter(Sb_s, Kb_s,
+                       s=np.clip(Cb_s / Cb_s.max(), 0.1, 1.0) * 80,
+                       alpha=0.25, edgecolor="none")
+
+        maxv = float(max(Sb_s.max(), Kb_s.max()) * 1.05)
+        ax.plot([0, maxv], [0, maxv], "k--", lw=1, label="spread = skill")
+        ax.set_xlim(0, maxv)
+        ax.set_ylim(0, maxv)
+        ax.set_xlabel("Spread (mm/day)")
+        ax.set_ylabel("Skill (MAE, mm/day)")
+        ax.set_title("Spread vs skill (diagnostics)")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(str(fdir / "spread_vs_skill.png"), dpi=200)
+        plt.close(fig)
+        
+
+    # bins = {}
+    # for r in rows:
+    #     bc = r["bin_center"]
+    #     if bc not in bins:
+    #         bins[bc] = {"spread_sum":0.0, "skill_sum":0.0, "count_sum":0, "n":0}
+    #     bins[bc]["spread_sum"] += r["spread"]
+    #     bins[bc]["skill_sum"]  += r["skill"]
+    #     bins[bc]["count_sum"]  += r["count"]
+    #     bins[bc]["n"]          += 1
+
+    # gb = []
+    # for bc, d in bins.items():
+    #     n = max(d["n"], 1)
+    #     gb.append({
+    #         "bin_center": bc,
+    #         "spread": d["spread_sum"]/n,
+    #         "skill":  d["skill_sum"]/n,
+    #         "count":  d["count_sum"],
+    #     })
+    # gb.sort(key=lambda x: x["bin_center"])
+
+    # _nice()
+    # fig, ax = plt.subplots()
+    # xs  = [r["bin_center"] for r in gb]
+    # ys1 = [r["spread"] for r in gb]
+    # ys2 = [r["skill"]  for r in gb]
+    # ax.plot(xs, ys1, marker="o", label="Spread")
+    # ax.plot(xs, ys2, marker="s", label="Skill (MAE vs obs)")
+    # ax.set_xlabel("Ensemble mean (bin) • or another binning variable")
+    # ax.set_ylabel("Value (units of mm/day)")
+    # ax.set_title("Spread–skill")
+    # ax.legend()
+    # fig.tight_layout()
+    # fig.savefig(str(fdir / "spread_skill.png"), dpi=200)
+    # plt.close(fig)
 
 # ---------- FSS curves ----------
 
@@ -394,8 +657,8 @@ def plot_psd_slope_bar(eval_root: str,
     w = 0.8 / max(k, 1)
     fig, ax = plt.subplots()
     off = -0.4 + w/2
-    ax.bar(x + off, obsv, width=w, label="Obs") ; off += w
-    ax.bar(x + off, genv, width=w, label="PMM")
+    ax.bar(x + off, obsv, width=w, label="HR (DANRA)") ; off += w
+    ax.bar(x + off, genv, width=w, label="PMM (gen)")
     for name, bvals in baseline_series.items():
         off += w
         ax.bar(x + off, bvals, width=w, label=name)
@@ -464,9 +727,9 @@ def plot_return_levels(eval_root: str):
         if rp.size==0 or gp.size==0: return
         _nice()
         fig, ax = plt.subplots()
-        ax.plot(rp, (rlo+rhi)/2, "-o", label="Obs")
+        ax.plot(rp, (rlo+rhi)/2, "-o", label="HR (DANRA)")
         ax.fill_between(rp, rlo, rhi, alpha=0.2) # type: ignore
-        ax.plot(gp, (plo+phi)/2, "-s", label="PMM")
+        ax.plot(gp, (plo+phi)/2, "-s", label="PMM (gen)")
         ax.fill_between(gp, plo, phi, alpha=0.2) # type: ignore
         ax.set_xscale("log")
         ax.set_xlabel("Return period (years)")
@@ -591,8 +854,8 @@ def plot_psd_curves(
     Ph_plot = Ph[1:]
 
     plt.figure(figsize=(6,4))
-    plt.loglog(k_plot, Pg_plot, label="PMM", linewidth=1.8)
-    plt.loglog(k_plot, Ph_plot, label="Obs", linewidth=1.8)
+    plt.loglog(k_plot, Pg_plot, label="PMM (gen)", linewidth=1.8)
+    plt.loglog(k_plot, Ph_plot, label="HR (DANRA)", linewidth=1.8)
     plt.xlabel("Wavenumber k (1/km)")
     plt.ylabel("Power (arb.)")
     plt.title("Isotropic PSD (batch mean)")
@@ -607,92 +870,190 @@ def plot_psd_curves_eval(
     eval_root: str,
     baseline_eval_dirs: Optional[Dict[str, str]] = None,
     fname: str = "psd_curves.png",
+    use_wavelength: bool = True,   # <--- new toggle
 ):
     tdir = Path(eval_root) / "tables"
     fdir = _ensure_dir(Path(eval_root) / "figures")
-    csv_main = tdir / "psd_curves.csv"
-    if not csv_main.exists():
-        raise FileNotFoundError(f"PSD curves CSV not found: {csv_main}")
+    npz_path = tdir / "psd_curves.npz"
+    if not npz_path.exists():
+        logger.warning(f"PSD curves NPZ not found: {npz_path}. Skipping plot.")
+        return
 
-    # --- read main model PSD (robust to column name) ---
-    k_main, pmm_main, hr_main = [], [], []
-    with open(csv_main, "r") as f:
-        reader = csv.DictReader(f)
-        # decide PMM column once
-        fields = reader.fieldnames or []
-        pmm_col = "psd_pmm" if "psd_pmm" in fields else ("psd_gen" if "psd_gen" in fields else None)
-        hr_col  = "psd_hr"
-        if pmm_col is None:
-            raise RuntimeError(f"PSD CSV missing PMM column (looked for psd_pmm / psd_gen): {csv_main}")
-        for r in reader:
-            try:
-                k_main.append(float(r["k"]))
-                pmm_main.append(float(r[pmm_col]))
-                hr_main.append(float(r[hr_col]))
-            except Exception:
-                continue
+    data = np.load(npz_path)
 
-    if not k_main:
-        raise RuntimeError(f"No valid rows found in {csv_main}")
+    # --- required (HR/PMM) ---
+    k_hr = data["k"]              # (Nh,)
+    psd_hr = data["psd_hr"]       # (Nh,)
+    psd_pmm = data["psd_pmm"]     # (Nh,)
+    ci_hr_lo = data.get("psd_hr_ci_lo", None)
+    ci_hr_hi = data.get("psd_hr_ci_hi", None)
+    ci_pmm_lo = data.get("psd_pmm_ci_lo", None)
+    ci_pmm_hi = data.get("psd_pmm_ci_hi", None)
 
-    def _drop_k0(k, y):
-        return (k[1:], y[1:]) if len(k) > 0 and abs(k[0]) < 1e-12 else (k, y)
+    # --- optional (LR) ---
+    k_lr = data.get("k_lr", None)
+    psd_lr = data.get("psd_lr", None)
+    ci_lr_lo = data.get("psd_lr_ci_lo", None)
+    ci_lr_hi = data.get("psd_lr_ci_hi", None)
+    k_nyq_lr = data.get("k_nyquist_lr", None)
+    if k_nyq_lr is not None:
+        # could be array([val]) or scalar
+        k_nyq_lr = float(np.array(k_nyq_lr).reshape(-1)[0])
 
-    k_p, Pg = _drop_k0(np.array(k_main), np.array(pmm_main))
-    _,   Ph = _drop_k0(np.array(k_main), np.array(hr_main))
+    norm_mode = data.get("normalize", "none")
+    if isinstance(norm_mode, np.ndarray):
+        norm_mode = norm_mode.item()
 
     _nice()
     fig, ax = plt.subplots()
-    ax.loglog(k_p, Pg, label="PMM", linewidth=1.8)
-    ax.loglog(k_p, Ph, label="Obs", linewidth=1.8)
 
-    # --- Baseline overlays ---
+    # ========= HR / PMM =========
+    order = None
+    if use_wavelength:
+        # k [1/km] -> lambda [km]
+        lam_hr = np.where(k_hr > 0, 1.0 / k_hr, np.nan)
+        # sort from large -> small wavelength (optional)
+        order_hr = np.argsort(lam_hr)[::-1]
+        lam_hr = lam_hr[order_hr]
+        psd_hr_p = psd_hr[order_hr]
+        psd_pmm_p = psd_pmm[order_hr]
+
+        ax.plot(lam_hr, psd_hr_p, label="HR (DANRA)", color="black", lw=0.8)
+        if ci_hr_lo is not None and ci_hr_hi is not None and ci_hr_lo.size == psd_hr.size:
+            ax.fill_between(lam_hr,
+                            ci_hr_lo[order_hr],
+                            ci_hr_hi[order_hr],
+                            color="black", alpha=0.2)
+
+        ax.plot(lam_hr, psd_pmm_p, label="PMM (gen)", color="blue", lw=0.8)
+        if ci_pmm_lo is not None and ci_pmm_hi is not None and ci_pmm_lo.size == psd_pmm.size:
+            ax.fill_between(lam_hr,
+                            ci_pmm_lo[order_hr],
+                            ci_pmm_hi[order_hr],
+                            color="blue", alpha=0.15)
+    else:
+        ax.plot(k_hr, psd_hr, label="HR (DANRA)", color="black", lw=0.9)
+        if ci_hr_lo is not None and ci_hr_hi is not None and ci_hr_lo.size == psd_hr.size:
+            ax.fill_between(k_hr, ci_hr_lo, ci_hr_hi, color="black", alpha=0.2)
+
+        ax.plot(k_hr, psd_pmm, label="PMM (gen)", color="blue", lw=0.9)
+        if ci_pmm_lo is not None and ci_pmm_hi is not None and ci_pmm_lo.size == psd_pmm.size:
+            ax.fill_between(k_hr, ci_pmm_lo, ci_pmm_hi, color="blue", alpha=0.15)
+
+    # ========= LR (optional) =========
+    if (k_lr is not None) and (psd_lr is not None):
+        # make sure shapes match first
+        k_lr = np.array(k_lr)
+        psd_lr = np.array(psd_lr)
+        assert k_lr.shape == psd_lr.shape, f"LR k/PSD shape mismatch: {k_lr.shape} vs {psd_lr.shape}"
+
+        # Nyquist from file
+        if k_nyq_lr is not None and k_nyq_lr > 0:
+            k_ny = float(k_nyq_lr)
+        else:
+            k_ny = None
+        logger.info(f"[PSD DEBUG] LR Nyquist wavenumber: {k_ny}")
+        if use_wavelength:
+            lam_lr = np.where(k_lr > 0, 1.0 / k_lr, np.nan)
+            # sort from large -> small wavelength (optional)
+            order = np.argsort(lam_lr)[::-1]
+            lam_lr = lam_lr[order]
+            psd_lr = psd_lr[order]
+            k_lr = k_lr[order]
+        else:
+            lam_lr = k_lr  # just for naming below
+
+        # masks
+        finite = np.isfinite(lam_lr) & np.isfinite(psd_lr)
+
+        if k_ny is None:
+            # No info -> draw single dashed line
+            ax.plot(lam_lr[finite], psd_lr[finite],
+                    label="LR (ERA5)", color="deeppink", lw=0.9, linestyle="-")
+        else:
+            # trusted: k <= k_ny (i.e. lambda >= lambda_ny)
+            trusted = finite & (k_lr <= k_ny + 1e-12)
+            ghost = finite & (k_lr > k_ny + 1e-12)
+            logger.info(f"[PSD DEBUG] LR trusted wavenumbers: {k_lr[trusted]}")
+            logger.info(f"[PSD DEBUG] LR ghost wavenumbers: {k_lr[ghost]}")
+
+            # main, trusted part
+            ax.plot(lam_lr[trusted], psd_lr[trusted],
+                    label="LR (ERA5)", color="deeppink", lw=0.9, linestyle="-")
+            # ghost/informative-only part
+            if np.any(ghost):
+                ax.plot(lam_lr[ghost], psd_lr[ghost],
+                        color="deeppink", lw=0.6, linestyle="--", alpha=0.3)
+                
+            # Vertical line at Nyquist
+            lam_ny = 1.0 / k_ny if use_wavelength else k_ny
+            ax.axvline(x=lam_ny, color="black", linestyle="-", lw=0.7, label="LR Nyquist")
+
+        # Only draw CIs at trusted scales
+        if (ci_lr_lo is not None) and (ci_lr_hi is not None):
+            ci_lr_lo = np.array(ci_lr_lo)
+            ci_lr_hi = np.array(ci_lr_hi)
+            if use_wavelength:
+                ci_lr_lo = ci_lr_lo[order]
+                ci_lr_hi = ci_lr_hi[order]
+            if k_ny is not None:
+                ci_mask = finite & (k_lr <= k_ny + 1e-12) & (ci_lr_lo.size == psd_lr.size) & (ci_lr_hi.size == psd_lr.size)
+            else:
+                ci_mask = finite & (ci_lr_lo.size == psd_lr.size) & (ci_lr_hi.size == psd_lr.size)
+            if ci_lr_lo.size == psd_lr.size and ci_lr_hi.size == psd_lr.size:
+                # Convert to Python sequences (lists) so the matplotlib type hints accept them
+                ax.fill_between(np.asarray(lam_lr[ci_mask]).tolist(),
+                                np.asarray(ci_lr_lo[ci_mask]).tolist(),
+                                np.asarray(ci_lr_hi[ci_mask]).tolist(),
+                                color="deeppink", alpha=0.15)
+                       
+
+    # --- baselines (they will likely be on HR k only) ---
     if baseline_eval_dirs:
         for name, bdir in baseline_eval_dirs.items():
-            csv_b = Path(bdir) / "tables" / "psd_curves.csv"
-            if not csv_b.exists():
-                # slope-only fallback
-                j = Path(bdir) / "tables" / "psd_slope_summary.json"
-                if j.exists():
-                    try:
-                        js = json.load(open(j, "r"))
-                        if isinstance(js, dict) and "gen_slope" in js:
-                            ax.text(0.03, 0.03, f"{name}: slope={float(js['gen_slope']):.2f}",
-                                    transform=ax.transAxes, ha="left", va="bottom", fontsize=9,
-                                    bbox=dict(fc="white", alpha=0.7, ec="none"))
-                    except Exception:
-                        pass
+            bnpz = Path(bdir) / "tables" / "psd_curves.npz"
+            if not bnpz.exists():
                 continue
-
             try:
-                kb, pmm_b = [], []
-                with open(csv_b, "r") as fb:
-                    br = csv.DictReader(fb)
-                    fields_b = br.fieldnames or []
-                    pmm_col_b = "psd_pmm" if "psd_pmm" in fields_b else ("psd_gen" if "psd_gen" in fields_b else None)
-                    if pmm_col_b is None:
-                        continue
-                    for rr in br:
-                        try:
-                            kb.append(float(rr["k"]))
-                            pmm_b.append(float(rr[pmm_col_b]))
-                        except Exception:
-                            continue
-                kb, pmm_b = np.array(kb), np.array(pmm_b)
-                kb, pmm_b = _drop_k0(kb, pmm_b)
-                ax.loglog(kb, pmm_b, linestyle="--", linewidth=1.2, label=f"{name}")
+                bd = np.load(bnpz)
+                k_b = bd["k"]
+                psd_b = bd["psd_pmm"]
+                if use_wavelength:
+                    lam_b = np.where(k_b > 0, 1.0 / k_b, np.nan)
+                    order_b = np.argsort(lam_b)[::-1]
+                    lam_b = lam_b[order_b]
+                    psd_b = psd_b[order_b]
+                    val_b = np.isfinite(lam_b) & np.isfinite(psd_b)
+                    ax.plot(lam_b[val_b], psd_b[val_b],
+                            lw=0.7, linestyle=":", label=f"{name} (gen)")
+                else:
+                    ax.plot(k_b, psd_b, lw=0.7, linestyle=":", label=f"{name} (gen)")
             except Exception:
-                logger.warning(f"Could not plot baseline PSD for {name}")
+                logger.warning(f"Could not plot baseline PSD curves for {name}")
                 continue
 
-    ax.set_xlabel("Wavenumber k (1/km)")
-    ax.set_ylabel("Power (arb.)")
-    ax.set_title("Isotropic PSD (batch mean)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    if use_wavelength:
+        ax.invert_xaxis()
+        ax.set_xlabel("Wavelength λ (km)")
+    else:
+        ax.set_xlabel("Radial wavenumber k (1/km)")
+
+    if norm_mode == "none":
+        ax.set_ylabel("Spectral power")
+    elif norm_mode == "per_field":
+        ax.set_ylabel("Spectral power (per-field normalized)")
+    else:
+        ax.set_ylabel(f"Spectral power (norm={norm_mode})")
+
+    ax.set_title("Isotropic Power Spectral Density (PSD)")
     ax.grid(True, which="both", ls=":")
     ax.legend()
     fig.tight_layout()
     fig.savefig(str(fdir / fname), dpi=200)
     plt.close(fig)
+
 
 
 def plot_date_montages(eval_root: str,
@@ -862,8 +1223,8 @@ def plot_pooled_pixel_distributions(
     def _norm(h): 
         s = max(h.sum(), 1.0)
         return h / s
-    ax.plot(centers, _norm(H_hr),  label="Obs (DANRA)", linewidth=1.8)
-    ax.plot(centers, _norm(H_pmm), label="PMM (EDM)",  linewidth=1.8)
+    ax.plot(centers, _norm(H_hr),  label="HR (DANRA)", linewidth=1.8)
+    ax.plot(centers, _norm(H_pmm), label="PMM (gen)",  linewidth=1.8)
     if H_lr is not None:
         ax.plot(centers, _norm(H_lr), label="ERA5 (LR→HR)", linewidth=1.5)
 
@@ -1011,7 +1372,7 @@ def plot_yearly_maps(eval_root: str,
             pmm = _mask(_squeeze2d(d.get("pmm", None)))
             lr  = _mask(_squeeze2d(d.get("lr", None)))
 
-            panels = [("HR", hr), ("PMM", pmm)]
+            panels = [("HR (DANRA)", hr), ("PMM (gen)", pmm)]
             if lr is not None:
                 panels.append(("ERA5 (LR→HR)", lr))
 

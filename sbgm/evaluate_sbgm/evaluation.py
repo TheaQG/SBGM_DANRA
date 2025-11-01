@@ -215,6 +215,7 @@ class EvaluationConfig:
     gen_dir: str                     # Root directory where generated samples are stored 
     out_dir: str                     # Root directory to save evaluation outputs
     grid_km_per_px: float = 2.5      # Spatial resolution of the data in km/px
+    lr_grid_km_per_px: float = 31.0  # Spatial resolution of the LR data in km/px
     fss_scales_km: tuple = (5, 10, 20)  # Scales (in km) at which to compute FSS
     thresholds_mm: tuple = (1.0, 5.0, 10.0)  # Thresholds (in mm/day) for exceedance reliability and FSS
     wet_threshold_mm: float = 1.0  # Threshold (in mm/day) to define wet days for P95/P99
@@ -222,6 +223,7 @@ class EvaluationConfig:
     spread_skill_bins: int = 10  # Number of bins for spread-skill analysis
     pit_bins: int = 10  # Number of bins for PIT histograms
     psd_ignore_low_k_bins: int = 1  # Number of lowest k bins to ignore in PSD slope fitting
+    psd_normalize: str = "none"  # "none" | "per_field" | "match_ref"
     random_ref_kind: str = "phase_randomized"  # Kind of random reference for FSS, "iid_marginal" | "spatial_shuffle" | "phase_randomized"
     seasonal_summaries: bool = True
     region_mask_path: Optional[str] = None
@@ -795,33 +797,33 @@ class EvaluationRunner:
         logger.info(f"[eval] Wrote FSS summary to {tables_dir / 'fss_summary.csv'}")
 
 
-        # PSD slope and series (save CSV, handle plotting in plot_utils)
-        psd_summ = compute_psd_slope(gen_bt=pmm_bt, hr_bt=hr_bt, mask=mask_bt,
-                                     ignore_low_k_bins=self.eval_cfg.psd_ignore_low_k_bins)
-        (tables_dir / "psd_slope_summary.json").write_text(json.dumps(psd_summ, indent=2))
-        logger.info(f"[eval] Wrote PSD slope summary to {tables_dir / 'psd_slope_summary.json'}")
-        # Save full isotropic PSD series as CSV, handl plotting in plot_utils
-        try:
-            psd_gen = compute_isotropic_psd(pmm_bt, dx_km=self.eval_cfg.grid_km_per_px, mask=mask_bt)
-            psd_hr  = compute_isotropic_psd(hr_bt,  dx_km=self.eval_cfg.grid_km_per_px, mask=mask_bt)
-            k = psd_gen["k"].detach().cpu().numpy() 
-            Pg = psd_gen["psd"].detach().cpu().numpy()
-            Ph = psd_hr["psd"].detach().cpu().numpy()
+        # # PSD slope and series (save CSV, handle plotting in plot_utils)
+        # psd_summ = compute_psd_slope(gen_bt=pmm_bt, hr_bt=hr_bt, mask=mask_bt,
+        #                              ignore_low_k_bins=self.eval_cfg.psd_ignore_low_k_bins)
+        # (tables_dir / "psd_slope_summary.json").write_text(json.dumps(psd_summ, indent=2))
+        # logger.info(f"[eval] Wrote PSD slope summary to {tables_dir / 'psd_slope_summary.json'}")
+        # # Save full isotropic PSD series as CSV, handl plotting in plot_utils
+        # try:
+        #     psd_gen = compute_isotropic_psd(pmm_bt, dx_km=self.eval_cfg.grid_km_per_px, mask=mask_bt)
+        #     psd_hr  = compute_isotropic_psd(hr_bt,  dx_km=self.eval_cfg.grid_km_per_px, mask=mask_bt)
+        #     k = psd_gen["k"].detach().cpu().numpy() 
+        #     Pg = psd_gen["psd"].detach().cpu().numpy()
+        #     Ph = psd_hr["psd"].detach().cpu().numpy()
 
-            # Write CSV with columns: k, PSD_gen, PSD_hr
-            out_csv = tables_dir / "psd_curves.csv"
-            with open(out_csv, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(["k","psd_pmm","psd_hr"])
-                for i in range(len(k)):
-                    try: 
-                        w.writerow([float(k[i]), float(Pg[i]), float(Ph[i])])
-                    except Exception:
-                        # best-effort: skip malformed rows
-                        continue
-            logger.info(f"[eval] Wrote PSD curves to {out_csv}")
-        except Exception as e:
-            logger.warning(f"[eval] Saving PSD curves CSV failed: {e}")
+        #     # Write CSV with columns: k, PSD_gen, PSD_hr
+        #     out_csv = tables_dir / "psd_curves.csv"
+        #     with open(out_csv, 'w', newline='') as f:
+        #         w = csv.writer(f)
+        #         w.writerow(["k","psd_pmm","psd_hr"])
+        #         for i in range(len(k)):
+        #             try: 
+        #                 w.writerow([float(k[i]), float(Pg[i]), float(Ph[i])])
+        #             except Exception:
+        #                 # best-effort: skip malformed rows
+        #                 continue
+        #     logger.info(f"[eval] Wrote PSD curves to {out_csv}")
+        # except Exception as e:
+        #     logger.warning(f"[eval] Saving PSD curves CSV failed: {e}")
 
         # P95/P99 and wet-day frequency
         tails = compute_p95_p99_and_wet_day(
@@ -867,12 +869,171 @@ class EvaluationRunner:
                             baseline_eval_dirs=self._get_baseline_eval_dirs())
         except Exception as e:
             logger.warning(f"[eval] Could not plot FSS curves: {e}")
+
+    def _eval_psd(self, dates_subset: Optional[list[str]] = None):
+        """
+        Compute isotropic PSD for HR, PMM (generated) and LR (physical, in LR space),
+        using the SAME logic as metrics_univariate.compute_isotropic_psd, and save
+        everything so plotting does NOT have to recompute.
+
+        Outputs:
+          - tables/psd_slope_summary.json        (what you already had)
+          - tables/psd_curves.npz                (all curves + CIs + meta)
+        """
+        tables_dir = self.out_root / "tables"
+        figures_dir = self.out_root / "figures"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        figures_dir.mkdir(parents=True, exist_ok=True)
+
+        # ---------- 1) collect batches ----------
+        # we reuse the same dates we used for capability (pmm_phys)
+        dates = list(dates_subset) if dates_subset is not None else list(self._list_dates())
+        if len(dates) == 0:
+            logger.warning("[eval] PSD: no dates found, skipping.")
+            return
+
+        hr_list = []
+        pmm_list = []
+        lr_list = []
+
+        for d in dates:
+            hr = self._load_obs(d)           # [H,W]
+            pmm = self._load_pmm(d)          # [H,W]
+            # physical LR in LR space (living under lr_hr_phys)
+            lr_pair = self._load_npz(self.dir_lrhr_phys, d, "lr")  # ← this is how your other code does it
+            if hr is None or pmm is None:
+                # skip dates with missing data
+                continue
+
+            # turn masks to [H,W]
+            mask = self._load_mask(d) if self.eval_land_only else None
+
+            hr_list.append((hr, mask))
+            pmm_list.append((pmm, mask))
+
+            if lr_pair is not None:
+                # lr_pair is np.ndarray, shape could be [C,H',W'] or [1,H',W']
+                # we want LR as torch [1,H',W']
+                lr_t = torch.from_numpy(lr_pair)
+                if lr_t.ndim == 3:
+                    # if multi-channel LR → take first (your precip LR)
+                    lr_t = lr_t[0:1, ...]
+                elif lr_t.ndim == 2:
+                    lr_t = lr_t.unsqueeze(0)
+                lr_list.append((lr_t, None))   # LR mask usually in LR domain → we skip mask here
+            else:
+                lr_list.append(None)
+
+        if len(hr_list) == 0:
+            logger.warning("[eval] PSD: collected 0 valid HR/PMM pairs, skipping.")
+            return
+
+        # ---------- 2) stack to batches ----------
+        # HR/PMM → all on HR grid
+        hr_batch = torch.stack([x[0] for x in hr_list], dim=0).unsqueeze(1)   # [B,1,H,W]
+        pmm_batch = torch.stack([x[0] for x in pmm_list], dim=0).unsqueeze(1) # [B,1,H,W]
+        # masks: either all None or per-sample
+        hr_mask = None
+        if any(x[1] is not None for x in hr_list):
+            ms = []
+            for _, m in hr_list:
+                if m is None:
+                    m = torch.ones_like(hr_list[0][0], dtype=torch.bool)  # [H,W]
+                # normalize masks to [H,W]
+                if m.dim() == 4 and m.shape[:2] == (1, 1):
+                    m = m.squeeze(0).squeeze(0)
+                elif m.dim() == 3 and m.shape[0] == 1:
+                    m = m.squeeze(0)
+                ms.append(m)
+            hr_mask = torch.stack(ms, dim=0).unsqueeze(1)   # [B,1,H,W]
+
+        # LR batch: must allow that some dates didn’t have LR
+        lr_valid = [x for x in lr_list if x is not None]
+        lr_batch = None
+        if len(lr_valid) > 0:
+            lr_batch = torch.stack([x[0] for x in lr_valid], dim=0).squeeze(1)  # [B,1,HL,WL]
+        logger.info(
+            "[eval] PSD stacks: HR=%s PMM=%s LR=%s (valid LR dates=%d / %d)",
+            tuple(hr_batch.shape),
+            tuple(pmm_batch.shape),
+            (tuple(lr_batch.shape) if lr_batch is not None else "None"),
+            len(lr_valid),
+            len(lr_list),
+        )
+        # ---------- 3) compute PSDs using your centralized function ----------
+        # Different grid spacing for HR/PMM vs LR
+        dx_km = float(self.eval_cfg.grid_km_per_px)
+        dx_lr_km = float(self.eval_cfg.lr_grid_km_per_px)
+
+        # choose normalization here – this is the single source of truth
+        psd_norm_mode = getattr(self.eval_cfg, "psd_normalize", "none")
+
+        # Set the Nyquist cutoff frequency based on HR grid spacing
+        k_nyquist = 0.5 / dx_km  # cycles per km
+        k_nyquist_lr = 0.5 / dx_lr_km  # cycles per km
+
+        hr_psd = compute_isotropic_psd(
+            batch=hr_batch, dx_km=dx_km,
+            mask=hr_mask, normalize=psd_norm_mode,
+            ref_power=None, max_k=k_nyquist
+        )
+        pmm_psd = compute_isotropic_psd(
+            batch=pmm_batch, dx_km=dx_km,
+            mask=hr_mask, normalize=psd_norm_mode,
+            # we could pass ref_power=hr_psd["psd"] if normalize=="match_ref"
+            ref_power=(hr_psd["psd"] if psd_norm_mode == "match_ref" else None),
+            max_k=k_nyquist
+        )
+        lr_psd = None
+        if lr_batch is not None:
+            lr_psd = compute_isotropic_psd(
+                batch=lr_batch, dx_km=dx_km,
+                mask=None,
+                normalize=psd_norm_mode,
+                ref_power=(hr_psd["psd"] if psd_norm_mode == "match_ref" else None),
+                max_k=k_nyquist
+            )
+            # # Remove k and PSD below Nyquist of LR grid
+            # valid_idx = lr_psd["k"] <= k_nyquist_lr
+            # lr_psd = {k: (v[valid_idx] if isinstance(v, torch.Tensor) else v)
+            #           for k, v in lr_psd.items()}
+
+
+        # ---------- 4) slope summary (what you already had) ----------
+        # just reuse your existing helper
+        slope_res = compute_psd_slope(gen_bt=pmm_batch, hr_bt=hr_batch,
+                                      mask=hr_mask, ignore_low_k_bins=self.eval_cfg.psd_ignore_low_k_bins)
+        (tables_dir / "psd_slope_summary.json").write_text(json.dumps(slope_res, indent=2))
+
+        # ---------- 5) save full curves for plotting ----------
+        out_npz = {
+            "k": hr_psd["k"].numpy(),
+            "psd_hr": hr_psd["psd"].numpy(),
+            "psd_hr_ci_lo": hr_psd.get("psd_ci_lo", torch.tensor([])).numpy(),
+            "psd_hr_ci_hi": hr_psd.get("psd_ci_hi", torch.tensor([])).numpy(),
+            "psd_pmm": pmm_psd["psd"].numpy(),
+            "psd_pmm_ci_lo": pmm_psd.get("psd_ci_lo", torch.tensor([])).numpy(),
+            "psd_pmm_ci_hi": pmm_psd.get("psd_ci_hi", torch.tensor([])).numpy(),
+            "normalize": psd_norm_mode,
+        }
+        if lr_psd is not None:
+            out_npz.update({
+                "k_lr": lr_psd["k"].numpy(),
+                "psd_lr": lr_psd["psd"].numpy(),
+                "psd_lr_ci_lo": lr_psd.get("psd_ci_lo", torch.tensor([])).numpy(),
+                "psd_lr_ci_hi": lr_psd.get("psd_ci_hi", torch.tensor([])).numpy(),
+                "k_nyquist_lr": k_nyquist_lr,
+            })
+
+        np.savez_compressed(tables_dir / "psd_curves.npz", **out_npz)
+        logger.info("[eval] Wrote PSD curves to %s", tables_dir / "psd_curves.npz")
+        logger.info("[eval] Wrote PSD slope to %s", tables_dir / "psd_slope_summary.json")
+
         try:
             plot_psd_curves_eval(eval_root=str(self.out_root),
                             baseline_eval_dirs=self._get_baseline_eval_dirs())
         except Exception as e:
             logger.warning(f"[eval] Could not plot PSD curves: {e}")
-
 
     # ---------- Extremes (basin-mean series) ----------
     def eval_extremes(self, dates_subset: Optional[List[str]] = None):
@@ -1020,9 +1181,13 @@ class EvaluationRunner:
         logger.info("       - Seasonal sub-evaluations: %s over %s",
                     self.eval_cfg.seasonal_summaries, ",".join(self.eval_cfg.seasons or []))
 
-        if do_prob: self.eval_probabilistic()
-        if do_cap:  self.eval_capability()
-        if do_ext:  self.eval_extremes()
+        if do_prob:
+            self.eval_probabilistic()
+        if do_cap:
+            self.eval_capability()
+            self._eval_psd()
+        if do_ext:
+            self.eval_extremes()
         
         logger.info("[eval] run_all: do_prob=%s, do_cap=%s, do_ext=%s", do_prob, do_cap, do_ext)
         
@@ -1066,6 +1231,7 @@ class EvaluationRunner:
                 if do_cap:
                     logger.info("[eval][%s] Running capability metrics...", season)
                     self.eval_capability(dates_subset=sel)
+                    self._eval_psd(dates_subset=sel)
                 if do_ext:
                     logger.info("[eval][%s] Running extremes metrics...", season)
                     self.eval_extremes(dates_subset=sel)

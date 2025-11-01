@@ -551,6 +551,8 @@ def reliability_exceedance_lr_binned(
       o     = 1(obs >= threshold)
     If lr_covariate is provided, bins are quantiles of that field; else equal-width bins over p_hat in [0,1].
     Returns: bin_center, prob_pred, freq_obs, count, and (optionally) Brier decomposition terms.
+
+    NOTE: IMPLEMENT BOOTSTRAP CIs FOR DIAGRAM POINTS?
     """
     device = ens.device
     p_hat = (ens >= float(threshold)).float().mean(dim=0)  # [H,W]
@@ -639,6 +641,8 @@ def spread_skill(
       spread = ensemble std per pixel
       skill  = |point_estimate - obs| per pixel
     We bin by spread (quantile bins) to assess calibration of spread.
+
+    NOTE: IMPLEMENT VARIANCE PER BIN AS WELL?
     """
     from sbgm.evaluate_sbgm.metrics_univariate import pmm_from_ensemble
 
@@ -690,45 +694,152 @@ def compute_isotropic_psd(
     batch: torch.Tensor,        # [B,1,H,W]
     dx_km: float,
     mask: Optional[torch.Tensor] = None,  # [B,1,H,W] or broadcastable
+    *,
+    normalize: str = "none", # "none" | "per_field" | "match_ref"
+    ref_power: Optional[torch.Tensor] = None,  # [H,W] reference PSD to match total power if normalize="match_ref"
+    max_k: float | None = None,
+    window: str | None = "hann",  # None | "hann"
 ) -> Dict[str, torch.Tensor]:
     """
     Isotropic (radially averaged) 2D PSD for a batch.
-    Returns: {'k': [n_bins], 'psd': [n_bins]} averaged over batch.
+    
+    Inputs:
+        btach:  torch tensor 
+            Input fields, shape [B,1,H,W]. Should already be in physical space (e.g., precip in mm/day).
+        dx_km: float
+            Grid spacing in kilometers.
+        mask:  torch tensor, optional
+            Broadcastable boolean mask where True indicates valid pixels. Masked points are set to zero before FFT.
+        normalize: {"none", "per_field", "match_ref"}, default "none"
+            - "none": keep raw spectral power 
+            - "per_field": for each sample, divide its radially averaged spectrum by its own total variance/power
+                            then average over the batch. This removes amplitude differences and keeps shape only.
+            - "match_ref": after averaging over the batch, scale the spectrum so that its total power matches that of ref_power.
+                            Requires ref_power (1D) input (typically HR/obs spectrum).
+        ref_power: torch tensor, optional
+            1D reference spectrum to match when normalize="match_ref". Shape [N_bins].
+
+    Returns:
+        dict with keys:
+            "k": torch tensor [N_bins], radial wavenumber bin centers (1/km)
+            "psd": batch-mean (and possibly normalized) isotropic PSD [N_bins]
+            "psd_std": [N_bins] std across samples (after chosen normalization)
+            "psd_n": [N_bins] number of samples contributing to each bin (usually B)
+            "psd_ci_lo": [N_bins] lower 95% CI across samples
+            "psd_ci_hi": [N_bins] upper 95% CI across samples
+
     """
     if batch.dim() != 4 or batch.shape[1] != 1:
-        raise ValueError("batch must be [B,1,H,W]")
+        raise ValueError(f"batch must be [B,1,H,W], got {batch.shape}")
     B, _, H, W = batch.shape
     device = batch.device
     x = batch.to(torch.float32)
 
+    # apply mask
     if mask is not None:
         m = mask
-        while m.dim() < 4: m = m.unsqueeze(0)
-        if m.shape[0] == 1 and B > 1: m = m.expand(B, -1, -1, -1)
+        while m.dim() < 4:
+            m = m.unsqueeze(0)
+        if m.shape[0] == 1 and B > 1:
+            m = m.expand(B, -1, -1, -1)
         x = x.masked_fill(~m.bool(), 0.0)
 
-    X = torch.fft.rfft2(x, norm='ortho')           # [B,1,H,W//2+1]
-    P = (X.real**2 + X.imag**2).mean(dim=0).squeeze(0)  # [H, W//2+1]
+    # Optional windowing to reduce edge effects leakage (can result in high-frequency noise)
+    if window is not None:
+        if window == "hann":
+            wy = torch.hann_window(H, device=x.device).view(1, 1, H, 1)
+            wx = torch.hann_window(W, device=x.device).view(1, 1, 1, W)
+            w2d = wy * wx  # [1,1,H,W]
+            x = x * w2d
+        else:
+            raise ValueError(f"Unsupported window type: {window}")
 
+    # FFT -> power per sample
+    X = torch.fft.rfft2(x, norm='ortho')           # [B,1,H,W//2+1]
+    P2 = (X.real**2 + X.imag**2).squeeze(1)      # [B,H,W//2+1]
+
+    # Build wavenumber grid
     ky = torch.fft.fftfreq(H, d=dx_km, device=device)   # 1/km
     kx = torch.fft.rfftfreq(W, d=dx_km, device=device)
     Ky, Kx = torch.meshgrid(ky, kx, indexing='ij')
     Kr = torch.sqrt(Kx**2 + Ky**2)                      # [H, W//2+1]
 
     kr = Kr.flatten()
-    p  = P.flatten()
-    kmax = kr.max().item()
+    kmax_all = kr.max().item()
     n_bins = int(min(H, W) // 2)
-    edges = torch.linspace(0, kmax, n_bins + 1, device=device)
-    which = torch.bucketize(kr, edges) - 1
+    edges = torch.linspace(0, kmax_all, n_bins + 1, device=device)
+    k_centers = 0.5 * (edges[:-1] + edges[1:]) # [N_bins]
 
-    psd = torch.zeros(n_bins, device=device)
-    for i in range(n_bins):
-        sel = (which == i)
-        if sel.any(): psd[i] = p[sel].mean()
+    # Precompute which-bin for each FFT cell
+    which = torch.bucketize(kr, edges) - 1  # [H*(W//2+1)]
 
-    k_centers = 0.5 * (edges[:-1] + edges[1:])
-    return {"k": k_centers.detach().cpu(), "psd": psd.detach().cpu()}
+    # Radial average per sample, keep individual spectra for optional normalization
+    psd_per_sample: list[torch.Tensor] = []
+    for b in range(B):
+        p = P2[b].flatten()
+        psd_b = torch.zeros(n_bins, device=device) # [N_bins]
+        counts_b = torch.zeros(n_bins, device=device)
+        for i in range(n_bins):
+            sel = (which == i)
+            if sel.any():
+                psd_b[i] = p[sel].mean()
+                counts_b[i] = sel.sum()
+        # Optional per-field normalization
+        if normalize == "per_field":
+            # total power = sum(psd_b * shell_width); here we just use simple L1 over bins
+            tot = psd_b.sum()
+            if tot > 0.0:
+                psd_b = psd_b / tot
+        psd_per_sample.append(psd_b)
+
+    # Stack all samples -> [B, N_bins]
+    psd_all = torch.stack(psd_per_sample, dim=0)  # [B, N_bins]
+    psd_mean = psd_all.mean(dim=0)         # [N_bins]
+    psd_std = psd_all.std(dim=0, unbiased=True)  # [N_bins]
+    psd_n = torch.full_like(psd_mean, float(B)) # Using all B samples for every bin
+
+    if normalize == "match_ref":
+        if ref_power is None:
+            raise ValueError("ref_power must be provided when normalize='match_ref'")
+        ref_power = ref_power.to(device).to(psd_mean.dtype)
+        num = (psd_mean * ref_power).sum()
+        den = (psd_mean * psd_mean).sum() + 1e-12
+        scale = num / den
+        psd_mean = psd_mean * scale
+        psd_std = psd_std * scale
+
+    # 95% CI over the batch
+    eps = 1e-12
+    se = psd_std / torch.sqrt(psd_n.clamp(min=1.0))
+    ci_lo = psd_mean - 1.96 * se
+    ci_hi = psd_mean + 1.96 * se
+
+    # Cut to Nyquist or user-specified max_k
+    nyq = 1.0 / (2.0 * dx_km)
+
+    if max_k is not None:
+        keep = (k_centers <= float(max_k))
+    else:
+        keep = (k_centers <= nyq + 1e-9)
+
+    k_out = k_centers[keep]
+    psd_out = psd_mean[keep]
+    psd_std_out = psd_std[keep]
+    psd_n_out = psd_n[keep]
+    ci_lo_out = ci_lo[keep]
+    ci_hi_out = ci_hi[keep]
+
+
+    return {
+        "k": k_out.detach().cpu(),
+        "psd": psd_out.detach().cpu(),
+        "psd_std": psd_std_out.detach().cpu(),
+        "psd_n": psd_n_out.detach().cpu(),
+        "psd_ci_lo": ci_lo_out.detach().cpu(),
+        "psd_ci_hi": ci_hi_out.detach().cpu(),
+    }
+
+
 
 
 @torch.no_grad()

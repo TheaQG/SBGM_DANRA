@@ -325,6 +325,7 @@ generation:
     # config_filename: config.yaml # Filename for the saved configuration
 
 full_gen_eval:
+  use_new_eval: true 
   seed: 504 # Random seed for full evaluation
   ensemble_size: 32 # Number of ensemble members to generate for full evaluation
   max_dates: 800 # Maximum number of dates to evaluate (set to -1 for all available dates)
@@ -334,6 +335,7 @@ full_gen_eval:
   gen_dir: null # Directory for generation outputs (if null, use default)
   eval_dir: null # Directory for evaluation outputs (if null, use default)
   grid_km_per_px: 2.5 # Grid spacing in km/px
+  lr_grid_km_per_px: 31 # LR grid spacing in km/px
   fss_scales_km: [5, 10, 20] # FSS scales in km
   thresholds_mm: [1.0, 5.0, 10.0] # Thresholds in mm/day for categorical metrics
   wet_threshold_mm: 0.5 # Threshold for wet day in mm/day
@@ -341,6 +343,7 @@ full_gen_eval:
   spread_skill_bins: 10
   pit_bins: 20 # Number of bins for PIT histogram
   psd_ignore_low_k_bins: 2
+  psd_normalize: none # "none" | "per_field" | "match_ref"
   random_ref_kind: phase_randomized
   seasonal_summaries: true
   region_mask_path: null

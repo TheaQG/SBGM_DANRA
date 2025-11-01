@@ -1,0 +1,246 @@
+"""
+    Probabilistic metrics for precipitation evaluation.
+    Gathers computation and plotting functions.
+
+"""
+
+from __future__ import annotations
+from pathlib import Path
+from typing import Sequence, Optional, Dict, Any, List
+
+import numpy as np
+import torch
+import logging
+
+logger = logging.getLogger(__name__)
+
+from sbgm.evaluate.evaluate_prcp.eval_probabilistic.metrics_probabilistic import (
+    crps_ensemble,
+    pit_values_from_ensemble,
+    rank_histogram,
+    reliability_exceedance_binned,
+    aggregate_reliability_bins,
+    spread_skill_binned,
+)
+from sbgm.evaluate.evaluate_prcp.eval_probabilistic.plot_probabilistic import (
+    plot_probabilistic,
+)
+
+def run_probabilistic(
+        resolver,
+        eval_cfg,
+        out_root: str | Path,
+        *,
+        plot_only: bool = False,
+) -> None:
+    """
+        Main entry for precipitation probabilistic evaluation.
+
+        Parameters:
+            resolver
+                Object that knows how to access evaluation data. Must provide:
+                    - list_dates()
+                    - load_obs(date)
+                    - load_ens(date)
+                    - load_pmm(date) (optional, may return None)
+                    - load_mask(date) (optional, may return None)
+            eval_cfg
+                Config-like object with evaluation settings.
+                    - thresholds_mm
+                    - reliability_bins
+                    - spread_skill_bins
+                    - pit_bins
+            out_root
+                Directory to save outputs to.
+            plot_only
+                If True, only generate plots from (existing) data.
+    """
+    out_root = Path(out_root)
+    tables_dir = out_root / "tables"
+    figs_dir = out_root / "figures"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    figs_dir.mkdir(parents=True, exist_ok=True)
+
+    # if user only wants plots, just read + plot
+    if plot_only:
+        thresholds = getattr(eval_cfg, "thresholds_mm", (1.0, 5.0, 10.0))
+        pit_bins = int(getattr(eval_cfg, "pit_bins", 20))
+        plot_probabilistic(out_root, thresholds=thresholds, pit_bins=pit_bins)
+        return
+    
+    # ================================================================================
+    # 1) setup / config
+    # ================================================================================
+    thresholds: Sequence[float] = getattr(eval_cfg, "thresholds_mm", (1.0, 5.0, 10.0))
+    n_rel_bins: int = int(getattr(eval_cfg, "reliability_bins", 10))
+    n_ss_bins: int = int(getattr(eval_cfg, "spread_skill_bins", 10))
+    pit_bins: int = int(getattr(eval_cfg, "pit_bins", 20))
+
+    dates: List[str] = list(resolver.list_dates())
+
+    # data accumulators
+    crps_lines: List[str] = ["date,crps"]
+    all_pit: List[np.ndarray] = []
+    rank_acc: Optional[torch.Tensor] = None
+    rel_acc: Dict[float, List[Dict[str, torch.Tensor]]] = {float(t): [] for t in thresholds}
+    ss_lines: List[str] = ["date,spread_mean,skill_mean"]    
+
+    # ================================================================================
+    # 2) per-date loop
+    # ================================================================================
+    _crps_sum = None
+    _crps_cnt = None
+    for d in dates:
+        logger.info(f"[eval_probabilistic] Processing date {d} ...")
+        # load
+
+        obs = resolver.load_obs(d)     # [H,W]
+        ens = resolver.load_ens(d)     # [M,H,W]
+        if obs is None or ens is None:
+            # skip incomplete samples
+            continue
+
+        mask = resolver.load_mask(d)   # [H,W] or None
+        pmm  = None
+        # optional PMM (prefer phys)
+        try:
+            pmm = resolver.load_pmm(d)
+        except Exception:
+            pmm = None
+
+        # make sure tensors are on a device (CPU is fine here)
+        if not torch.is_tensor(obs):
+            obs = torch.from_numpy(obs)
+        if not torch.is_tensor(ens):
+            ens = torch.from_numpy(ens)
+
+        # 2.1 CRPS (domain average, masked)
+        crps_val = crps_ensemble(obs, ens, mask=mask, reduction="mean")
+        crps_lines.append(f"{d},{float(crps_val):.6f}")
+
+        # 2.1b CRPS map (for spatial mean later)
+        crps_map = crps_ensemble(obs, ens, mask=mask, reduction="none")  # [H,W]
+        
+        if _crps_sum is None:
+            _crps_sum = crps_map.clone().float()
+            if mask is not None:
+                _crps_cnt = mask.to(crps_map.dtype)
+            else:
+                _crps_cnt = torch.ones_like(crps_map, dtype=torch.float32)
+        else:
+            _crps_sum = _crps_sum + crps_map
+            if mask is not None:
+                _crps_cnt = _crps_cnt + mask.to(crps_map.dtype)
+            else:
+                _crps_cnt = _crps_cnt + torch.ones_like(crps_map, dtype=torch.float32)
+
+        # 2.2 PIT
+        # metrics expect B>1, so wrap a batch dimension
+        pits = pit_values_from_ensemble(
+            obs.unsqueeze(0),            # [1,H,W]
+            ens.unsqueeze(0),            # [1,M,H,W]
+            mask=mask,
+            randomized=True,
+        )
+        all_pit.append(pits.numpy())
+
+        # 2.3 Rank histogram
+        rh = rank_histogram(
+            obs.unsqueeze(0),
+            ens.unsqueeze(0),
+            mask=mask,
+            randomize_ties=True,
+        )
+        if rank_acc is None:
+            rank_acc = rh
+        else:
+            rank_acc = rank_acc + rh
+
+        # 2.4 Reliability per threshold
+        for thr in thresholds:
+            rel = reliability_exceedance_binned(
+                obs=obs,
+                ens=ens,
+                threshold=float(thr),
+                lr_covariate=None,               # hook for LR-stratified plots later
+                n_bins=n_rel_bins,
+                mask=mask,
+                return_brier=True,
+            )
+            rel_acc[float(thr)].append(rel)
+
+        # 2.5 Spread–skill
+        ss = spread_skill_binned(
+            obs=obs,
+            ens=ens,
+            point_field=pmm,              # use PRECOMPUTED PMM if available
+            point="mean",                 # fallback if pmm is None
+            mask=mask,
+            n_bins=n_ss_bins,
+        )
+        # We want a per-date SINGLE number (for the time series plot),
+        # so take a simple count-weighted mean over bins:
+        cnt = ss["count"].numpy().astype(np.int64)
+        spr = ss["spread"].numpy()
+        skl = ss["skill"].numpy()
+        w = cnt.clip(min=0)
+        if w.sum() > 0:
+            spread_mean = float((spr * w).sum() / w.sum())
+            skill_mean = float((skl * w).sum() / w.sum())
+        else:
+            spread_mean = 0.0
+            skill_mean = 0.0
+        ss_lines.append(f"{d},{spread_mean:.6f},{skill_mean:.6f}")
+    
+    
+    # ================================================================================
+    # 3) write output tables
+    # ================================================================================
+
+    # 3.1 CRPS
+    # 3.1b temporally averaged CRPS map
+    if _crps_sum is not None and _crps_cnt is not None:
+        mean_map = (_crps_sum / _crps_cnt.clamp(min=1.0)).cpu().numpy()
+        np.savez_compressed(
+            tables_dir / "prob_crps_mean_map.npz",
+            crps_mean_map=mean_map,     # <-- correct key name
+        )
+
+    # 3.2 PIT
+    if all_pit:
+        pit_all = np.concatenate(all_pit, axis=0)
+    else:
+        pit_all = np.array([], dtype=np.float32)
+    np.savez_compressed(tables_dir / "prob_pit_values.npz", pit=pit_all)
+
+    # 3.3 Rank
+    if rank_acc is not None:
+        np.savez_compressed(tables_dir / "prob_rank_histogram.npz", rank_hist=rank_acc.numpy())
+
+    # 3.4 Reliability (aggregate across dates → write one file per threshold)
+    for thr, lst in rel_acc.items():
+        if not lst:
+            continue
+        agg = aggregate_reliability_bins(lst)
+        bc = agg["bin_center"].numpy()
+        pp = agg["prob_pred"].numpy()
+        fo = agg["freq_obs"].numpy()
+        cnt = agg["count"].numpy()
+
+        lines = ["bin_center,prob_pred,freq_obs,count"]
+        for b, p, f, c in zip(bc, pp, fo, cnt):
+            lines.append(f"{b:.6f},{p:.6f},{f:.6f},{int(c)}")
+        (tables_dir / f"prob_reliability_{thr:.1f}mm.csv").write_text("\n".join(lines))
+
+    # 3.5 Spread–skill (per-date summary)
+    (tables_dir / "prob_spread_skill.csv").write_text("\n".join(ss_lines))
+
+    # ================================================================================
+    # 4) plots
+    # ================================================================================
+    plot_probabilistic(
+        out_root,
+        gen_root=Path(eval_cfg.gen_dir),
+        thresholds=thresholds,
+        pit_bins=pit_bins,
+    )

@@ -62,7 +62,8 @@ def evaluation_main(cfg):
     ev_cfg = EvaluationConfig(
         gen_dir=str(gen_root),
         out_dir=str(eval_root),
-        grid_km_per_px=float(cfg_full_gen_eval.get("grid_km_per_px", 2.0)),
+        grid_km_per_px=float(cfg_full_gen_eval.get("grid_km_per_px", 2.5)),
+        lr_grid_km_per_px=float(cfg_full_gen_eval.get("lr_grid_km_per_px", 31.0)),
         fss_scales_km=tuple(cfg_full_gen_eval.get("fss_scales_km", (5,10,20))),
         thresholds_mm=tuple(cfg_full_gen_eval.get("thresholds_mm", (1.0,5.0,10.0))),
         wet_threshold_mm=float(cfg_full_gen_eval.get("wet_threshold_mm", 1.0)),
@@ -70,6 +71,7 @@ def evaluation_main(cfg):
         spread_skill_bins=int(cfg_full_gen_eval.get("spread_skill_bins", 10)),
         pit_bins=int(cfg_full_gen_eval.get("pit_bins", 20)),
         psd_ignore_low_k_bins=int(cfg_full_gen_eval.get("psd_ignore_low_k_bins", 1)),
+        psd_normalize=str(cfg_full_gen_eval.get("psd_normalize", "none")),
         random_ref_kind=str(cfg_full_gen_eval.get("random_ref_kind", "phase_randomized")),
         seasonal_summaries=bool(cfg_full_gen_eval.get("seasonal_summaries", True)),
         region_mask_path=cfg_full_gen_eval.get("region_mask_path", None),

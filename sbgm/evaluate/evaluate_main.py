@@ -1,0 +1,93 @@
+from __future__ import annotations
+from pathlib import Path
+import logging
+import numpy as np
+import torch
+
+from sbgm.utils import get_model_string
+from sbgm.evaluate.evaluation import EvaluationConfig, EvaluationRunner
+
+logger = logging.getLogger(__name__)
+
+
+def _default_gen_dir(cfg) -> Path:
+    model_str = get_model_string(cfg)
+    sample_root = cfg["paths"]["sample_dir"]
+    return Path(sample_root) / "generation" / model_str
+
+
+def _default_eval_dir(cfg) -> Path:
+    model_str = get_model_string(cfg)
+    sample_root = cfg["paths"]["sample_dir"]
+    return Path(sample_root) / "evaluation" / model_str
+
+
+def evaluation_main(cfg):
+    """
+        Launch modular evaluation process based on provided config.
+    """
+    fe = cfg.get("full_gen_eval", {})
+
+        # standard flags you already had
+    do_prob = bool(fe.get("do_prob", True))
+    do_scale = bool(fe.get("do_scale", False))      # we can wire this later
+    do_ext = bool(fe.get("do_ext", False))          # later
+
+    gen_dir = fe.get("gen_dir", None)
+    eval_dir = fe.get("eval_dir", None)
+
+    # seeds like old version
+    seed = int(fe.get("seed", 1234))
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+
+    # device is still read from your YAML
+    device = torch.device(cfg["training"]["device"])
+
+    # directories
+    gen_root = Path(gen_dir) if gen_dir is not None else _default_gen_dir(cfg)
+    eval_root = Path(eval_dir) if eval_dir is not None else _default_eval_dir(cfg)
+    eval_root.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"[evaluation_main] gen_root: {gen_root}")
+    logger.info(f"[evaluation_main] eval_root: {eval_root}")
+
+    # build NEW evaluation config (note: this is sbgm/evaluate/evaluation.py)
+    ev_cfg = EvaluationConfig(
+        gen_dir=str(gen_root),
+        out_dir=str(eval_root),
+        eval_land_only=bool(fe.get("eval_land_only", False)),
+        prefer_phys=bool(fe.get("prefer_phys", True)),
+        region_mask_path=fe.get("region_mask_path", None),
+        grid_km_per_px=float(fe.get("grid_km_per_px", 2.5)),
+        lr_grid_km_per_px=float(fe.get("lr_grid_km_per_px", 31.0)),
+        thresholds_mm=tuple(fe.get("thresholds_mm", (1.0, 5.0, 10.0))),
+        fss_scales_km=tuple(fe.get("fss_scales_km", (5, 10, 20))),
+        seasons=tuple(fe.get("seasons", ("ALL", "DJF", "MAM", "JJA", "SON"))),
+        reliability_bins=int(fe.get("reliability_bins", 10)),
+        spread_skill_bins=int(fe.get("spread_skill_bins", 10)),
+        pit_bins=int(fe.get("pit_bins", 20)),
+    )
+
+    # map YAML flags -> new modular task names
+    tasks: list[str] = []
+    if do_prob:
+        tasks.append("prcp_probabilistic")
+    if do_scale:
+        tasks.append("prcp_scale")
+    if do_ext:
+        tasks.append("prcp_extremes")
+
+    runner = EvaluationRunner(
+        cfg_yaml=cfg,
+        eval_cfg=ev_cfg,
+        device=device,
+        baseline_eval_dirs=None,
+        plot_only=bool(fe.get("plot_only", False)),
+    )
+
+    runner.run(tasks=tasks)
+
+    logger.info(f"[evaluation_main_new] Done. Outputs at: {eval_root}")
+    return eval_root
