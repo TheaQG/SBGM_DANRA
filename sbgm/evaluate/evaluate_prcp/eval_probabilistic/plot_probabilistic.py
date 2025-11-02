@@ -29,7 +29,10 @@ from matplotlib.patches import Patch
 from datetime import datetime
 import logging
 
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
 from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _savefig, _nice, _to_date_safe, _season_from_month
+from sbgm.variable_utils import get_cmap_for_variable
 
 logger = logging.getLogger(__name__)
 
@@ -306,25 +309,48 @@ def plot_crps_examples(
     if not rows:
         return
 
-    # pick 3 best + 3 worst
+    # pick 3 best + 3 worst, deprioritizing zero-CRPS days (no-rain)
     rows_sorted = sorted(rows, key=lambda x: x[1])
+    eps = 1e-2
+    nonzero_rows = [r for r in rows_sorted if r[1] > eps]
+    zero_rows = [r for r in rows_sorted if r[1] <= eps]
     n_half = max(1, n_examples // 2)
-    best = rows_sorted[:n_half]
+    if len(nonzero_rows) >= n_half:
+        best = nonzero_rows[:n_half]
+    else:
+        # Take all nonzero, fill up with zero-CRPS days
+        best = nonzero_rows + zero_rows[:(n_half - len(nonzero_rows))]
     worst = rows_sorted[-n_half:]
-    selected = best + worst  # keep order: good first, then bad
+    selected = best + worst
 
+    # --------------------------
+    # get generation root
+    # --------------------------
     if gen_root is not None:
         gen_root = Path(gen_root)
         if not gen_root.exists():
-            logger.warning(f"[plot_crps_examples] Specified gen_root={gen_root} does not exist; ignoring.")
+            logger.warning(f"[plot_crps_examples] Provided gen_root={gen_root} does not exist – falling back to inference.")
             gen_root = None
-    else:
-        logger.info(f"[plot_crps_examples] No gen_root specified; only plotting bar plot.")
 
+    if gen_root is None:
+        # automatic inference as fallback
+        model_name = eval_root.parents[2].name  # folder right above 'prcp'
+        for p in eval_root.parents:
+            if p.name == "generated_samples":
+                cand = p / "generation" / model_name
+                if cand.exists():
+                    gen_root = cand
+                    break
+                cand2 = p / "generation"
+                if cand2.exists():
+                    gen_root = cand2
+                    break
 
-    # fallback to bar plot if we cannot find generation
+    # --------------------------
+    # if still None -> fallback bar plot
+    # --------------------------
     if gen_root is None or not gen_root.exists():
-        logger.info(f"[plot_crps_examples] Could not infer generation root from eval_root={eval_root}; falling back to bar plot.")
+        logger.info(f"[plot_crps_examples] Could not determine generation root from {eval_root}; falling back to bar plot.")
         _nice()
         fig, ax = plt.subplots()
         labs = [d for d, _ in selected]
@@ -337,6 +363,9 @@ def plot_crps_examples(
         _savefig(fig, figs_dir / "prob_crps_examples.png")
         return
 
+    # --------------------------
+    # helpers to load HR / PMM
+    # --------------------------
     def _load_np(p: Path, keys: list[str]):
         if not p.exists():
             return None
@@ -344,12 +373,15 @@ def plot_crps_examples(
         for k in keys:
             if k in d:
                 arr = np.asarray(d[k])
+                # squeeze singleton leading dims
                 while arr.ndim > 2 and 1 in arr.shape:
                     arr = np.squeeze(arr)
                 return arr
         return None
 
     panels = []
+    # use project-wide colormap for precipitation
+    cmap = get_cmap_for_variable("prcp")
     for date_s, crps_v in selected:
         hr = _load_np(gen_root / "lr_hr" / f"{date_s}.npz",
                       ["hr", "hr_phys", "target", "truth", "obs", "y"])
@@ -379,35 +411,37 @@ def plot_crps_examples(
 
     _nice()
     ncols = len(panels)
-    fig, axs = plt.subplots(2, ncols, figsize=(3.2 * ncols, 6.0), constrained_layout=True)
+    # IMPORTANT: no constrained_layout here, since _savefig() does tight_layout()
+    fig, axs = plt.subplots(2, ncols, figsize=(3.2 * ncols, 6.0))
+
     last_im = None
     for j, (date_s, crps_v, hr, pmm) in enumerate(panels):
         ax_hr = axs[0, j] if ncols > 1 else axs[0]
         ax_pm = axs[1, j] if ncols > 1 else axs[1]
 
         if hr is not None:
-            im = ax_hr.imshow(hr, origin="lower", vmin=vmin, vmax=vmax, cmap="Blues")
+            im = ax_hr.imshow(hr, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
             last_im = im
         else:
-            im = ax_hr.imshow(np.zeros((2, 2)), origin="lower", vmin=vmin, vmax=vmax, cmap="Blues")
+            im = ax_hr.imshow(np.zeros((2, 2)), origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
             last_im = im
         ax_hr.set_title(f"{date_s}\nCRPS={crps_v:.3f}")
         ax_hr.set_xticks([]); ax_hr.set_yticks([])
 
         if pmm is not None:
-            ax_pm.imshow(pmm, origin="lower", vmin=vmin, vmax=vmax, cmap="Blues")
+            ax_pm.imshow(pmm, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
         else:
-            ax_pm.imshow(np.zeros((2, 2)), origin="lower", vmin=vmin, vmax=vmax, cmap="Blues")
+            ax_pm.imshow(np.zeros((2, 2)), origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
         ax_pm.set_xticks([]); ax_pm.set_yticks([])
 
         if j == 0:
             ax_hr.set_ylabel("HR")
             ax_pm.set_ylabel("PMM")
 
-    # shared cbar
-    if last_im is not None:
-        cax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
-        fig.colorbar(last_im, cax=cax, label="mm/day")
+        # Individual colorbar for each column (day pair), attached to PMM axis
+        divider = make_axes_locatable(ax_pm)
+        cax = divider.append_axes("right", size="4%", pad=0.05)
+        fig.colorbar(im, cax=cax, label="mm/day")
 
     _savefig(fig, figs_dir / "prob_crps_examples.png")
 
@@ -506,12 +540,12 @@ def plot_crps_timeseries(
     ax.set_ylabel("CRPS")
     ax.set_title("Seasonal CRPS distribution")
 
-    # tiny legend explaining the green mean symbol
-    legend_elems = [
-        Patch(facecolor="white", edgecolor="black", label="IQR + whiskers"),
-        Patch(facecolor="white", edgecolor="none", label="● mean (green)")
-    ]
-    ax.legend(handles=legend_elems, loc="upper right")
+    # # tiny legend explaining the green mean symbol
+    # legend_elems = [
+    #     Patch(facecolor="white", edgecolor="black", label="IQR + whiskers"),
+    #     Patch(facecolor="white", edgecolor="none", label="● mean (green)")
+    # ]
+    # ax.legend(handles=legend_elems, loc="upper right")
 
     _savefig(fig, figs_dir / "prob_crps_seasonal.png")
 
@@ -527,8 +561,9 @@ def plot_crps_spatial(eval_root: str | Path):
     mean_crps = np.mean(crps_map)
 
     _nice()
+    cmap = get_cmap_for_variable("prcp")
     fig, ax = plt.subplots()
-    im = ax.imshow(crps_map, origin="lower", cmap="viridis")
+    im = ax.imshow(crps_map, origin="lower", cmap=cmap)
     ax.set_title(f"Mean CRPS (per pixel, over time)\nOverall mean: {mean_crps:.2f}")
     ax.set_xticks([]); ax.set_yticks([])
     fig.colorbar(im, ax=ax, label="CRPS")

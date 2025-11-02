@@ -30,7 +30,7 @@ def evaluation_main(cfg):
 
         # standard flags you already had
     do_prob = bool(fe.get("do_prob", True))
-    do_scale = bool(fe.get("do_scale", False))      # we can wire this later
+    do_scale = bool(fe.get("do_scale", True))      # we can wire this later
     do_ext = bool(fe.get("do_ext", False))          # later
 
     gen_dir = fe.get("gen_dir", None)
@@ -68,6 +68,14 @@ def evaluation_main(cfg):
         reliability_bins=int(fe.get("reliability_bins", 10)),
         spread_skill_bins=int(fe.get("spread_skill_bins", 10)),
         pit_bins=int(fe.get("pit_bins", 20)),
+        # scale-specific fields with sensible fallbacks to the old names
+        hr_dx_km=float(fe.get("hr_dx_km", fe.get("grid_km_per_px", 2.5))),
+        lr_dx_km=float(fe.get("lr_dx_km", fe.get("lr_grid_km_per_px", 31.0))),
+        fss_thresholds_mm=tuple(fe.get("fss_thresholds_mm", fe.get("thresholds_mm", (1.0, 5.0, 10.0)))),
+        low_k_max=float(fe.get("low_k_max", 1.0 / 200.0)),
+        high_k_min=float(fe.get("high_k_min", 1.0 / 20.0)),
+        compute_lr_fss=bool(fe.get("compute_lr_fss", True)),
+        make_plots=bool(fe.get("make_plots", True)),        
     )
 
     # map YAML flags -> new modular task names

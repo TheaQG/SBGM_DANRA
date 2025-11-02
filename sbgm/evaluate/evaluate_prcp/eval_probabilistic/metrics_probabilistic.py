@@ -22,9 +22,10 @@ from typing import Optional, Sequence, Dict, List, Any
 
 import torch
 
-# =====
+# ================================================================================
 # Small internal helpers
-# =====
+# ================================================================================
+
 
 def _ensure_float(x: torch.Tensor) -> torch.Tensor:
     return x if torch.is_floating_point(x) else x.float()

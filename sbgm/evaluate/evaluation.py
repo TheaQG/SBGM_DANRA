@@ -8,7 +8,8 @@ import json
 import logging
 
 from sbgm.evaluate.data_resolver import EvalDataResolver
-from sbgm.evaluate.evaluate_prcp.eval_probabilistic.evaluate_probabilistic import (run_probabilistic)
+from sbgm.evaluate.evaluate_prcp.eval_probabilistic.evaluate_probabilistic import run_probabilistic
+from sbgm.evaluate.evaluate_prcp.eval_scale.evaluate_scale import run_scale
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,13 @@ class EvaluationConfig:
     reliability_bins: int = 10
     spread_skill_bins: int = 10
     pit_bins: int = 20
+    hr_dx_km: float = 2.5
+    lr_dx_km: float = 31.0
+    fss_thresholds_mm: tuple = (1.0, 5.0, 10.0)
+    low_k_max: float = 1.0 / 200.0
+    high_k_min: float = 1.0 / 20.0
+    compute_lr_fss: bool = True
+    make_plots: bool = True
 
 class EvaluationRunner:
     """
@@ -99,12 +107,13 @@ class EvaluationRunner:
         else:
             logger.info(f"[EvaluationRunner] Skipping manifest.json write (plot_only and file exists).")
 
+        logger.info(f"[EvaluationRunner] Starting evaluation with tasks: {tasks if tasks is not None else 'all available tasks'}")
         # ===== 
         # Dispatch to evaluation tasks
         # =====
         if tasks is None:
             # Sensible default: run prcipitation probabilistic evaluation
-            tasks = ["prcp_probabilistic"]
+            tasks = ["prcp_probabilistic", "prcp_scale"]
         for task in tasks:
             # 1) Precipitation probabilistic evaluation
             if task in ("prcp_probabilistic", "prcp_prob", "prob", "probabilistic"):
@@ -116,7 +125,42 @@ class EvaluationRunner:
                     resolver=self.data,
                     eval_cfg=self.eval_cfg,
                     out_root=out_dir,
-                    plot_only=self.plot_only
+                    plot_only=self.plot_only,
+                )
+                continue
+            
+            # 2) Precipitation scale evaluation
+            if task in ("prcp_scale", "scale", "prcp_psd", "scale_dependent"):
+                out_dir = self.out_root / "prcp" / "scale"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
+                
+                # build a light eval cfg-like object for scale code
+                class _ScaleCfg:
+                    hr_dx_km: float
+                    lr_dx_km: float
+                    fss_thresholds_mm: tuple
+                    fss_scales_km: tuple
+                    compute_lr_fss: bool
+                    low_k_max: float
+                    high_k_min: float
+                    make_plots: bool
+
+                sc = _ScaleCfg()
+                sc.hr_dx_km = float(self.eval_cfg.hr_dx_km or self.eval_cfg.grid_km_per_px)
+                sc.lr_dx_km = float(self.eval_cfg.lr_dx_km or self.eval_cfg.lr_grid_km_per_px)
+                sc.fss_thresholds_mm = tuple(self.eval_cfg.fss_thresholds_mm)
+                sc.fss_scales_km = tuple(self.eval_cfg.fss_scales_km)
+                sc.compute_lr_fss = bool(self.eval_cfg.compute_lr_fss)
+                sc.low_k_max = float(self.eval_cfg.low_k_max)
+                sc.high_k_min = float(self.eval_cfg.high_k_min)
+                sc.make_plots = bool(self.eval_cfg.make_plots)
+
+                run_scale(
+                    resolver=self.data,
+                    eval_cfg=sc,
+                    out_root=out_dir,
+                    plot_only=self.plot_only,
                 )
                 continue
 
