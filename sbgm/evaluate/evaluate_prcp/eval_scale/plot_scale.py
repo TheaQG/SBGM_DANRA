@@ -251,16 +251,16 @@ def plot_scale_psd(scale_root: Path) -> None:
     # --- mark low-k and high-k limits ---
     ax.axvline(1.0 / low_k_max, color="gray", linestyle="--", linewidth=0.8, alpha=0.7)
     # move slightly to the left to avoid overlap with high-k line
-    x1 = 1.0 / low_k_max * 0.998
-    # Place y1 at 60% of the current y-axis limit (remember it's log-scaled!)
-    y1 = np.log10(ax.get_ylim()[1] * 0.6)
+    x1 = 1.0 / low_k_max * 1.08
+    # Place y1 at 20% of the current y-axis limit (remember it's log-scaled!)
+    y1 = np.log10(ax.get_ylim()[1] * 0.00002)
     ax.text(x1, y1, f"low-k λ={1.0/low_k_max:.0f} km",
         rotation=90, color="gray", fontsize=6.5, ha="center", va="bottom",)
 
     ax.axvline(1.0 / high_k_min, color="gray", linestyle="--", linewidth=0.8, alpha=0.7,)
-    x1 = 1.0 / high_k_min * 0.998
-    y1 = np.log10(ax.get_ylim()[1] * 0.4)
-    ax.text(x1, y1, f"high-k λ={1.0/high_k_min:.0f} km",
+    x2 = 1.0 / high_k_min * 1.08
+    y2 = np.log10(ax.get_ylim()[1] * 0.00002)
+    ax.text(x2, y2, f"high-k λ={1.0/high_k_min:.0f} km",
         rotation=90, color="gray", fontsize=6.5, ha="center", va="bottom",)
 
 

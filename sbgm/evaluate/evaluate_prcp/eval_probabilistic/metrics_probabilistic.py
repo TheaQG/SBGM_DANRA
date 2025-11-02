@@ -121,7 +121,121 @@ def crps_ensemble(
             return crps.sum()
         return crps
 
+# ================================================================================
+# 1b. Energy score (multivariate CRPS)
+# ================================================================================
 
+@torch.no_grad()
+def energy_score(
+    obs: torch.Tensor,           # [H,W]
+    ens: torch.Tensor,           # [M,H,W]
+    mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Energy score for spatial fields, following Gneiting et al. (2008).
+
+    ES = 1/M * sum_i ||X_i - y|| - 1/(2 M^2) * sum_{i,j} ||X_i - X_j||
+
+    We treat the whole field as *one* multivariate vector.
+    If `mask` is given, we only use the valid pixels.
+    """
+    if obs.dim() != 2 or ens.dim() != 3:
+        raise ValueError("energy_score expects obs=[H,W] and ens=[M,H,W]")
+
+    M, H, W = ens.shape
+    device = ens.device
+    obs = obs.to(device, ens.dtype)
+    ens = ens.to(device, ens.dtype)
+
+    # flatten + optional mask
+    if mask is not None:
+        m = _normalize_mask(mask, obs.shape, device=device)  # [H,W] (bool)
+        m_flat = m.view(-1) # type: ignore
+        y = obs.view(-1)[m_flat]               # [N]
+        X = ens.view(M, -1)[:, m_flat]         # [M,N]
+    else:
+        y = obs.view(-1)                       # [H*W]
+        X = ens.view(M, -1)                    # [M,H*W]
+
+    # term 1: mean distance from each member to obs
+    # diff_to_obs: [M]
+    diff_to_obs = torch.linalg.vector_norm(X - y.unsqueeze(0), dim=1)
+    term1 = diff_to_obs.mean()
+
+    # term 2: mean pairwise distance inside ensemble
+    # torch.cdist → [M,M], safe because M is small
+    pairwise = torch.cdist(X, X, p=2.0)
+    term2 = 0.5 * pairwise.mean()
+
+    return term1 - term2
+
+
+# ================================================================================
+# 1c. Variogram score
+# ================================================================================
+
+@torch.no_grad()
+def variogram_score(
+    obs: torch.Tensor,           # [H,W]
+    ens: torch.Tensor,           # [M,H,W]
+    *,
+    mask: Optional[torch.Tensor] = None,
+    p: float = 0.5,
+    max_pairs: int = 4000,
+    seed: int = 0,
+) -> torch.Tensor:
+    """
+    Variogram score (Gneiting et al., 2008) for spatial ensemble fields.
+
+    VS = (1 / K) * Σ_k ( |y_i - y_j|^p - 1/M Σ_m |x_{m,i} - x_{m,j}|^p )^2
+
+    We approximate the full pair sum by drawing up to `max_pairs` random pixel pairs.
+    This keeps it O(M * max_pairs) instead of O(M * (HW)^2).
+    """
+    if obs.dim() != 2 or ens.dim() != 3:
+        raise ValueError("variogram_score expects obs=[H,W] and ens=[M,H,W]")
+
+    M, H, W = ens.shape
+    device = ens.device
+    obs = obs.to(device, ens.dtype)
+    ens = ens.to(device, ens.dtype)
+
+    # flatten + mask
+    if mask is not None:
+        m = _normalize_mask(mask, obs.shape, device=device)
+        valid = m.view(-1) # type: ignore
+        y = obs.view(-1)[valid]           # [N]
+        X = ens.view(M, -1)[:, valid]     # [M,N]
+    else:
+        y = obs.view(-1)                  # [H*W]
+        X = ens.view(M, -1)               # [M,H*W]
+
+    N = y.numel()
+    if N <= 1:
+        return torch.tensor(0.0, device=device)
+
+    # how many pairs we can realistically sample
+    K = min(max_pairs, N * (N - 1) // 2)
+
+    g = torch.Generator(device=device)
+    g.manual_seed(seed)
+
+    idx_i = torch.randint(0, N, (K,), generator=g, device=device)
+    idx_j = torch.randint(0, N, (K,), generator=g, device=device)
+    same = idx_i == idx_j
+    if same.any():
+        idx_j[same] = (idx_j[same] + 1) % N
+
+    # obs variogram part
+    y_diff = (y[idx_i] - y[idx_j]).abs().pow(p)     # [K]
+
+    # ensemble variogram part
+    x_i = X[:, idx_i]   # [M,K]
+    x_j = X[:, idx_j]   # [M,K]
+    ens_diff = (x_i - x_j).abs().pow(p).mean(dim=0)  # [K]
+
+    vs = (y_diff - ens_diff).pow(2).mean()
+    return vs
 
 # ================================================================================
 # 2. PIT histograms

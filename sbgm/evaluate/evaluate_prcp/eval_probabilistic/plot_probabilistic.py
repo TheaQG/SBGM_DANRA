@@ -269,7 +269,77 @@ def plot_spread_skill(
     _savefig(fig, figs_dir / "prob_spread_vs_skill.png")
 
 
+# ================================================================================
+# 4b. Energy score & Variogram score
+# ================================================================================
 
+def plot_energy_variogram(eval_root: str | Path):
+    eval_root = Path(eval_root)
+    tables_dir = eval_root / "tables"
+    figs_dir = _ensure_dir(eval_root / "figures")
+
+    es_path = tables_dir / "prob_energy_daily.csv"
+    vs_path = tables_dir / "prob_variogram_daily.csv"
+
+    if (not es_path.exists()) and (not vs_path.exists()):
+        return
+
+    dates_es, es_vals = [], []
+    if es_path.exists():
+        lines = es_path.read_text().strip().splitlines()
+        for ln in lines[1:]:
+            s = ln.split(",")
+            if len(s) < 2:
+                continue
+            dates_es.append(s[0].strip())
+            try:
+                es_vals.append(float(s[1]))
+            except Exception:
+                es_vals.append(np.nan)
+
+    dates_vs, vs_vals = [], []
+    if vs_path.exists():
+        lines = vs_path.read_text().strip().splitlines()
+        for ln in lines[1:]:
+            s = ln.split(",")
+            if len(s) < 2:
+                continue
+            dates_vs.append(s[0].strip())
+            try:
+                vs_vals.append(float(s[1]))
+            except Exception:
+                vs_vals.append(np.nan)
+
+    _nice()
+    fig, axs = plt.subplots(1, 2, figsize=(8.0, 3.0))
+    ax1, ax2 = axs
+
+    # --- ES ---
+    if es_vals:
+        x = np.arange(len(es_vals))
+        ax1.plot(x, es_vals, lw=1.0, label="ES")
+        m_es = float(np.nanmean(es_vals))
+        ax1.axhline(m_es, color="0.5", ls="--", lw=0.8, label=f"mean={m_es:.3f}")
+        ax1.set_title("Energy score (daily)")
+        ax1.set_xlabel("sample index")
+        ax1.set_ylabel("ES")
+        ax1.legend()
+        ax1.grid(True, ls=":", alpha=0.4)
+
+    # --- VS ---
+    if vs_vals:
+        x = np.arange(len(vs_vals))
+        ax2.plot(x, vs_vals, lw=1.0, label="VS")
+        m_vs = float(np.nanmean(vs_vals))
+        ax2.axhline(m_vs, color="0.5", ls="--", lw=0.8, label=f"mean={m_vs:.3f}")
+        ax2.set_title("Variogram score (daily)")
+        ax2.set_xlabel("sample index")
+        ax2.set_ylabel("VS")
+        ax2.legend()
+        ax2.grid(True, ls=":", alpha=0.4)
+
+    fig.tight_layout()
+    _savefig(fig, figs_dir / "prob_energy_variogram.png")
 
 
 # ================================================================================
@@ -590,6 +660,7 @@ def plot_probabilistic(
     plot_rank(eval_root)
     plot_reliability(eval_root, thresholds=thresholds)
     plot_spread_skill(eval_root)
+    plot_energy_variogram(eval_root)
     plot_crps_examples(eval_root, gen_root=gen_root)
     plot_crps_timeseries(eval_root)
     plot_crps_spatial(eval_root)

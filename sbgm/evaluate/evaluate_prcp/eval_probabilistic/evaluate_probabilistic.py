@@ -21,6 +21,8 @@ from sbgm.evaluate.evaluate_prcp.eval_probabilistic.metrics_probabilistic import
     reliability_exceedance_binned,
     aggregate_reliability_bins,
     spread_skill_binned,
+    energy_score,
+    variogram_score,
 )
 from sbgm.evaluate.evaluate_prcp.eval_probabilistic.plot_probabilistic import (
     plot_probabilistic,
@@ -76,10 +78,15 @@ def run_probabilistic(
     n_ss_bins: int = int(getattr(eval_cfg, "spread_skill_bins", 10))
     pit_bins: int = int(getattr(eval_cfg, "pit_bins", 20))
 
+    vs_p: float = float(getattr(eval_cfg, "variogram_p", 0.5))
+    vs_max_pairs: int = int(getattr(eval_cfg, "variogram_max_pairs", 4000))
+
     dates: List[str] = list(resolver.list_dates())
 
     # data accumulators
     crps_lines: List[str] = ["date,crps"]
+    es_lines: List[str] = ["date,energy_score"]
+    vs_lines: List[str] = ["date,variogram_score"]
     all_pit: List[np.ndarray] = []
     rank_acc: Optional[torch.Tensor] = None
     rel_acc: Dict[float, List[Dict[str, torch.Tensor]]] = {float(t): [] for t in thresholds}
@@ -117,6 +124,21 @@ def run_probabilistic(
         # 2.1 CRPS (domain average, masked)
         crps_val = crps_ensemble(obs, ens, mask=mask, reduction="mean")
         crps_lines.append(f"{d},{float(crps_val):.6f}")
+
+        # Energy score (field-wise, multivariate generalization of CRPS)
+        es_val = energy_score(obs, ens, mask=mask)
+        es_lines.append(f"{d},{float(es_val):.6f}")
+        
+        # Variogram score (spatial dependence)
+        vs_val = variogram_score(
+            obs,
+            ens,
+            mask=mask,
+            p=vs_p,
+            max_pairs=vs_max_pairs,
+            seed=0,
+        )
+        vs_lines.append(f"{d},{float(vs_val):.6f}")        
 
         # 2.1b CRPS map (for spatial mean later)
         crps_map = crps_ensemble(obs, ens, mask=mask, reduction="none")  # [H,W]
@@ -205,6 +227,10 @@ def run_probabilistic(
             tables_dir / "prob_crps_mean_map.npz",
             crps_mean_map=mean_map,     # <-- correct key name
         )
+    # Energy score (per day)
+    (tables_dir / "prob_energy_daily.csv").write_text("\n".join(es_lines))
+    # Variogram score (per day)
+    (tables_dir / "prob_variogram_daily.csv").write_text("\n".join(vs_lines))
 
     # 3.2 PIT
     if all_pit:
