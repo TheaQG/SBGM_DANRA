@@ -62,6 +62,7 @@ def evaluation_main(cfg):
         
         eval_land_only=bool(fe.get("eval_land_only", False)),
         prefer_phys=bool(fe.get("prefer_phys", True)),
+        lr_key=str(fe.get("lr_key", "lr")),
         region_mask_path=fe.get("region_mask_path", None),
         grid_km_per_px=float(fe.get("grid_km_per_px", 2.5)),
         lr_grid_km_per_px=float(fe.get("lr_grid_km_per_px", 31.0)),

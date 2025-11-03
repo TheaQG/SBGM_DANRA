@@ -21,12 +21,14 @@ class EvalDataResolver:
             gen_root: str | Path,
             eval_land_only: bool = True,
             roi_mask_path: Optional[str | Path] = None,
-            prefer_phys: bool = True
+            prefer_phys: bool = True,
+            lr_phys_key: Optional[str] = "lr",
     ):
         self.gen_root = Path(gen_root)
         self.eval_land_only = eval_land_only
         self.roi_mask_path = Path(roi_mask_path) if roi_mask_path is not None else None
         self.prefer_phys = prefer_phys
+        self.lr_phys_key = lr_phys_key
 
         # Preferred physical-space data paths
         self.dir_ens_phys = self.gen_root / "ensembles_phys"
@@ -148,12 +150,42 @@ class EvalDataResolver:
 
     def load_lr(self, date: str) -> Optional[torch.Tensor]:
         """
-        Load LR (native LR grid) for a given date.
+        Load LR (native LR grid) for a given date. Allows for choosing which physical LR to use:
+            - "lr"          : canonical LR (default)
+            - "lr_lrspace"  : LR channel de-normalized via LR space stats
+            - "lr_hrspace"  : LR channel de-normalized via HR space stats
+        Falls back sensibly if preferred key not found.
+
         Output: [1,h,w] torch.float or None
         """
-        x = self._load_npz(self.dir_lrhr_phys, date, "lr")
-        if x is None:
+        p = self.dir_lrhr_phys / f"{date}.npz"
+        if not p.exists():
             return None
+        try:
+            d = np.load(p, allow_pickle=True)
+        except Exception as e:
+            logger.warning(f"[EvalDataResolver] Failed to read {p}: {e}")
+            return None
+        # Preferred order: requested key, then 'lr', then 'lr_lrspace', then 'lr_hrspace'
+        preferred = []
+        if isinstance(self.lr_phys_key, str) and len(self.lr_phys_key) > 0:
+            preferred.append(self.lr_phys_key)
+        preferred.extend(["lr", "lr_lrspace", "lr_hrspace"])
+        seen = set()
+        ordered = [k for k in preferred if not (k in seen or seen.add(k))]
+        x = None
+        chosen = None
+        for k in ordered:
+            if k in d.files:
+                x = d[k]
+                if x is not None:
+                    chosen = k
+                    break
+        if x is None:
+            logger.info(f"[EvalDataResolver] No LR arrays found in {p} for any of keys {ordered}")
+            return None
+        if chosen is not None and chosen != self.lr_phys_key:
+            logger.info(f"[EvalDataResolver] Requested LR key '{self.lr_phys_key}' not found; using '{chosen}' instead for {date}")        
         lr_t = torch.from_numpy(np.asarray(x))
         if lr_t.ndim == 3:
             lr_t = lr_t[0:1, ...]

@@ -23,6 +23,7 @@ class EvaluationConfig:
     eval_land_only: bool = True
     prefer_phys: bool = True
     region_mask_path: Optional[str] = None
+    lr_key: Optional[str] = "lr" # which LR key to use from lr_hr_phys: "lr" | "lr_lrspace" | "lr_hrspace"
     grid_km_per_px: float = 2.5
     lr_grid_km_per_px: float = 31.0
     thresholds_mm: tuple = (1.0, 5.0, 10.0)
@@ -91,7 +92,8 @@ class EvaluationRunner:
             gen_root=eval_cfg.gen_dir,
             eval_land_only=eval_cfg.eval_land_only,
             roi_mask_path=eval_cfg.region_mask_path,
-            prefer_phys=eval_cfg.prefer_phys
+            prefer_phys=eval_cfg.prefer_phys,
+            lr_phys_key=eval_cfg.lr_key
         )
 
         # Output setup
