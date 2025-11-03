@@ -381,7 +381,7 @@ def plot_crps_examples(
 
     # pick 3 best + 3 worst, deprioritizing zero-CRPS days (no-rain)
     rows_sorted = sorted(rows, key=lambda x: x[1])
-    eps = 1e-2
+    eps = 0.01
     nonzero_rows = [r for r in rows_sorted if r[1] > eps]
     zero_rows = [r for r in rows_sorted if r[1] <= eps]
     n_half = max(1, n_examples // 2)
@@ -465,20 +465,6 @@ def plot_crps_examples(
                            ["pmm", "x", "y_pred"])
         panels.append((date_s, crps_v, hr, pmm))
 
-    # get global vmin/vmax
-    vals = []
-    for _, _, hr, pmm in panels:
-        if hr is not None:
-            vals.append(hr)
-        if pmm is not None:
-            vals.append(pmm)
-    if not vals:
-        return
-    all_vals = np.concatenate([v.ravel() for v in vals])
-    vmax = float(np.percentile(all_vals, 99.5))
-    vmax = max(vmax, 1.0)
-    vmin = 0.0
-
     _nice()
     ncols = len(panels)
     # IMPORTANT: no constrained_layout here, since _savefig() does tight_layout()
@@ -489,19 +475,30 @@ def plot_crps_examples(
         ax_hr = axs[0, j] if ncols > 1 else axs[0]
         ax_pm = axs[1, j] if ncols > 1 else axs[1]
 
+        # per-day color range
+        this_vals = []
+
         if hr is not None:
-            im = ax_hr.imshow(hr, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
-            last_im = im
+            this_vals.append(hr.ravel())
+        if pmm is not None:
+            this_vals.append(pmm.ravel())
+        if this_vals:
+            this_all = np.concatenate(this_vals)
+            vmax_j = float(np.percentile(this_all, 99.5))
+            if vmax_j < 1.0:
+                vmax_j = 1.0
         else:
-            im = ax_hr.imshow(np.zeros((2, 2)), origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
-            last_im = im
+            vmax_j = 1.0
+        vmin_j = 0.0
+
+        hr_or_zeros = hr if hr is not None else np.zeros((2, 2))
+        pmm_or_zeros = pmm if pmm is not None else np.zeros((2, 2))
+
+        im = ax_hr.imshow(hr_or_zeros, origin="lower", vmin=vmin_j, vmax=vmax_j, cmap=cmap)
         ax_hr.set_title(f"{date_s}\nCRPS={crps_v:.3f}")
         ax_hr.set_xticks([]); ax_hr.set_yticks([])
 
-        if pmm is not None:
-            ax_pm.imshow(pmm, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
-        else:
-            ax_pm.imshow(np.zeros((2, 2)), origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
+        ax_pm.imshow(pmm_or_zeros, origin="lower", vmin=vmin_j, vmax=vmax_j, cmap=cmap)
         ax_pm.set_xticks([]); ax_pm.set_yticks([])
 
         if j == 0:
