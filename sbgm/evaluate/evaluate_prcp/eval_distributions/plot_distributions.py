@@ -89,48 +89,48 @@ def plot_distributional(dist_root: str | Path) -> None:
     gen_n = _norm(gen)
     lr_n  = _norm(lr)
 
-    # Optional daily uncertainty bands
-    daily_npz = tables / "dist_daily.npz"
-    ci = {}
-    if daily_npz.exists():
-        try:
-            d = np.load(daily_npz)
-            def _series_ci(counts_key: str, n_key: str):
-                if counts_key not in d or n_key not in d:
-                    return None
-                C = d[counts_key]      # [D,B]
-                n = d[n_key]           # [D]
-                if C.size == 0 or n.size == 0:
-                    return None
-                # avoid division by zero
-                n = np.maximum(n.astype(float), 1.0)
-                pdf = (C.astype(float).T / n).T  # [D,B]
-                lo = np.percentile(pdf, 5, axis=0)
-                hi = np.percentile(pdf, 95, axis=0)
-                med = np.percentile(pdf, 50, axis=0)
-                return lo, hi, med
-            ci["hr"]  = _series_ci("counts_hr",  "n_hr")
-            ci["gen"] = _series_ci("counts_gen", "n_gen")
-            if "counts_lr" in d and "n_lr" in d:
-                ci["lr"] = _series_ci("counts_lr", "n_lr")
-        except Exception as e:
-            logger.warning(f"[plot_distributional] Failed to parse dist_daily.npz for CI shading: {e}")
+    # # Optional daily uncertainty bands
+    # daily_npz = tables / "dist_daily.npz"
+    # ci = {}
+    # if daily_npz.exists():
+    #     try:
+    #         d = np.load(daily_npz)
+    #         def _series_ci(counts_key: str, n_key: str):
+    #             if counts_key not in d or n_key not in d:
+    #                 return None
+    #             C = d[counts_key]      # [D,B]
+    #             n = d[n_key]           # [D]
+    #             if C.size == 0 or n.size == 0:
+    #                 return None
+    #             # avoid division by zero
+    #             n = np.maximum(n.astype(float), 1.0)
+    #             pdf = (C.astype(float).T / n).T  # [D,B]
+    #             lo = np.percentile(pdf, 5, axis=0)
+    #             hi = np.percentile(pdf, 95, axis=0)
+    #             med = np.percentile(pdf, 50, axis=0)
+    #             return lo, hi, med
+    #         ci["hr"]  = _series_ci("counts_hr",  "n_hr")
+    #         ci["gen"] = _series_ci("counts_gen", "n_gen")
+    #         if "counts_lr" in d and "n_lr" in d:
+    #             ci["lr"] = _series_ci("counts_lr", "n_lr")
+    #     except Exception as e:
+    #         logger.warning(f"[plot_distributional] Failed to parse dist_daily.npz for CI shading: {e}")
 
-    # Plot CI bands (shading) before lines
-    val = ci.get("hr")
-    if val is not None:
-        lo, hi, _ = val
-        ax.fill_between(bin_centers, np.maximum(lo, eps), np.maximum(hi, eps), color="black", alpha=0.12, linewidth=0)
-    val = ci.get("gen")
-    if val is not None:
-        lo, hi, _ = val
-        ax.fill_between(bin_centers, np.maximum(lo, eps), np.maximum(hi, eps), color="royalblue", alpha=0.10, linewidth=0)
-    val = ci.get("lr")
-    if val is not None and lr_n is not None:
-        lo, hi, _ = val
-        ax.fill_between(bin_centers, np.maximum(lo, eps), np.maximum(hi, eps), color="deeppink", alpha=0.07, linewidth=0)
+    # # Plot CI bands (shading) before lines
+    # val = ci.get("hr")
+    # if val is not None:
+    #     lo, hi, _ = val
+    #     ax.fill_between(bin_centers, np.maximum(lo, eps), np.maximum(hi, eps), color="black", alpha=0.12, linewidth=0)
+    # val = ci.get("gen")
+    # if val is not None:
+    #     lo, hi, _ = val
+    #     ax.fill_between(bin_centers, np.maximum(lo, eps), np.maximum(hi, eps), color="royalblue", alpha=0.10, linewidth=0)
+    # val = ci.get("lr")
+    # if val is not None and lr_n is not None:
+    #     lo, hi, _ = val
+    #     ax.fill_between(bin_centers, np.maximum(lo, eps), np.maximum(hi, eps), color="deeppink", alpha=0.07, linewidth=0)
 
-    # Then plot the pooled lines on top
+    # # Then plot the pooled lines on top
 
     if hr_n is not None:
         ax.plot(bin_centers, hr_n, color="black", lw=1.5, label="HR")

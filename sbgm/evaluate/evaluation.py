@@ -11,6 +11,8 @@ from sbgm.evaluate.data_resolver import EvalDataResolver
 from sbgm.evaluate.evaluate_prcp.eval_probabilistic.evaluate_probabilistic import run_probabilistic
 from sbgm.evaluate.evaluate_prcp.eval_scale.evaluate_scale import run_scale
 from sbgm.evaluate.evaluate_prcp.eval_distributions.evaluate_distributions import run_distributional
+from sbgm.evaluate.evaluate_prcp.eval_extremes.evaluate_extremes import run_extremes
+from sbgm.evaluate.evaluate_prcp.eval_spatial.evaluate_spatial import run_spatial
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,24 @@ class EvaluationConfig:
     dist_vmax_percentile: float = 99.5
     dist_include_lr: bool = True
     dist_save_cap: int = 200_000
+    # Extremes evaluation config
+    ext_agg_kind: str = "mean"                 # "mean" or "sum"
+    ext_rxk_days: tuple = (1, 5)
+    ext_gev_rps_years: tuple = (2, 5, 10, 20, 50)
+    ext_blocks_per_year: float = 1.0            # 4.0 for seasonal blocks
+    ext_pot_thr_kind: str = "hr_quantile"          # "quantile" | "value" | "hr_quantile"
+    ext_pot_thr_val: float = 0.95               # if kind==quantile -> quantile; else absolute mm/day
+    ext_pot_rps_years: tuple = (2, 5, 10, 20, 50)
+    ext_days_per_year: float = 365.25
+    ext_wet_threshold_mm: float = 1.0
+    include_lr: bool = False
+    ext_tails_basis: str = "pooled_pixels" # "pooled_pixels" | "domain_series"
+    # Spatial evaluation config
+    spatial_corr_kinds: tuple = ("pearson", "spearman")
+    spatial_deseasonalize: bool = True
+    spatial_vmin: Optional[float] = None
+    spatial_vmax: Optional[float] = None
+    spatial_show_diff: bool = True    
 
 class EvaluationRunner:
     """
@@ -89,10 +109,6 @@ class EvaluationRunner:
             return False
         return True
 
-    # =====
-    # Simple run example: list dates and write manifest
-    # =====
-    
 
     def run(self, tasks: Optional[List[str]] = None):
         """
@@ -124,10 +140,13 @@ class EvaluationRunner:
         # =====
         if tasks is None:
             # Sensible default: run prcipitation probabilistic evaluation
-            tasks = ["prcp_probabilistic", "prcp_scale", "prcp_distributional"]
+            tasks = ["prcp_probabilistic", "prcp_scale", "prcp_distributional", "prcp_extremes"]
         for task in tasks:
+            # Normalize and log each task
+            task_norm = str(task).strip().lower()
+            logger.info(f"[EvaluationRunner] Dispatching task: '{task}' (normalized: '{task_norm}')")
             # 1) Precipitation probabilistic evaluation
-            if task in ("prcp_probabilistic", "prcp_prob", "prob", "probabilistic"):
+            if task_norm in ("prcp_probabilistic", "prcp_prob", "prob", "probabilistic"):
                 out_dir = self.out_root / "prcp" / "probabilistic"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
@@ -141,7 +160,7 @@ class EvaluationRunner:
                 continue
             
             # 2) Precipitation scale evaluation
-            if task in ("prcp_scale", "scale", "prcp_psd", "scale_dependent"):
+            if task_norm in ("prcp_scale", "scale", "prcp_psd", "scale_dependent"):
                 out_dir = self.out_root / "prcp" / "scale"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
@@ -176,7 +195,7 @@ class EvaluationRunner:
                 continue
 
             # 3) Precipitation distributional evaluation
-            if task in ("prcp_distributional", "prcp_dist", "distributional", "dist"):
+            if task_norm in ("prcp_distributional", "prcp_dist", "distributional", "dist"):
                 out_dir = self.out_root / "prcp" / "distributional"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
@@ -189,6 +208,32 @@ class EvaluationRunner:
                 )
                 continue
 
+            # 4) Precipitation extremes evaluation
+            if task_norm in ("prcp_extremes", "prcp_ext", "extremes", "ext"):
+                out_dir = self.out_root / "prcp" / "extremes"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
+
+                run_extremes(
+                    resolver=self.data,
+                    eval_cfg=self.eval_cfg,
+                    out_root=out_dir,
+                    plot_only=self.plot_only,
+                )
+                continue
+            # 5) Precipitation spatial structure evaluation
+            if task_norm in ("prcp_spatial", "spatial", "spatial_maps"):
+                out_dir = self.out_root / "prcp" / "spatial"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
+
+                run_spatial(
+                    resolver=self.data,
+                    eval_cfg=self.eval_cfg,
+                    out_root=out_dir,
+                )
+                continue            
+            logger.warning(f"[EvaluationRunner] Unknown task '{task}' (normalize '{task_norm}); skipping.")                
         # To be implemented: calls to...
         # if "scale" in tasks: evaluate_scale.run(...)
         # ... etc.

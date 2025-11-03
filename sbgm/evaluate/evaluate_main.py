@@ -33,6 +33,7 @@ def evaluation_main(cfg):
     do_scale = bool(fe.get("do_scale", True))      # we can wire this later
     do_ext = bool(fe.get("do_ext", False))          # later
     do_dist = bool(fe.get("do_dist", True))    # new
+    do_spat = bool(fe.get("do_spat", True))  # new
 
     gen_dir = fe.get("gen_dir", None)
     eval_dir = fe.get("eval_dir", None)
@@ -99,6 +100,26 @@ def evaluation_main(cfg):
         dist_vmax_percentile=float(fe.get("pixel_dist_vmax_percentile", 99.5)),
         dist_include_lr=bool(fe.get("pixel_dist_include_lr", True)),
         dist_save_cap=int(fe.get("pixel_dist_save_cap", 200_000)),
+
+        # Extremes evaluation config fields
+        ext_agg_kind=str(fe.get("ext_agg_kind", "mean")),
+        ext_rxk_days=tuple(fe.get("ext_rxk_days", (1, 5))),
+        ext_gev_rps_years=tuple(fe.get("ext_gev_rps_years", (2, 5, 10, 20, 50))),
+        ext_blocks_per_year=float(fe.get("ext_blocks_per_year", 1.0)),
+        ext_pot_thr_kind=str(fe.get("ext_pot_thr_kind", "hr_quantile")),
+        ext_pot_thr_val=float(fe.get("ext_pot_thr_val", 0.95)),
+        ext_pot_rps_years=tuple(fe.get("ext_pot_rps_years", (2, 5, 10, 20, 50))),
+        ext_days_per_year=float(fe.get("ext_days_per_year", 365.25)),
+        ext_wet_threshold_mm=float(fe.get("ext_wet_threshold_mm", 1.0)),
+        include_lr=bool(fe.get("ext_include_lr", False)),
+        ext_tails_basis=str(fe.get("ext_tails_basis", "pooled_pixels")),
+
+        # Spatial evaluation config
+        spatial_corr_kinds=tuple(fe.get("spatial_corr_kinds", ("pearson", "spearman"))),
+        spatial_deseasonalize=bool(fe.get("spatial_deseasonalize", True)),
+        spatial_vmin=float(fe.get("spatial_vmin", None)) if fe.get("spatial_vmin", None) is not None else None,
+        spatial_vmax=float(fe.get("spatial_vmax", None)) if fe.get("spatial_vmax", None) is not None else None,
+        spatial_show_diff=bool(fe.get("spatial_show_diff", True))
     )
 
     # map YAML flags -> new modular task names
@@ -111,6 +132,8 @@ def evaluation_main(cfg):
         tasks.append("prcp_extremes")
     if do_dist:
         tasks.append("prcp_distributional")
+    if do_spat:
+        tasks.append("prcp_spatial")
 
     runner = EvaluationRunner(
         cfg_yaml=cfg,
