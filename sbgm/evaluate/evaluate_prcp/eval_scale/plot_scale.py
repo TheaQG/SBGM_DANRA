@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 import logging
 
 from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _savefig, _nice, _to_date_safe, _season_from_month
+from sbgm.variable_utils import get_units, get_color_for_model, get_cmap_for_variable
 
 logger = logging.getLogger(__name__)
 
+SET_DPI = 300
 
 # ================================================================================
 # 1. PSD curves
@@ -38,6 +40,11 @@ def plot_scale_psd(scale_root: Path) -> None:
     if not npz_path.exists():
         logger.warning(f"[plot_scale_psd] Did not find {npz_path} – skipping PSD plot.")
         return
+
+    # Set colors
+    col_hr = get_color_for_model("HR")
+    col_gen = get_color_for_model("gen")
+    col_lr = get_color_for_model("LR")
 
     data = np.load(npz_path)
     k = data["k"]               # [K]
@@ -176,30 +183,30 @@ def plot_scale_psd(scale_root: Path) -> None:
     fig, ax = plt.subplots(figsize=(6.5, 4.5))
 
     # HR
-    ax.plot(lam, hr_mean, color="black", lw=1.6, label="HR (DANRA)")
+    ax.plot(lam, hr_mean, color=col_hr, lw=1.6, label="HR (DANRA)")
     if psd_hr_ci_lo is not None and psd_hr_ci_hi is not None:
         ci_lo = np.asarray(psd_hr_ci_lo)[mask_pos][order]
         ci_hi = np.asarray(psd_hr_ci_hi)[mask_pos][order]
         ax.fill_between(lam, np.maximum(ci_lo, eps), np.maximum(ci_hi, eps), # type: ignore
-                        color="black", alpha=0.15)
+                        color=col_hr, alpha=0.15)
     else:
         ax.fill_between(lam,
                         np.maximum(hr_mean - hr_std, eps),
                         hr_mean + hr_std,
-                        color="black", alpha=0.15)
+                        color=col_hr, alpha=0.15)
 
     # GEN / PMM
-    ax.plot(lam, gen_mean, color="royalblue", lw=1.4, label="PMM (gen)")
+    ax.plot(lam, gen_mean, color=col_gen, lw=1.4, label="PMM (gen)")
     if psd_gen_ci_lo is not None and psd_gen_ci_hi is not None:
         ci_lo = np.asarray(psd_gen_ci_lo)[mask_pos][order]
         ci_hi = np.asarray(psd_gen_ci_hi)[mask_pos][order]
         ax.fill_between(lam, np.maximum(ci_lo, eps), np.maximum(ci_hi, eps), # type: ignore
-                        color="royalblue", alpha=0.12)
+                        color=col_gen, alpha=0.12)
     else:
         ax.fill_between(lam,
                         np.maximum(gen_mean - gen_std, eps),
                         gen_mean + gen_std,
-                        color="royalblue", alpha=0.12)
+                        color=col_gen, alpha=0.12)
 
     # LR
     if lr_nyquist > 0.0 and lam_nyq is not None:
@@ -210,11 +217,11 @@ def plot_scale_psd(scale_root: Path) -> None:
         # "Ghost" part: Use LR-on-HR-grid if we have it, otherwise fall back to native LR (plot all of it, just faint)
         if lr_hr_mean is not None:
             ax.plot(lam, lr_hr_mean,
-                    color="deeppink", lw=0.9, linestyle="--", alpha=0.35,
+                    color=col_lr, lw=0.9, linestyle="--", alpha=0.35,
                     label="LR (ERA5, > Nyq, HR grid)")
         else:
             ax.plot(lam, lr_mean,
-                    color="deeppink", lw=0.9, linestyle="--", alpha=0.35,
+                    color=col_lr, lw=0.9, linestyle="--", alpha=0.35,
                     label="LR (ERA5, > Nyq)")
         ax.axvline(x=lam_nyq, color="black", lw=0.6, linestyle="--", label="LR Nyq")
 
@@ -222,44 +229,43 @@ def plot_scale_psd(scale_root: Path) -> None:
         if np.any(trusted):
             if lr_hr_mean is not None:
                 ax.plot(lam[trusted], lr_hr_mean[trusted],
-                        color="deeppink", lw=1.2, label="LR (ERA5 <= Nyq, HR grid)")
+                        color=col_lr, lw=1.2, label="LR (ERA5 <= Nyq, HR grid)")
             else:
                 ax.plot(lam[trusted], lr_mean[trusted],
-                        color="deeppink", lw=1.2, label="LR (ERA5 <= Nyq)")
+                        color=col_lr, lw=1.2, label="LR (ERA5 <= Nyq)")
 
     else:
         # no Nyquist info → single line
-        ax.plot(lam, lr_mean, color="deeppink", lw=1.2, label="LR (ERA5)")
+        ax.plot(lam, lr_mean, color=col_lr, lw=1.2, label="LR (ERA5)")
 
-    # --- Add HR–LR crossing line and annotation ---
-    if cross_info is not None:
-        lam_cross, k_cross = cross_info
-        ax.axvline(x=lam_cross, color="magenta", lw=0.7, ls=":", label="HR-LR intersextion")
-        y_max = ax.get_ylim()[1]
-        ax.text(
-            lam_cross,
-            y_max * 0.45,
-            f"k={k_cross:.3e}\nλ={lam_cross:.0f} km",
-            color="magenta",
-            ha="right",
-            va="center",
-            fontsize=7,
-            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.55),
-            rotation=90,
-        )
+    # # --- Add HR–LR crossing line and annotation ---
+    # if cross_info is not None:
+    #     lam_cross, k_cross = cross_info
+    #     ax.axvline(x=lam_cross, color="magenta", lw=0.7, ls=":", label="HR-LR intersextion")
+    #     y_max = ax.get_ylim()[1]
+    #     ax.text(
+    #         lam_cross,
+    #         y_max * 0.45,
+    #         f"k={k_cross:.3e}\nλ={lam_cross:.0f} km",
+    #         color="magenta",
+    #         ha="right",
+    #         va="center",
+    #         fontsize=7,
+    #         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.55),
+    #         rotation=90,
+    #     )
 
     # --- mark low-k and high-k limits ---
     ax.axvline(1.0 / low_k_max, color="gray", linestyle="--", linewidth=0.8, alpha=0.7)
     # move slightly to the left to avoid overlap with high-k line
     x1 = 1.0 / low_k_max * 1.08
-    # Place y1 at 20% of the current y-axis limit (remember it's log-scaled!)
-    y1 = np.log10(ax.get_ylim()[1] * 0.0001)
+    y1 = 0.5
     ax.text(x1, y1, f"low-k λ={1.0/low_k_max:.0f} km",
         rotation=90, color="gray", fontsize=6.5, ha="center", va="bottom",)
 
     ax.axvline(1.0 / high_k_min, color="gray", linestyle="--", linewidth=0.8, alpha=0.7,)
     x2 = 1.0 / high_k_min * 1.08
-    y2 = np.log10(ax.get_ylim()[1] * 0.0001)
+    y2 = 0.5
     ax.text(x2, y2, f"high-k λ={1.0/high_k_min:.0f} km",
         rotation=90, color="gray", fontsize=6.5, ha="center", va="bottom",)
 
@@ -299,9 +305,7 @@ def plot_scale_psd(scale_root: Path) -> None:
         bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.7),
     )
 
-    fig.tight_layout()
-    fig.savefig(str(figs / "scale_psd.png"), dpi=200)
-    plt.close(fig)
+    _savefig(fig, figs / "scale_psd.png", dpi=SET_DPI)
 
 
 
@@ -480,10 +484,7 @@ def plot_psd_lowhigh_diag(scale_root: Path) -> None:
     )
     ax.grid(True, axis="x", ls=":", alpha=0.5)
 
-    fig.tight_layout()
-    fig.savefig(str(figs / "scale_psd_lowhigh.png"), dpi=200)
-    plt.close(fig)
-
+    _savefig(fig, figs / "scale_psd_lowhigh.png", dpi=SET_DPI)
 
 
 
@@ -626,7 +627,7 @@ def plot_fss_curves(scale_root: Path) -> None:
 
         x_gen = [p[0] for p in gen_pairs]
         y_gen = [p[1] for p in gen_pairs]
-        ax.plot(x_gen, y_gen, marker="o", linewidth=1.4, color=colors[i % len(colors)],
+        ax.plot(x_gen, y_gen, linestyle="-", marker=".", linewidth=1.4, color=colors[i % len(colors)],
                 label=f"gen (≥ {float(thr):.0f} mm)")
 
         if lr_pairs:
@@ -658,7 +659,7 @@ def plot_fss_curves(scale_root: Path) -> None:
         x_gen = [p[0] for p in gen_pairs]
         y_gen = [p[1] for p in gen_pairs]
         colr = colors[i % len(colors)]
-        line, = ax_all.plot(x_gen, y_gen, marker="o", linewidth=1.2, color=colr)
+        line, = ax_all.plot(x_gen, y_gen, marker=".", linewidth=1.2, color=colr)
         # annotate with tiny text near last point
         ax_all.text(x_gen[-1] * 1.01, y_gen[-1], f"≥ {float(thr):.0f} mm",
                     color=colr, fontsize=7, va="center")
@@ -683,9 +684,7 @@ def plot_fss_curves(scale_root: Path) -> None:
         c = j % ncols
         axs[r, c].axis("off")
 
-    fig.tight_layout()
-    fig.savefig(str(figs / "scale_fss_multi.png"), dpi=200)
-    plt.close(fig)
+    _savefig(fig, figs / "scale_fss.png", dpi=SET_DPI)
 
 
 
@@ -793,7 +792,7 @@ def plot_iss_curves(scale_root: Path) -> None:
         x = [p[0] for p in gen_pts]
         y = [p[1] for p in gen_pts]
         colr = colors[i % len(colors)]
-        ax.plot(x, y, marker="o", linewidth=1.4, color=colr, label=f"gen (≥ {float(thr):.0f} mm)")
+        ax.plot(x, y, marker=".", linewidth=1.4, color=colr, label=f"gen (≥ {float(thr):.0f} mm)")
 
         lr_pts = sorted(by_thr[thr]["lr"], key=lambda p: p[0]) if by_thr[thr]["lr"] else []
         if lr_pts:
@@ -824,7 +823,7 @@ def plot_iss_curves(scale_root: Path) -> None:
         x = [p[0] for p in gen_pts]
         y = [p[1] for p in gen_pts]
         colr = colors[i % len(colors)]
-        ax_all.plot(x, y, marker="o", linewidth=1.2, color=colr)
+        ax_all.plot(x, y, marker=".", linewidth=1.2, color=colr)
         ax_all.text(x[-1] * 1.01, y[-1], f"≥ {float(thr):.0f} mm", color=colr, fontsize=4, va="center")
 
         lr_pts = sorted(by_thr[thr]["lr"], key=lambda p: p[0]) if by_thr[thr]["lr"] else []
@@ -845,7 +844,7 @@ def plot_iss_curves(scale_root: Path) -> None:
         axs[r, c].axis("off")
 
     fig.tight_layout()
-    _savefig(fig, figs / "scale_iss_curves.png")
+    _savefig(fig, figs / "scale_iss_curves.png", dpi=SET_DPI)
 
 
 

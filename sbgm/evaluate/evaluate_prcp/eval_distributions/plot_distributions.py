@@ -7,14 +7,22 @@ import matplotlib.pyplot as plt
 import logging
 
 from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _nice, _savefig
+from sbgm.variable_utils import get_color_for_model
 
 logger = logging.getLogger(__name__)
+
+SET_DPI = 300
 
 
 def plot_distributional(dist_root: str | Path) -> None:
     dist_root = Path(dist_root)
     tables = dist_root / "tables"
     figs = _ensure_dir(dist_root / "figures")
+
+    # Set colors
+    col_hr = get_color_for_model("hr")
+    col_gen = get_color_for_model("gen")
+    col_lr  = get_color_for_model("lr")
 
     bins_path = tables / "dist_bins.csv"
     if not bins_path.exists():
@@ -133,11 +141,11 @@ def plot_distributional(dist_root: str | Path) -> None:
     # # Then plot the pooled lines on top
 
     if hr_n is not None:
-        ax.plot(bin_centers, hr_n, color="black", lw=1.5, label="HR")
+        ax.plot(bin_centers, hr_n, color=col_hr, lw=1.5, label="HR")
     if gen_n is not None:
-        ax.plot(bin_centers, gen_n, color="royalblue", lw=1.2, label="GEN/PMM")
+        ax.plot(bin_centers, gen_n, color=col_gen, lw=1.2, label="GEN/PMM")
     if lr_n is not None:
-        ax.plot(bin_centers, lr_n, color="deeppink", lw=1.0, ls="--", label="LR")
+        ax.plot(bin_centers, lr_n, color=col_lr, lw=1.0, ls="--", label="LR")
 
     ax.set_xlabel("Precipitation (mm/day)")
     ax.set_yscale("log")
@@ -163,4 +171,4 @@ def plot_distributional(dist_root: str | Path) -> None:
             bbox=boxprops,
         )
     fig.tight_layout()
-    _savefig(fig, figs / "dist_pooled.png")
+    _savefig(fig, figs / "dist_pooled.png", dpi=SET_DPI)

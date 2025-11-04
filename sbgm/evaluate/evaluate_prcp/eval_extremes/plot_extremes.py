@@ -7,10 +7,17 @@ import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 
 from sbgm.evaluate.evaluate_prcp.plot_utils import (_nice, _savefig, _ensure_dir)
+from sbgm.variable_utils import get_color_for_model
 
 SERIES_ORDER  = ["HR", "GEN", "LR"]
 SERIES_LABELS = {"HR": "HR (DANRA)", "GEN": "Generated", "LR": "LR upsampled"}
-SERIES_COLORS = {"HR": "k", "GEN": "C0", "LR": "deeppink"}
+
+col_hr = get_color_for_model("HR")
+col_gen = get_color_for_model("gen")
+col_lr = get_color_for_model("LR")
+SERIES_COLORS = {"HR": col_hr, "GEN": col_gen, "LR": col_lr}
+
+SET_DPI = 300
 
 # Normalize any slightly different labels coming from CSVs
 def _norm_series_name(s: str) -> str:
@@ -103,7 +110,7 @@ def plot_return_levels(gev_csv: Path, out_png: Path):
         ax.legend(fontsize=8, loc="best")
 
     fig.tight_layout()
-    _savefig(fig, out_png)
+    _savefig(fig, out_png, dpi=SET_DPI)
     plt.close(fig)
 
 
@@ -152,7 +159,7 @@ def plot_pot(para_csv: Path, out_png: Path):
     # put a small caption below the axes area
     fig.text(0.99, 0.01, pot_desc, ha="right", va="bottom", fontsize=9, color="0.3")    
     fig.tight_layout()
-    _savefig(fig, out_png)
+    _savefig(fig, out_png, dpi=SET_DPI)
     plt.close(fig)
 
 
@@ -233,7 +240,7 @@ def plot_tails(tails_csv: Path, out_png: Path):
     fig.text(0.99, 0.01, cap, ha="right", va="bottom", fontsize=9, color="0.3")
 
     fig.tight_layout()
-    _savefig(fig, out_png)
+    _savefig(fig, out_png, dpi=SET_DPI)
     plt.close(fig)
 
 def plot_extremes(out_root: str | Path):

@@ -5,14 +5,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-from sbgm.evaluate.evaluate_prcp.plot_utils import _nice
+from sbgm.evaluate.evaluate_prcp.plot_utils import _nice, _ensure_dir, _savefig
+from sbgm.variable_utils import get_color_for_model
 
-def _ensure_dir(p: Path) -> Path:
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+col_hr = get_color_for_model("HR")
+col_gen = get_color_for_model("GEN")
+col_pmm = get_color_for_model("PMM")
+col_lr = get_color_for_model("LR")
+_COL = {"HR": col_hr, "PMM": col_pmm, "GEN": col_gen, "LR": col_lr}
 
-_COL = {"HR": "k", "PMM": "tab:blue", "GEN": "tab:blue", "LR": "deeppink"}
-
+SET_DPI = 300
 
 def plot_timeseries(figdir: Path, group: str, dates: np.ndarray, series_dict: Dict[str, np.ndarray]) -> None:
     _nice()
@@ -48,8 +50,9 @@ def plot_timeseries(figdir: Path, group: str, dates: np.ndarray, series_dict: Di
     leg = ax.legend(ncol=3, frameon=True)
     leg.get_frame().set_edgecolor("black")
     leg.get_frame().set_linewidth(0.8)
-    fig.tight_layout()
-    fig.savefig(str(figdir / f"temporal_{group}_timeseries.png"), dpi=200)
+
+
+
     plt.close(fig)
 
 def plot_autocorr(figdir: Path, group: str, ac_dict: Dict[str, np.ndarray]) -> None:
@@ -65,8 +68,7 @@ def plot_autocorr(figdir: Path, group: str, ac_dict: Dict[str, np.ndarray]) -> N
     leg = ax.legend(ncol=3, frameon=True)
     leg.get_frame().set_edgecolor("black")
     leg.get_frame().set_linewidth(0.8)
-    fig.tight_layout()
-    fig.savefig(str(figdir / f"temporal_{group}_autocorr.png"), dpi=200)
+    _savefig(fig, figdir / f"temporal_{group}_autocorr.png", dpi=SET_DPI)
     plt.close(fig)
 
 def plot_spell_pmf(figdir: Path, group: str, metrics: Dict[str, dict], pair_metrics: Optional[Dict[str, Dict[str, float]]] = None) -> None:
@@ -132,8 +134,8 @@ def plot_spell_pmf(figdir: Path, group: str, metrics: Dict[str, dict], pair_metr
         if txt:
             ax.text(0.98, 0.5, "\n".join(txt), transform=ax.transAxes, ha="right", va="top",
                     bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.3"), fontsize=9)
-    fig.tight_layout()
-    fig.savefig(str(figdir / f"temporal_{group}_spells.png"), dpi=200)
+    
+    _savefig(fig, figdir / f"temporal_{group}_spell_pmf.png", dpi=SET_DPI)
     plt.close(fig)
 
 def plot_temporal(figdir: Path, group: str, dates: np.ndarray, series_dict: Dict[str, np.ndarray], metrics: Dict[str, dict], pair_metrics: Optional[Dict[str, Dict[str, float]]] = None) -> None:

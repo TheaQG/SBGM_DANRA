@@ -263,10 +263,12 @@ def get_color_for_model(model_str: str):
 
     if model_str_norm in ["hr", "danra"]:
         return "#4C4949"
-    elif model_str_norm in ["pmm", "gen", "model", "generated"]:
+    elif model_str_norm in ["pmm"]:
         return "#1b9e77"
     elif model_str_norm in ["lr", "era5"]:
         return "#d95f02"
+    elif model_str_norm in ["ens", "ensemble", "gen", "generated", "model"]:
+        return "#1b9e77"
     else:
         # Default color
         return "#7570b3"

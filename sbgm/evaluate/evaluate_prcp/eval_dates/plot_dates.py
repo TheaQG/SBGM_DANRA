@@ -5,8 +5,10 @@ from typing import Sequence, Optional, Tuple, Callable, List
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _nice
+from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _nice, _savefig
+from sbgm.variable_utils import get_cmap_for_variable
 
+SET_DPI = 300
 
 def _squeeze2d(a: object | None) -> np.ndarray | None:
     if a is None:
@@ -119,6 +121,13 @@ def plot_dates_montages(
     out_root = Path(out_root)
     figs_dir = _ensure_dir(out_root / "figures")
 
+    # Set cmap based on variable_utils, if "auto" - else, use given string
+    if cmap == "auto":
+        variable = resolver.get_variable_name()
+        cmap = get_cmap_for_variable(variable)
+    else:
+        cmap = str(cmap)
+
     for d in dates:
         panels = _collect_panels_for_date(
             resolver, d,
@@ -160,5 +169,5 @@ def plot_dates_montages(
         cb.set_label("mm/day")
 
         fig.suptitle(d)
-        fig.savefig(str(figs_dir / f"{fname_prefix}{d}.png"), dpi=200, bbox_inches="tight")
+        _savefig(fig, figs_dir / f"{fname_prefix}{d}.png", dpi=SET_DPI)
         plt.close(fig)

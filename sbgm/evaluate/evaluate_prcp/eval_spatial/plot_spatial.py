@@ -5,23 +5,11 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable, get_units
-
+from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable, get_units, bias_cmap, precip_cmap
+from sbgm.evaluate.evaluate_prcp.plot_utils import _nice, _savefig, _ensure_dir
 logger = logging.getLogger(__name__)
 
-
-def _ensure_dir(p: Path) -> Path:
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _nice():
-    plt.rcParams.update({
-        "figure.figsize": (7.5, 5.0),
-        "axes.grid": False,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "font.size": 10,
-    })
+SET_DPI = 300
 
 # Try to borrow your preferred colormap limits if available
 def _get_var_style(var: str):
@@ -30,12 +18,12 @@ def _get_var_style(var: str):
     Returns (cmap, vmin, vmax, cbar_label)
     """
     if var in {"mean", "p95", "p99"}:
-        cmap = "cividis"
+        cmap = get_cmap_for_variable("prcp")
         vmin, vmax = 0.0, None
         clabel = "mm/day"
         return (cmap, vmin, vmax, clabel)
     if var in {"sum", "rx1", "rx5"}:
-        cmap = "magma"
+        cmap = get_cmap_for_variable("prcp")
         vmin, vmax = 0.0, None
         clabel = "mm"
         return (cmap, vmin, vmax, clabel)
@@ -100,7 +88,7 @@ def plot_spatial_maps(eval_root: str | Path) -> None:
         npz_gen = _load_npz(tables, f"spatial_pmm_{group}")  if "pmm" in src_map else None
         npz_lr  = _load_npz(tables, f"spatial_lr_{group}")   if "lr"  in src_map else None
 
-        # --- Figure 1: side-by-side maps for core variables (rows = vars, cols = HR/GEN/(LR)) ---
+        # --- Figure: side-by-side maps for core variables (rows = value, ratios) ---
         for var in variables:
             arrs: List[np.ndarray] = []
             titles: List[str] = []
@@ -132,46 +120,46 @@ def plot_spatial_maps(eval_root: str | Path) -> None:
                         vmin, vmax = float(np.nanmin(stack_vals)), float(np.nanmax(stack_vals))
 
             _nice()
-            ncol = len(arrs)
-            fig, axs = plt.subplots(1, ncol, figsize=(4.0*ncol, 3.6), squeeze=False)
+
+            # Compute ratios for this variable
+            def _safe_ratio(num: Optional[np.ndarray], den: Optional[np.ndarray]) -> Optional[np.ndarray]:
+                if num is None or den is None:
+                    return None
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    r = num / den
+                r[~np.isfinite(r)] = np.nan
+                return r
+
+            hr_arr  = npz_hr[var]  if (npz_hr  is not None and var in npz_hr)  else None
+            gen_arr = npz_gen[var] if (npz_gen is not None and var in npz_gen) else None
+            lr_arr  = npz_lr[var]  if (npz_lr  is not None and var in npz_lr)  else None
+            rat_gen = _safe_ratio(gen_arr, hr_arr)
+            rat_lr  = _safe_ratio(lr_arr,  hr_arr)
+            
+            # Layout: row 0 = value maps, row 1 = ratio maps
+            ncol_vals = len(arrs)
+            ratio_panels = [(rat_gen, f"Generated/HR • {var}"), (rat_lr, f"LR/HR • {var}")]
+            ncol_rat = sum(1 for a, _ in ratio_panels if a is not None)
+            ncols = max(ncol_vals, max(2, ncol_rat))
+
+            fig, axs = plt.subplots(2, ncols, figsize=(4.0*ncols, 7.2), squeeze=False)            
+            # Row 0: values with precip colormap
             for j, a in enumerate(arrs):
                 _draw_single(axs[0, j], a, titles[j], cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=clabel)
-            fig.suptitle(f"{group}: {var}")
-            fig.tight_layout(rect=(0, 0, 1, 0.96))
-            fig.savefig(str(figs / f"spatial_{group}_{var}.png"), dpi=200)
-            plt.close(fig)
+            for j in range(ncol_vals, ncols):
+                axs[0, j].axis("off")
 
-        # --- Figure 2: GEN/HR ratio heatmaps for mean, sum, rx1 (optional LR/H R too) ---
-        def _safe_ratio(num: Optional[np.ndarray], den: Optional[np.ndarray]) -> Optional[np.ndarray]:
-            if num is None or den is None:
-                return None
-            with np.errstate(divide="ignore", invalid="ignore"):
-                r = num / den
-            r[~np.isfinite(r)] = np.nan
-            return r
-
-        core = ["mean", "sum", "rx1"]
-        for var in core:
-            hr   = npz_hr[var]  if (npz_hr  is not None and var in npz_hr)  else None
-            gen  = npz_gen[var] if (npz_gen is not None and var in npz_gen) else None
-            lr   = npz_lr[var]  if (npz_lr  is not None and var in npz_lr)  else None
-
-            rat_gen = _safe_ratio(gen, hr)
-            rat_lr  = _safe_ratio(lr, hr)
-
-            if rat_gen is None and rat_lr is None:
-                continue
-
-            _nice()
-            cols = (1 if rat_gen is not None else 0) + (1 if rat_lr is not None else 0)
-            fig, axs = plt.subplots(1, cols, figsize=(4.0*cols, 3.6), squeeze=False)
+            # Row 1: ratios with bias colormap (fixed symmetric-ish limits)            
             j = 0
-            if rat_gen is not None:
-                _draw_single(axs[0, j], rat_gen, f"Generated/HR • {var}", cmap="PuOr", vmin=0.5, vmax=1.5, cbar_label="ratio")
+            for arr_ratio, title_ratio in ratio_panels:
+                if arr_ratio is None:
+                    continue
+                _draw_single(axs[1, j], arr_ratio, title_ratio, cmap="bias_brown_white_tealgray", vmin=0.5, vmax=1.5, cbar_label="ratio")
                 j += 1
-            if rat_lr is not None:
-                _draw_single(axs[0, j], rat_lr, f"LR/HR • {var}", cmap="PuOr", vmin=0.5, vmax=1.5, cbar_label="ratio")
-            fig.suptitle(f"{group}: ratios ({var})")
-            fig.tight_layout(rect=(0, 0, 1, 0.96))
-            fig.savefig(str(figs / f"spatial_{group}_{var}_ratios.png"), dpi=200)
-            plt.close(fig)
+            for k in range(j, ncols):
+                axs[1, k].axis("off")
+
+            fig.suptitle(f"{group}: {var}")
+
+            _savefig(fig, figs / f"spatial_{group}_{var}.png", dpi=SET_DPI)
+

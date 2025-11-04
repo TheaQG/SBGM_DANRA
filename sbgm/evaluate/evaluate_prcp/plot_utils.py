@@ -6,12 +6,13 @@ from typing import Optional
 
 import matplotlib.pyplot as plt
 
+
 def _ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def _savefig(fig, out_path: Path, dpi: int = 150):
+def _savefig(fig, out_path: Path, dpi: int = 300):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(out_path, dpi=dpi)
