@@ -1,12 +1,21 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, List, Iterable
+from typing import Optional, List, Iterable, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 import logging
 
 logger = logging.getLogger(__name__)
+@dataclass
+class EvalSample:
+    date: str
+    hr: Optional[torch.Tensor]        # [H,W]
+    pmm: Optional[torch.Tensor]       # [H,W]
+    ens: Optional[torch.Tensor]       # [M,H,W]
+    lr: Optional[torch.Tensor]        # [1,h,w]
+    mask: Optional[torch.Tensor]      # [H,W] bool
 
 class EvalDataResolver:
     """
@@ -102,7 +111,19 @@ class EvalDataResolver:
         # logger.info(f"[DEBUG EvalDataResolver] Loading {p}, available keys: {list(d.keys())}")
         # logger.info(f"[DEBUG EvalDataResolver] Extracting key: {key}")
         return d.get(key, None)
-    
+
+    def _subsample_members(self, ens: torch.Tensor, n: Optional[int], seed: int = 1234) -> torch.Tensor:
+        """Optionally subsample ensemble members along dim 0 to size n (without replacement)."""
+        if ens is None or n is None:
+            return ens
+        m = ens.shape[0]
+        if n >= m:
+            return ens
+        g = torch.Generator()
+        g.manual_seed(int(seed))
+        idx = torch.randperm(m, generator=g)[:n]
+        return ens.index_select(0, idx)
+        
     # =====
     # Data loaders (HR, PMM, ensembles, LR, mask)
     # ===== 
@@ -235,4 +256,18 @@ class EvalDataResolver:
             else:
                 logger.warning(f"[EvalDataResolver] ROI mask shape {rm.shape} does not match LSM shape {m.shape}, skipping intersection.")
         return m
-                
+
+    def fetch(self, date: str, want_ensemble: bool = True, n_members: Optional[int] = None, seed: int = 1234) -> EvalSample:
+        """
+        Unified access to all evaluation arrays for a given date.
+        Returns an EvalSample with shapes normalized as in the individual loaders.
+        If want_ensemble is True and an ensemble exists, it will be loaded and optionally subsampled.
+        """
+        hr = self.load_obs(date)
+        pmm = self.load_pmm(date)
+        ens = self.load_ens(date) if want_ensemble else None
+        if ens is not None:
+            ens = self._subsample_members(ens, n_members, seed)
+        lr = self.load_lr(date)
+        mask = self.load_mask(date)
+        return EvalSample(date=date, hr=hr, pmm=pmm, ens=ens, lr=lr, mask=mask)                

@@ -5,8 +5,8 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable, get_units, bias_cmap, precip_cmap
-from sbgm.evaluate.evaluate_prcp.plot_utils import _nice, _savefig, _ensure_dir
+from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable, get_units
+from sbgm.evaluate.evaluate_prcp.plot_utils import _nice, _savefig, _ensure_dir, get_dk_lsm_outline, overlay_outline
 logger = logging.getLogger(__name__)
 
 SET_DPI = 300
@@ -45,13 +45,25 @@ def _load_npz(tables_dir: Path, tag: str):
         return None
     return np.load(p, allow_pickle=True)
 
-def _draw_single(ax, data, title: str, cmap="viridis", vmin=None, vmax=None, cbar_label=""):
+def _draw_single(ax, data, title: str, cmap="viridis", vmin=None, vmax=None, cbar_label="", *, dk_mask=None, add_stats: bool=False):
     im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax, origin="upper")
+    # overlay Denmark outline if available
+    if dk_mask is not None:
+        overlay_outline(ax, dk_mask)
+    # optional stats in title
+    if add_stats and data is not None:
+        flat = np.asarray(data).ravel()
+        flat = flat[np.isfinite(flat)]
+        if flat.size > 0:
+            mu = float(np.nanmean(flat))
+            sd = float(np.nanstd(flat))
+            title = f"{title}  |  {mu:.2f} ± {sd:.2f}"
     ax.set_title(title)
     ax.set_xticks([]); ax.set_yticks([])
     cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
     if cbar_label:
         cb.set_label(cbar_label)
+    return im
 
 def plot_spatial_maps(eval_root: str | Path) -> None:
     """
@@ -81,6 +93,7 @@ def plot_spatial_maps(eval_root: str | Path) -> None:
         return
 
     variables = ["mean","sum","rx1","rx5","p95","p99","wetfreq"]
+    dk_mask = get_dk_lsm_outline()
 
     for group, src_map in sorted(buckets.items()):
         # Load available sources
@@ -92,14 +105,15 @@ def plot_spatial_maps(eval_root: str | Path) -> None:
         for var in variables:
             arrs: List[np.ndarray] = []
             titles: List[str] = []
+            idx_hr = idx_gen = idx_lr = None
             cmap, vmin, vmax, clabel = _get_var_style(var)
 
             if npz_hr is not None and var in npz_hr:
-                arrs.append(npz_hr[var]); titles.append(f"HR • {var}")
+                idx_hr = len(arrs); arrs.append(npz_hr[var]); titles.append(f"HR | {var}")
             if npz_gen is not None and var in npz_gen:
-                arrs.append(npz_gen[var]); titles.append(f"Generated • {var}")
+                idx_gen = len(arrs); arrs.append(npz_gen[var]); titles.append(f"Generated | {var}")
             if npz_lr is not None and var in npz_lr:
-                arrs.append(npz_lr[var]); titles.append(f"LR • {var}")
+                idx_lr = len(arrs); arrs.append(npz_lr[var]); titles.append(f"LR | {var}")
 
             if not arrs:
                 continue
@@ -136,28 +150,39 @@ def plot_spatial_maps(eval_root: str | Path) -> None:
             rat_gen = _safe_ratio(gen_arr, hr_arr)
             rat_lr  = _safe_ratio(lr_arr,  hr_arr)
             
-            # Layout: row 0 = value maps, row 1 = ratio maps
-            ncol_vals = len(arrs)
-            ratio_panels = [(rat_gen, f"Generated/HR • {var}"), (rat_lr, f"LR/HR • {var}")]
-            ncol_rat = sum(1 for a, _ in ratio_panels if a is not None)
-            ncols = max(ncol_vals, max(2, ncol_rat))
+            # Layout: row 0 = value maps, row 1 = ratio maps under corresponding columns
+            ncols = len(arrs)
+            fig, axs = plt.subplots(2, ncols, figsize=(4.0*ncols, 7.2), squeeze=False)
 
-            fig, axs = plt.subplots(2, ncols, figsize=(4.0*ncols, 7.2), squeeze=False)            
-            # Row 0: values with precip colormap
+            # Row 0: values with precip colormap and stats in titles
             for j, a in enumerate(arrs):
-                _draw_single(axs[0, j], a, titles[j], cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=clabel)
-            for j in range(ncol_vals, ncols):
-                axs[0, j].axis("off")
+                _draw_single(
+                    axs[0, j], a, titles[j], cmap=cmap, vmin=vmin, vmax=vmax,
+                    cbar_label=clabel, dk_mask=dk_mask, add_stats=True
+                )
 
-            # Row 1: ratios with bias colormap (fixed symmetric-ish limits)            
-            j = 0
-            for arr_ratio, title_ratio in ratio_panels:
-                if arr_ratio is None:
-                    continue
-                _draw_single(axs[1, j], arr_ratio, title_ratio, cmap="bias_brown_white_tealgray", vmin=0.5, vmax=1.5, cbar_label="ratio")
-                j += 1
-            for k in range(j, ncols):
-                axs[1, k].axis("off")
+            # Row 1: initialize as empty; fill only where ratios exist
+            for j in range(ncols):
+                axs[1, j].axis("off")
+
+            # place Generated/HR ratio under the Generated column
+            if idx_gen is not None and rat_gen is not None:
+                _draw_single(
+                    axs[1, idx_gen], rat_gen, f"Generated/HR • {var}",
+                    cmap=get_cmap_for_variable("prcp_bias"), vmin=0.5, vmax=1.5,
+                    cbar_label="ratio", dk_mask=dk_mask
+                )
+                axs[1, idx_gen].axis("on")
+
+            # place LR/HR ratio under the LR column
+            if idx_lr is not None and rat_lr is not None:
+                _draw_single(
+                    axs[1, idx_lr], rat_lr, f"LR/HR • {var}",
+                    cmap=get_cmap_for_variable("prcp_bias"), vmin=0.5, vmax=1.5,
+                    cbar_label="ratio", dk_mask=dk_mask
+                )
+                axs[1, idx_lr].axis("on")
+
 
             fig.suptitle(f"{group}: {var}")
 

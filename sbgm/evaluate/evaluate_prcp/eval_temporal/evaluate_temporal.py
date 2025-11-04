@@ -114,6 +114,11 @@ def run_temporal(
             pair_metrics["wet"]["KS_GEN_HR"]  = _ks_distance(metrics["GEN"]["wet_pmf"], metrics["HR"]["wet_pmf"])
             pair_metrics["dry"]["JSD_GEN_HR"] = _js_distance(metrics["GEN"]["dry_pmf"], metrics["HR"]["dry_pmf"])
             pair_metrics["dry"]["KS_GEN_HR"]  = _ks_distance(metrics["GEN"]["dry_pmf"], metrics["HR"]["dry_pmf"])
+        if "HR" in metrics and "PMM" in metrics:
+            pair_metrics["wet"]["JSD_GEN_HR"] = _js_distance(metrics["PMM"]["wet_pmf"], metrics["HR"]["wet_pmf"])
+            pair_metrics["wet"]["KS_GEN_HR"]  = _ks_distance(metrics["PMM"]["wet_pmf"], metrics["HR"]["wet_pmf"])
+            pair_metrics["dry"]["JSD_GEN_HR"] = _js_distance(metrics["PMM"]["dry_pmf"], metrics["HR"]["dry_pmf"])
+            pair_metrics["dry"]["KS_GEN_HR"]  = _ks_distance(metrics["PMM"]["dry_pmf"], metrics["HR"]["dry_pmf"])            
         if "HR" in metrics and "LR" in metrics:
             pair_metrics["wet"]["JSD_LR_HR"] = _js_distance(metrics["LR"]["wet_pmf"], metrics["HR"]["wet_pmf"])
             pair_metrics["wet"]["KS_LR_HR"]  = _ks_distance(metrics["LR"]["wet_pmf"], metrics["HR"]["wet_pmf"])

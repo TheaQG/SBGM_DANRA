@@ -139,7 +139,14 @@ def evaluation_main(cfg):
         dates_n_members = int(fe.get("dates_n_members", 3)),
         dates_cmap = str(fe.get("dates_cmap", "Blues")),
         dates_percentile = float(fe.get("dates_percentile", 99.5)),
-
+        
+        # Ensemble evaluation config fields
+        use_ensemble=bool(fe.get("use_ensemble", True)),
+        ensemble_n_members=fe.get("ensemble_n_members", None),
+        ensemble_member_seed=int(fe.get("ensemble_member_seed", 1234)),
+        ensemble_reduction_fallback=str(fe.get("ensemble_reduction_fallback", "pmm")),
+        ensemble_cache_members=bool(fe.get("ensemble_cache_members", False)),
+        dist_ensemble_pool_mode=str(fe.get("dist_ensemble_pool_mode", "pool")),
                                  
     )
 

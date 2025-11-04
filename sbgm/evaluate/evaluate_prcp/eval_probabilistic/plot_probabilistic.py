@@ -44,7 +44,7 @@ col_gen = get_color_for_model("gen")
 col_lr = get_color_for_model("LR")
 
 # Set colormap for variables
-cmap_precip = get_cmap_for_variable("precipitation")
+cmap_precip = get_cmap_for_variable("prcp")
 
 # ================================================================================
 # 1. PIT

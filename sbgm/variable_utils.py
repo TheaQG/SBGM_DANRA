@@ -31,6 +31,7 @@ bias_colors = [
 ]
 bias_cmap = LinearSegmentedColormap.from_list("bias_brown_white_tealgray", bias_colors, N=256)
 
+mpl.colormaps.register(cmap=bias_cmap) # type: ignore
 mpl.colormaps.register(cmap=precip_cmap) # type: ignore
 
 def get_units(cfg):
@@ -236,6 +237,7 @@ def get_cmap_for_variable(variable: str):
     """
     cmaps = {"temp": "plasma",
              "prcp": "precip_white_tealgray",
+             "prcp_bias": "bias_brown_white_tealgray",
              "cape": "viridis",
              "nwvf": "cividis",
              "ewvf": "magma",

@@ -83,7 +83,14 @@ class EvaluationConfig:
     dates_n_members: int = 3
     dates_cmap: str = "Blues"
     dates_percentile: float = 99.5
-
+    # Ensemble evaluation config
+    use_ensemble: bool = True
+    ensemble_n_members: Optional[int] = None
+    ensemble_member_seed: int = 1234
+    ensemble_reduction_fallback: str = "pmm"  # "pmm" | "ens_mean" | "pmm_then_metric"
+    ensemble_cache_members: bool = False
+    # Distributional ensemble pooling mode
+    dist_ensemble_pool_mode: str = "pool"   # "pool" | "member_mean" | "pmm"
 class EvaluationRunner:
     """
         Clean runner that uses EvalDataResolver to perform evaluations.
@@ -145,6 +152,8 @@ class EvaluationRunner:
             "thresholds_mm": list(self.eval_cfg.thresholds_mm),
             "fss_scales_km": list(self.eval_cfg.fss_scales_km),
             "seasons": list(self.eval_cfg.seasons),
+            "use_ensemble": bool(self.eval_cfg.use_ensemble),
+            "ensemble_n_members": self.eval_cfg.ensemble_n_members,            
         }
         # Before writing manifest.json, check should_compute
         if self.should_compute("manifest.json"):

@@ -376,7 +376,8 @@ def run_scale(
         )
 
     (tables_dir / "scale_fss_daily.csv").write_text("\n".join(fss_lines))
-
+    (tables_dir / "scale_iss_daily.csv").write_text("\n".join(iss_lines))
+    
     # FSS summary
     summ_lines = [",".join(["thr_mm"] + [f"fss_{int(s)}km" for s in fss_scales_km])]
     for thr in fss_thresholds:
