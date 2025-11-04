@@ -30,10 +30,13 @@ def evaluation_main(cfg):
 
     # standard flags
     do_prob = bool(fe.get("do_prob", True))
-    do_scale = bool(fe.get("do_scale", True))      # we can wire this later
-    do_ext = bool(fe.get("do_ext", False))          # later
-    do_dist = bool(fe.get("do_dist", True))    # new
-    do_spat = bool(fe.get("do_spat", True))  # new
+    do_scale = bool(fe.get("do_scale", True))
+    do_ext = bool(fe.get("do_ext", True))
+    do_dist = bool(fe.get("do_dist", True))   
+    do_spat = bool(fe.get("do_spat", True))
+    do_temp = bool(fe.get("do_temp", False))
+    do_feat = bool(fe.get("do_feat", False))
+    do_dates = bool(fe.get("do_dates", False))
 
     gen_dir = fe.get("gen_dir", None)
     eval_dir = fe.get("eval_dir", None)
@@ -120,7 +123,24 @@ def evaluation_main(cfg):
         spatial_deseasonalize=bool(fe.get("spatial_deseasonalize", True)),
         spatial_vmin=float(fe.get("spatial_vmin", None)) if fe.get("spatial_vmin", None) is not None else None,
         spatial_vmax=float(fe.get("spatial_vmax", None)) if fe.get("spatial_vmax", None) is not None else None,
-        spatial_show_diff=bool(fe.get("spatial_show_diff", True))
+        spatial_show_diff=bool(fe.get("spatial_show_diff", True)),
+
+        # Temporal evaluation config fields
+        temporal_include_lr=bool(fe.get("temporal_include_lr", True)),
+        temporal_wet_thr_mm=float(fe.get("temporal_wet_thr_mm", 1.0)),
+        temporal_max_lag=int(fe.get("temporal_max_lag", 30)),
+        temporal_max_spell=int(fe.get("temporal_max_spell", 25)),
+        temporal_group_by=str(fe.get("temporal_group_by", "year")),
+
+        # Dates evaluation config fields
+        dates_list = fe.get("dates_list", []),
+        dates_include_lr = bool(fe.get("dates_include_lr", True)),
+        dates_include_members = bool(fe.get("dates_include_members", True)),
+        dates_n_members = int(fe.get("dates_n_members", 3)),
+        dates_cmap = str(fe.get("dates_cmap", "Blues")),
+        dates_percentile = float(fe.get("dates_percentile", 99.5)),
+
+                                 
     )
 
     # map YAML flags -> new modular task names
@@ -135,6 +155,12 @@ def evaluation_main(cfg):
         tasks.append("prcp_distributional")
     if do_spat:
         tasks.append("prcp_spatial")
+    if do_temp:
+        tasks.append("prcp_temporal")
+    if do_feat:
+        tasks.append("prcp_features")
+    if do_dates:
+        tasks.append("prcp_dates")
 
     runner = EvaluationRunner(
         cfg_yaml=cfg,

@@ -8,6 +8,31 @@ import logging
 # Setup logging
 logger = logging.getLogger(__name__)
 
+import numpy as np
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+
+# --- 1) Sequential colormap: white → teal → slategray ---
+precip_colors = [
+    "#ffffff",  # white
+    "#ccece6",  # very light aqua
+    "#66c2a4",  # medium teal
+    "#2b8c85",  # dark teal
+    "#264653"   # slate gray-blue (muted)
+]
+precip_cmap = LinearSegmentedColormap.from_list("precip_white_tealgray", precip_colors, N=256)
+
+# --- 2) Diverging colormap: brown → white → teal-gray ---
+bias_colors = [
+    "#8c510a",  # muted brown
+    "#ffffff",  # white center (zero bias)
+    "#2b8c85"   # teal-gray for positive bias
+]
+bias_cmap = LinearSegmentedColormap.from_list("bias_brown_white_tealgray", bias_colors, N=256)
+
+mpl.colormaps.register(cmap=precip_cmap) # type: ignore
+
 def get_units(cfg):
     """
         Get the specifications for plotting samples during training.
@@ -182,7 +207,8 @@ def get_cmaps(cfg):
         Colormaps are based on the configuration.
     """
     cmaps = {"temp": "plasma",
-             "prcp": "inferno",
+             # set the custom precip colormap
+             "prcp": "precip_white_tealgray",
              "cape": "viridis",
              "nwvf": "cividis",
              "ewvf": "magma",
@@ -209,7 +235,7 @@ def get_cmap_for_variable(variable: str):
     Get the matplotlib colormap name for a specific variable.
     """
     cmaps = {"temp": "plasma",
-             "prcp": "inferno",
+             "prcp": "precip_white_tealgray",
              "cape": "viridis",
              "nwvf": "cividis",
              "ewvf": "magma",
@@ -225,3 +251,22 @@ def get_cmap_for_variable(variable: str):
         logger.warning(f"[get_cmap_for_variable] Variable '{variable}' not found in cmap dictionary. Using default 'viridis'.")
         return "viridis"
     return cmaps[variable]
+
+def get_color_for_model(model_str: str):
+    """
+    Get a specific color for a model.
+    HR/DANRA
+    PMM/gen/model/generated
+    LR/ERA5
+    """
+    model_str_norm = model_str.lower()
+
+    if model_str_norm in ["hr", "danra"]:
+        return "#4C4949"
+    elif model_str_norm in ["pmm", "gen", "model", "generated"]:
+        return "#1b9e77"
+    elif model_str_norm in ["lr", "era5"]:
+        return "#d95f02"
+    else:
+        # Default color
+        return "#7570b3"

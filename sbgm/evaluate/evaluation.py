@@ -13,6 +13,9 @@ from sbgm.evaluate.evaluate_prcp.eval_scale.evaluate_scale import run_scale
 from sbgm.evaluate.evaluate_prcp.eval_distributions.evaluate_distributions import run_distributional
 from sbgm.evaluate.evaluate_prcp.eval_extremes.evaluate_extremes import run_extremes
 from sbgm.evaluate.evaluate_prcp.eval_spatial.evaluate_spatial import run_spatial
+from sbgm.evaluate.evaluate_prcp.eval_temporal.evaluate_temporal import run_temporal
+from sbgm.evaluate.evaluate_prcp.eval_features.evaluate_features import run_features
+from sbgm.evaluate.evaluate_prcp.eval_dates.evaluate_dates import run_dates
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +69,20 @@ class EvaluationConfig:
     spatial_deseasonalize: bool = True
     spatial_vmin: Optional[float] = None
     spatial_vmax: Optional[float] = None
-    spatial_show_diff: bool = True    
+    spatial_show_diff: bool = True
+    # temporal evaluation config
+    temporal_include_lr: bool = True
+    temporal_wet_thr_mm: float = 1.0
+    temporal_max_lag: int = 30
+    temporal_max_spell: int = 25
+    temporal_group_by: str = "year"
+    # per-date evaluation config
+    dates_list: Optional[List[str]] = None
+    dates_include_lr: bool = True
+    dates_include_members: bool = True
+    dates_n_members: int = 3
+    dates_cmap: str = "Blues"
+    dates_percentile: float = 99.5
 
 class EvaluationRunner:
     """
@@ -234,7 +250,58 @@ class EvaluationRunner:
                     eval_cfg=self.eval_cfg,
                     out_root=out_dir,
                 )
-                continue            
+                continue
+
+
+            # 6) Precipitation temporal evaluation
+            if task_norm in ("prcp_temporal", "temporal", "time", "timeseries"):
+                out_dir = self.out_root / "prcp" / "temporal"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
+
+                run_temporal(
+                    resolver=self.data,
+                    eval_cfg=self.eval_cfg,
+                    out_root=out_dir,
+                    group_by=getattr(self.eval_cfg, "temporal_group_by", "year"),
+                    seasons=getattr(self.eval_cfg, "seasons", ("ALL","DJF","MAM","JJA","SON")),
+                    make_plots=bool(getattr(self.eval_cfg, "make_plots", True)),
+                )
+                continue
+
+            # 7) Precipitation feature/object-based evaluation (SAL)
+            if task_norm in ("prcp_features", "features", "objects", "sal"):
+                out_dir = self.out_root / "prcp" / "features"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
+
+                run_features(
+                    resolver=self.data,
+                    eval_cfg=self.eval_cfg,
+                    out_root=out_dir,
+                )
+                continue
+
+            # 8) Precipitation per-date evaluation (pure plotting)
+            if task_norm in ("prcp_dates", "dates", "per_date", "eval_dates"):
+                out_dir = self.out_root / "prcp" / "dates"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"[EvaluationRunner] Running task '{task}' -> {out_dir}")
+
+                run_dates(
+                    resolver=self.data,
+                    eval_cfg=self.eval_cfg,
+                    out_root=out_dir,
+                    dates=getattr(self.eval_cfg, "dates_list", None),
+                    include_lr=bool(getattr(self.eval_cfg, "dates_include_lr", True)),
+                    include_members=bool(getattr(self.eval_cfg, "dates_include_members", True)),
+                    n_members=int(getattr(self.eval_cfg, "dates_n_members", 3)),
+                    cmap=str(getattr(self.eval_cfg, "dates_cmap", "Blues")),
+                    percentile=float(getattr(self.eval_cfg, "dates_percentile", 99.5)),
+                    land_only=bool(getattr(self.eval_cfg, "eval_land_only", True)),
+                )
+                continue
+
             logger.warning(f"[EvaluationRunner] Unknown task '{task}' (normalize '{task_norm}); skipping.")                
         # To be implemented: calls to...
         # if "scale" in tasks: evaluate_scale.run(...)

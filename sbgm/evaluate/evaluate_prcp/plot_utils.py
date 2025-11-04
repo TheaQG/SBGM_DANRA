@@ -23,6 +23,8 @@ def _nice():
     plt.rcParams.update({
         "figure.figsize": (5.5, 4.0),
         "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.alpha": 0.6,
         "axes.spines.top": False,
         "axes.spines.right": False,
         "font.size": 10,

@@ -29,28 +29,27 @@ def _get_var_style(var: str):
     Hook to your variable_utils. If not available, use sensible defaults.
     Returns (cmap, vmin, vmax, cbar_label)
     """
-    try:
-        cmap = get_cmap_for_variable(var)
-        unit = get_unit_for_variable(var)
-        # set some default vmin/vmax based on variable
-        if var in {"mean", "p95", "p99"}:
-            vmin, vmax = 0.0, 20.0
-        elif var in {"sum", "rx1", "rx5"}:
-            vmin, vmax = 0.0, 200.0
-        elif var in {"wetfreq"}:
-            vmin, vmax = 0.0, 1.0
-        else:
-            vmin, vmax = None, None
-        return (cmap, vmin, vmax, unit)
-    except Exception:
-        # Fallbacks
-        if var in {"mean", "p95", "p99"}:
-            return ("viridis", 0.0, None, "mm/day")
-        if var in {"sum", "rx1", "rx5"}:
-            return ("magma", 0.0, None, "mm")
-        if var in {"wetfreq"}:
-            return ("Blues", 0.0, 1.0, "fraction")
-        return ("viridis", None, None, var)
+    if var in {"mean", "p95", "p99"}:
+        cmap = "cividis"
+        vmin, vmax = 0.0, None
+        clabel = "mm/day"
+        return (cmap, vmin, vmax, clabel)
+    if var in {"sum", "rx1", "rx5"}:
+        cmap = "magma"
+        vmin, vmax = 0.0, None
+        clabel = "mm"
+        return (cmap, vmin, vmax, clabel)
+    if var in {"wetfreq"}:
+        cmap = "Blues"
+        vmin, vmax = 0.0, 1.0
+        clabel = "fraction of days"
+        return (cmap, vmin, vmax, clabel)
+    else:
+        # generic
+        cmap = "viridis"
+        vmin, vmax = None, None
+        clabel = "Unknown units"
+        return (cmap, vmin, vmax, clabel)
 
 def _load_npz(tables_dir: Path, tag: str):
     p = tables_dir / f"{tag}.npz"
