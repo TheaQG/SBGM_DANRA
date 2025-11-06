@@ -1,7 +1,7 @@
 import logging
 import yaml
 
-from sbgm.evaluate_sbgm.quicklook import quicklook_from_runner
+from sbgm.generate.quicklook import quicklook_from_runner
 
 
 logger = logging.getLogger(__name__)
