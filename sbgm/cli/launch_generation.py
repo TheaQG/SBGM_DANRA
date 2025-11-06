@@ -1,4 +1,4 @@
-from sbgm.evaluate_sbgm.generation_main import generation_main
+from sbgm.generate.generation_main import generation_main
 
 
 def run_generation(cfg):
