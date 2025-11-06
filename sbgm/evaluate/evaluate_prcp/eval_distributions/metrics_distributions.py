@@ -207,8 +207,116 @@ def collect_daily_histograms(
     return out
 
 
-def compute_distributional_metrics(pooled: Dict[str, Any]) -> List[Dict[str, Any]]:
+def collect_ensemble_histograms(
+    *,
+    resolver,
+    dates: Sequence[str],
+    bins: np.ndarray,
+    mode: str = "pool",  # "pool" | "member_mean"
+    n_members: Optional[int] = None,
+    seed: int = 1234,
+) -> Dict[str, Any]:
     """
+    Build ensemble-aware histograms on fixed `bins`.
+    Returns a dict with keys depending on `mode`:
+      - common: counts_members [M,B], n_members [M]
+      - if mode=="pool": counts_pool [B]
+      - if mode=="member_mean": pdf_mean [B], pdf_q10 [B], pdf_q50 [B], pdf_q90 [B]
+    Memory-safe: streams per date and accumulates per-member counts.
+    """
+    # Ensure bins as np.ndarray (monotone, length B+1)
+    bins = np.asarray(bins)
+    B = int(len(bins) - 1)
+
+    # First, determine effective number of members by peeking at first available date
+    M_eff = None
+    for d in dates:
+        try:
+            # Prefer unified fetch if available
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            # Fallback to legacy API
+            ens = resolver.load_ens(d)
+        if ens is not None:
+            if torch.is_tensor(ens):
+                M_eff = int(ens.shape[0])
+            else:
+                M_eff = int(np.asarray(ens).shape[0])
+            break
+    if M_eff is None:
+        logger.warning("[distributions] No ensemble members found across dates – skipping ensemble histograms.")
+        return {}
+
+    counts_members = np.zeros((M_eff, B), dtype=np.int64)
+    npix_members = np.zeros((M_eff,), dtype=np.int64)
+
+    for d in dates:
+        # Load ensemble + mask
+        ens = None
+        msk = None
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+            msk = getattr(sample, "mask", None)
+        except Exception:
+            try:
+                ens = resolver.load_ens(d)
+                msk = resolver.load_mask(d)
+            except Exception:
+                ens = None
+        if ens is None:
+            continue
+
+        # Normalize types
+        if torch.is_tensor(msk):
+            msk_np = (msk > 0.5).detach().cpu().numpy() if msk is not None else None
+        elif msk is None:
+            msk_np = None
+        else:
+            msk_np = np.asarray(msk) > 0
+
+        ens_np = ens.detach().cpu().numpy() if torch.is_tensor(ens) else np.asarray(ens)
+
+        m_here = min(M_eff, ens_np.shape[0])
+        for mi in range(m_here):
+            fld = ens_np[mi]
+            if msk_np is not None:
+                try:
+                    fld = fld[msk_np]
+                except Exception:
+                    fld = fld.reshape(-1)[msk_np.reshape(-1)]
+            else:
+                fld = fld.reshape(-1)
+            H, _ = np.histogram(fld, bins=bins)
+            counts_members[mi] += H.astype(np.int64)
+            npix_members[mi] += int(fld.size)
+
+    out: Dict[str, Any] = {
+        "bins": bins,
+        "counts_members": counts_members,
+        "n_members": npix_members,
+        "mode": str(mode),
+    }
+
+    if mode == "pool":
+        out["counts_pool"] = counts_members.sum(axis=0)
+    elif mode == "member_mean":
+        eps = 1.0
+        denom = np.maximum(npix_members.astype(np.float64), eps)[:, None]
+        pdf_members = counts_members.astype(np.float64) / denom  # [M,B]
+        out["pdf_mean"] = pdf_members.mean(axis=0)
+        out["pdf_q10"] = np.percentile(pdf_members, 10, axis=0)
+        out["pdf_q50"] = np.percentile(pdf_members, 50, axis=0)
+        out["pdf_q90"] = np.percentile(pdf_members, 90, axis=0)
+    else:
+        logger.warning(f"[distributions] Unknown ensemble pooling mode '{mode}', valid are 'pool'|'member_mean'.")
+
+    return out
+
+
+def compute_distributional_metrics(pooled: Dict[str, Any], ensembles: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """    
     Return rows: {ref, comp, wasserstein, ks_stat, ks_p, kl_hr_to_x}
     """
     from scipy.stats import ks_2samp
@@ -223,7 +331,8 @@ def compute_distributional_metrics(pooled: Dict[str, Any]) -> List[Dict[str, Any
     def _disc(x: np.ndarray, bins: np.ndarray) -> np.ndarray:
         H, _ = np.histogram(x, bins=bins)
         p = H.astype(np.float64)
-        p = p / max(p.sum(), 1.0)
+        s = max(p.sum(), 1.0)
+        p = p / s
         p = np.clip(p, 1e-12, 1.0)
         return p
 
@@ -242,20 +351,31 @@ def compute_distributional_metrics(pooled: Dict[str, Any]) -> List[Dict[str, Any
             except Exception:
                 return float("nan")
 
+    # Helper to safely compute W1 (Wasserstein-1) approximation for 1D arrays
+    def _w1_approx(x: np.ndarray, y: np.ndarray) -> float:
+        x1 = np.asarray(x).ravel()
+        y1 = np.asarray(y).ravel()
+        n = int(min(x1.size, y1.size))
+        if n == 0:
+            return float('nan')
+        xs = np.sort(x1)[:n]
+        ys = np.sort(y1)[:n]
+        return float(np.abs(xs - ys).mean())
+
     bins = pooled["bins"]
 
-    # --- HR vs GEN ---
+    # --- HR vs GEN (PMM, legacy) ---
     if gen is not None and gen.size:
-        ks_res = ks_2samp(hr, gen)
-        ks_stat = _to_float(ks_res.statistic if hasattr(ks_res, "statistic") else ks_res[0]) # type: ignore
-        ks_p    = _to_float(ks_res.pvalue    if hasattr(ks_res, "pvalue")    else ks_res[1]) # type: ignore
+        ks_res = ks_2samp(hr.ravel(), gen.ravel())
+        ks_stat = _to_float(getattr(ks_res, "statistic", ks_res[0]))
+        ks_p    = _to_float(getattr(ks_res, "pvalue", ks_res[1]))
         # wasserstein
-        w1 = np.abs(np.sort(hr) - np.sort(gen)[: hr.size]).mean() if hr.size and gen.size else np.nan
+        w1 = _w1_approx(hr, gen)
         p_hr = _disc(hr, bins)
         p_gen = _disc(gen, bins)
         rows.append({
             "ref": "hr",
-            "comp": "gen",
+            "comp": "gen_pmm",
             "wasserstein": float(w1),
             "ks_stat": ks_stat,
             "ks_p": ks_p,
@@ -264,10 +384,10 @@ def compute_distributional_metrics(pooled: Dict[str, Any]) -> List[Dict[str, Any
 
     # --- HR vs LR ---
     if lr is not None and lr.size:
-        ks_res = ks_2samp(hr, lr)
-        ks_stat = _to_float(ks_res.statistic if hasattr(ks_res, "statistic") else ks_res[0]) # type: ignore
-        ks_p    = _to_float(ks_res.pvalue    if hasattr(ks_res, "pvalue")    else ks_res[1]) # type: ignore
-        w1 = np.abs(np.sort(hr) - np.sort(lr)[: hr.size]).mean() if hr.size and lr.size else np.nan
+        ks_res = ks_2samp(hr.ravel(), lr.ravel())
+        ks_stat = _to_float(getattr(ks_res, "statistic", ks_res[0]))
+        ks_p    = _to_float(getattr(ks_res, "pvalue", ks_res[1]))
+        w1 = _w1_approx(hr, lr)
         p_hr = _disc(hr, bins)
         p_lr = _disc(lr, bins)
         rows.append({
@@ -278,4 +398,49 @@ def compute_distributional_metrics(pooled: Dict[str, Any]) -> List[Dict[str, Any
             "ks_p": ks_p,
             "kl_hr_to_x": float(kl(p_hr, p_lr)),
         })
+
+    # --- HR vs GEN (ensemble) ---
+    if ensembles is not None and isinstance(ensembles, dict) and len(ensembles) > 0:
+        mode = ensembles.get("mode", "pool")
+        rng = np.random.default_rng(123)
+        p_hr = _disc(hr, bins)
+
+        if mode == "pool" and "counts_pool" in ensembles:
+            counts = np.asarray(ensembles["counts_pool"]).astype(np.float64)
+            p_gen = counts / max(counts.sum(), 1.0)
+            mids = 0.5 * (bins[:-1] + bins[1:])
+            n_samp = min(hr.size, 200_000)
+            samp = rng.choice(mids, size=n_samp, replace=True, p=p_gen)
+            ks_res = ks_2samp(hr.ravel(), samp.ravel())
+            ks_stat = _to_float(getattr(ks_res, "statistic", ks_res[0]))
+            ks_p    = _to_float(getattr(ks_res, "pvalue", ks_res[1]))
+            w1 = _w1_approx(hr, samp)
+            rows.append({
+                "ref": "hr",
+                "comp": "gen_ens_pool",
+                "wasserstein": float(w1),
+                "ks_stat": ks_stat,
+                "ks_p": ks_p,
+                "kl_hr_to_x": float(kl(p_hr, p_gen)),
+            })
+
+        if mode == "member_mean" and "pdf_mean" in ensembles:
+            p_gen = np.asarray(ensembles["pdf_mean"]).astype(np.float64)
+            p_gen = p_gen / max(p_gen.sum(), 1.0)
+            mids = 0.5 * (bins[:-1] + bins[1:])
+            n_samp = min(hr.size, 200_000)
+            samp = rng.choice(mids, size=n_samp, replace=True, p=p_gen)
+            ks_res = ks_2samp(hr.ravel(), samp.ravel())
+            ks_stat = _to_float(getattr(ks_res, "statistic", ks_res[0]))
+            ks_p    = _to_float(getattr(ks_res, "pvalue", ks_res[1]))
+            w1 = _w1_approx(hr, samp)
+            rows.append({
+                "ref": "hr",
+                "comp": "gen_ens_mean",
+                "wasserstein": float(w1),
+                "ks_stat": ks_stat,
+                "ks_p": ks_p,
+                "kl_hr_to_x": float(kl(p_hr, p_gen)),
+            })
+
     return rows

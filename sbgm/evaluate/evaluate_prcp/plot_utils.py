@@ -98,10 +98,10 @@ def _load_dk_lsm_outline(
         elif a.ndim == 3 and a.shape[0] == 1:
             a = a.squeeze(0)
         y0, y1, x0, x1 = bounds
+        a = np.flipud(a)  # flip vertically if needed
         a = a[y0:y1, x0:x1]
         m = (a >= 0.5)
-        # Turn it upside down to match map
-        m = np.flipud(m)
+        m = np.flipud(m)  # flip back to original orientation
 
         logger.info("[DEBUG] DK LSM outline loaded with shape %s", str(m.shape))
         return m.astype(bool, copy=False)
@@ -116,7 +116,7 @@ def get_dk_lsm_outline() -> np.ndarray | None:
         _DK_LSM_CACHE = _load_dk_lsm_outline()
     return _DK_LSM_CACHE
 
-def overlay_outline(ax, mask: np.ndarray | None, *, color: str = "white", linewidth: float = 0.8):
+def overlay_outline(ax, mask: np.ndarray | None, *, color: str = "black", linewidth: float = 0.8):
     """Overlay a contour outline (level 0.5) on the given axes if mask is provided."""
     if mask is None:
         return

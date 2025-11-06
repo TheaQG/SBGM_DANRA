@@ -29,6 +29,7 @@ class EvaluationConfig:
     lr_key: Optional[str] = "lr" # which LR key to use from lr_hr_phys: "lr" | "lr_lrspace" | "lr_hrspace"
     grid_km_per_px: float = 2.5
     lr_grid_km_per_px: float = 31.0
+    crps_examples_n_members: int = 4
     thresholds_mm: tuple = (1.0, 5.0, 10.0)
     fss_thresholds_mm: tuple = (1.0, 5.0, 10.0)
     fss_scales_km: tuple = (5, 10, 20)
@@ -70,12 +71,17 @@ class EvaluationConfig:
     spatial_vmin: Optional[float] = None
     spatial_vmax: Optional[float] = None
     spatial_show_diff: bool = True
+    spatial_include_gen: bool = False
+    spatial_include_ens: bool = True
+    spatial_include_hr: bool = True
+    spatial_include_lr: bool = True
     # temporal evaluation config
     temporal_include_lr: bool = True
     temporal_wet_thr_mm: float = 1.0
     temporal_max_lag: int = 30
     temporal_max_spell: int = 25
     temporal_group_by: str = "year"
+    temporal_ensemble_pool_mode: str = "member_mean"   # or "pool"
     # per-date evaluation config
     dates_list: Optional[List[str]] = None
     dates_include_lr: bool = True
@@ -91,6 +97,14 @@ class EvaluationConfig:
     ensemble_cache_members: bool = False
     # Distributional ensemble pooling mode
     dist_ensemble_pool_mode: str = "pool"   # "pool" | "member_mean" | "pmm"
+    # Features evaluation config
+    sal_structure_mode: str = "object"     # "object" | "std_proxy"
+    sal_threshold_kind: str = "quantile"   # "quantile" | "absolute"
+    sal_threshold_value: float = 0.90
+    sal_connectivity: int = 8
+    sal_min_area_px: int = 9
+    sal_smooth_sigma: Optional[float] = 0.75
+    sal_peakedness_mode: str = "largest"  # "largest" | "herfindahl"
 class EvaluationRunner:
     """
         Clean runner that uses EvalDataResolver to perform evaluations.
@@ -202,6 +216,10 @@ class EvaluationRunner:
                     low_k_max: float
                     high_k_min: float
                     make_plots: bool
+                    # ensemble flags for scale
+                    use_ensemble: bool
+                    ensemble_n_members: int | None
+                    ensemble_member_seed: int
 
                 sc = _ScaleCfg()
                 sc.hr_dx_km = float(self.eval_cfg.hr_dx_km or self.eval_cfg.grid_km_per_px)
@@ -212,6 +230,9 @@ class EvaluationRunner:
                 sc.low_k_max = float(self.eval_cfg.low_k_max)
                 sc.high_k_min = float(self.eval_cfg.high_k_min)
                 sc.make_plots = bool(self.eval_cfg.make_plots)
+                sc.use_ensemble = bool(self.eval_cfg.use_ensemble)
+                sc.ensemble_n_members = self.eval_cfg.ensemble_n_members
+                sc.ensemble_member_seed = int(self.eval_cfg.ensemble_member_seed)
 
                 run_scale(
                     resolver=self.data,

@@ -191,6 +191,11 @@ class SeriesBundle:
     gen: np.ndarray           # [T]
     lr: Optional[np.ndarray]  # [T] or None
 
+@dataclass
+class EnsembleSeriesBundle:
+    dates: np.ndarray     # [T]
+    gen_members: np.ndarray  # [M,T]
+
 def build_daily_series(resolver,
                        dates: Sequence[str],
                        *,
@@ -263,6 +268,59 @@ def build_daily_series(resolver,
 
     return SeriesBundle(dates=dt, hr=hr_series, gen=gen_series, lr=lr_series)
 
+def build_daily_series_ensemble(resolver,
+                                dates: Sequence[str],
+                                *,
+                                mask_hw: Optional[torch.Tensor],
+                                agg: str = "mean",
+                                n_members: Optional[int] = None,
+                                seed: int = 1234) -> Optional[EnsembleSeriesBundle]:
+    mask_hw = _mask_to_hw(mask_hw)
+    M_eff = None
+    # probe first date to get M
+    for d in dates:
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if ens is not None:
+            M_eff = int(ens.shape[0]) if torch.is_tensor(ens) else int(np.asarray(ens).shape[0])
+            break
+    if M_eff is None:
+        return None
+    series_by_member: List[List[float]] = [list() for _ in range(M_eff)]
+    valid_dates: List[str] = []
+    for d in dates:
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if ens is None:
+            continue
+        if torch.is_tensor(ens):
+            ens_np = ens.detach().cpu().numpy()
+        else:
+            ens_np = np.asarray(ens)
+        # shape [M,H,W]
+        if mask_hw is not None:
+            m = mask_hw.detach().cpu().numpy().astype(bool)
+            vals = [ens_np[i][m] for i in range(min(M_eff, ens_np.shape[0]))]
+        else:
+            vals = [ens_np[i].reshape(-1) for i in range(min(M_eff, ens_np.shape[0]))]
+        for i, v in enumerate(vals):
+            if agg == "mean":
+                series_by_member[i].append(float(np.nanmean(v)))
+            else:
+                series_by_member[i].append(float(np.nansum(v)))
+        valid_dates.append(d)
+    if not valid_dates:
+        return None
+    dt = parse_dates_to_np(valid_dates)
+    gen_members = np.array([np.array(s, dtype=np.float64) for s in series_by_member], dtype=np.float64)
+    return EnsembleSeriesBundle(dates=dt, gen_members=gen_members)
+
 def pooled_pixel_percentiles_and_wetfreq(
         resolver, dates, mask_hw=None, wet_thr=1.0, p_list=(95.0, 99.0), include_lr=True):
     import torch
@@ -300,6 +358,38 @@ def pooled_pixel_percentiles_and_wetfreq(
         }
     return out
 
+def pooled_pixel_percentiles_and_wetfreq_ens(resolver, dates, mask_hw=None, wet_thr=1.0, p_list=(95.0,99.0), n_members=None, seed=1234):
+    import torch
+    mask_hw = _mask_to_hw(mask_hw)
+    chunks = []
+    for d in dates:
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if ens is None:
+            continue
+        if torch.is_tensor(ens):
+            arr = ens.detach().cpu().numpy()
+        else:
+            arr = np.asarray(ens)
+        # [M,H,W] -> pool all member pixels
+        if mask_hw is not None:
+            m = mask_hw.detach().cpu().numpy().astype(bool)
+            for i in range(arr.shape[0]):
+                chunks.append(arr[i][m].reshape(-1))
+        else:
+            for i in range(arr.shape[0]):
+                chunks.append(arr[i].reshape(-1))
+    if not chunks:
+        return None
+    x = np.concatenate(chunks).astype(float)
+    x = x[np.isfinite(x)]
+    out = {**{f"P{int(p)}": float(np.percentile(x, p)) for p in p_list},
+           "wet_freq": float(np.mean(x > wet_thr)),
+           "n_points": int(x.size)}
+    return out
 
 def pooled_wet_hit_rate(resolver, dates, mask_hw=None, wet_thr=1.0, include_lr=True):
     """
@@ -378,3 +468,237 @@ def pooled_wet_hit_rate(resolver, dates, mask_hw=None, wet_thr=1.0, include_lr=T
     else:
         out["LR"] = np.nan
     return out
+
+
+def pooled_wet_hit_rate_ens(resolver, dates, mask_hw=None, wet_thr=1.0, n_members=None, seed=1234):
+    import torch
+    mask_hw = _mask_to_hw(mask_hw)
+    num = 0.0
+    denom_total = 0
+    for d in dates:
+        hr = resolver.load_obs(d)
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if hr is None or ens is None:
+            continue
+        if not torch.is_tensor(hr): hr = torch.from_numpy(np.asarray(hr))
+        hr = hr.squeeze()
+        if torch.is_tensor(ens): arr = ens.detach().cpu().numpy()
+        else: arr = np.asarray(ens)
+        # mask
+        if mask_hw is not None:
+            m = mask_hw.detach().cpu().numpy().astype(bool)
+            hr_m = hr[m].detach().cpu().numpy()
+            arr = np.stack([arr[i][m] for i in range(arr.shape[0])], axis=0)  # [M,N]
+        else:
+            hr_m = hr.reshape(-1).detach().cpu().numpy()
+            arr = arr.reshape(arr.shape[0], -1)
+        hr_wet = (hr_m > wet_thr)
+        denom = int(hr_wet.sum())
+        if denom == 0:
+            continue
+        # expected hits across members: average indicator over members
+        prob_wet = (arr > wet_thr).mean(axis=0)  # [N]
+        # expected hits are prob_wet when HR is wet
+        num += float(prob_wet[hr_wet].sum())
+        denom_total += denom
+    if denom_total == 0:
+        return float("nan")
+    return float(num / denom_total)
+
+
+# ------------------ Helper: per-member wet-hit rate stats (mean, std) ------------------
+def pooled_wet_hit_rate_ens_member_stats(resolver, dates, mask_hw=None, wet_thr=1.0, n_members=None, seed=1234):
+    """Return (mean, std) of per-member wet-hit rates vs HR across all dates."""
+    import torch
+    mask_hw = _mask_to_hw(mask_hw)
+    # determine M
+    M_eff = None
+    for d in dates:
+        hr = resolver.load_obs(d)
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if hr is None or ens is None:
+            continue
+        if torch.is_tensor(ens):
+            M_eff = int(ens.shape[0])
+        else:
+            M_eff = int(np.asarray(ens).shape[0])
+        break
+    if M_eff is None:
+        return float("nan"), float("nan")
+    per_member_hits = np.zeros((M_eff,), dtype=float)
+    per_member_den  = np.zeros((M_eff,), dtype=float)
+    for d in dates:
+        hr = resolver.load_obs(d)
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if hr is None or ens is None:
+            continue
+        if not torch.is_tensor(hr): hr = torch.from_numpy(np.asarray(hr))
+        hr = hr.squeeze()
+        if torch.is_tensor(ens): arr = ens.detach().cpu().numpy()
+        else: arr = np.asarray(ens)
+        if mask_hw is not None:
+            m = mask_hw.detach().cpu().numpy().astype(bool)
+            hr_m = hr[m].detach().cpu().numpy()
+            arr = np.stack([arr[i][m] for i in range(arr.shape[0])], axis=0)
+        else:
+            hr_m = hr.reshape(-1).detach().cpu().numpy()
+            arr = arr.reshape(arr.shape[0], -1)
+        hr_wet = (hr_m > wet_thr)
+        denom = int(hr_wet.sum())
+        if denom == 0:
+            continue
+        per_member_den += denom
+        for mi in range(min(M_eff, arr.shape[0])):
+            hits = int(((arr[mi] > wet_thr) & hr_wet).sum())
+            per_member_hits[mi] += float(hits)
+    rates = np.divide(per_member_hits, per_member_den, out=np.full_like(per_member_hits, np.nan), where=per_member_den>0)
+    rates = rates[np.isfinite(rates)]
+    if rates.size == 0:
+        return float("nan"), float("nan")
+    return float(np.mean(rates)), float(np.std(rates))
+
+# ------------------ Member-mean pooled tails (percentiles/wet freq and wet-hit rate) ------------------
+def percentiles_and_wetfreq_ens_member_mean(resolver, dates, mask_hw=None, wet_thr=1.0, p_list=(95.0,99.0), n_members=None, seed=1234):
+    """Compute per-member pooled-pixel tails, then average across members.
+    Returns dict with mean P95/P99, mean wet_freq, and an approximate mean n_points."""
+    import torch
+    mask_hw = _mask_to_hw(mask_hw)
+    # accumulate per member lists of pixel values across all dates
+    member_vals: list[list[np.ndarray]] = []
+    M_eff = None
+    # probe M
+    for d in dates:
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if ens is not None:
+            M_eff = int(ens.shape[0]) if torch.is_tensor(ens) else int(np.asarray(ens).shape[0])
+            break
+    if M_eff is None:
+        return None
+    member_vals = [[] for _ in range(M_eff)]
+    for d in dates:
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if ens is None:
+            continue
+        if torch.is_tensor(ens):
+            arr = ens.detach().cpu().numpy()
+        else:
+            arr = np.asarray(ens)
+        if mask_hw is not None:
+            m = mask_hw.detach().cpu().numpy().astype(bool)
+            for i in range(min(M_eff, arr.shape[0])):
+                member_vals[i].append(arr[i][m].reshape(-1))
+        else:
+            for i in range(min(M_eff, arr.shape[0])):
+                member_vals[i].append(arr[i].reshape(-1))
+    # compute per-member statistics
+    p95s, p99s, wets, ns = [], [], [], []
+    for i in range(M_eff):
+        if not member_vals[i]:
+            continue
+        x = np.concatenate(member_vals[i]).astype(float)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            continue
+        p95s.append(np.percentile(x, 95))
+        p99s.append(np.percentile(x, 99))
+        wets.append(np.mean(x > wet_thr))
+        ns.append(int(x.size))
+    if not p95s:
+        return None
+    out = {
+        "P95": float(np.mean(p95s)),
+        "P99": float(np.mean(p99s)),
+        "wet_freq": float(np.mean(wets)),
+        "n_points": int(np.mean(ns) if ns else 0),
+        # optional spread (not consumed by plots but useful for debugging)
+        "P95_std": float(np.std(p95s)),
+        "P99_std": float(np.std(p99s)),
+        "wet_freq_std": float(np.std(wets)),
+    }
+    return out
+
+def pooled_wet_hit_rate_ens_member_mean(resolver, dates, mask_hw=None, wet_thr=1.0, n_members=None, seed=1234):
+    """Compute wet-hit rate per member vs HR, then average across members."""
+    import torch
+    mask_hw = _mask_to_hw(mask_hw)
+    per_member_hits = []
+    per_member_denoms = []
+    # first, collect per-member numerator and denominator over all dates
+    # We'll do it in two passes per date to avoid big memory spikes
+    # Layout: for each member, accumulate sum of hits and sum of HR-wet counts
+    # Determine M
+    M_eff = None
+    for d in dates:
+        hr = resolver.load_obs(d)
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if hr is None or ens is None:
+            continue
+        if torch.is_tensor(ens):
+            M_eff = int(ens.shape[0])
+        else:
+            M_eff = int(np.asarray(ens).shape[0])
+        break
+    if M_eff is None:
+        return float("nan")
+    per_member_hits = [0.0 for _ in range(M_eff)]
+    per_member_denoms = [0 for _ in range(M_eff)]
+    for d in dates:
+        hr = resolver.load_obs(d)
+        try:
+            sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
+            ens = getattr(sample, "ens", None)
+        except Exception:
+            ens = resolver.load_ens(d)
+        if hr is None or ens is None:
+            continue
+        if not torch.is_tensor(hr): hr = torch.from_numpy(np.asarray(hr))
+        hr = hr.squeeze()
+        if torch.is_tensor(ens): arr = ens.detach().cpu().numpy()
+        else: arr = np.asarray(ens)
+        # mask
+        if mask_hw is not None:
+            m = mask_hw.detach().cpu().numpy().astype(bool)
+            hr_m = hr[m].detach().cpu().numpy()
+            arr = np.stack([arr[i][m] for i in range(arr.shape[0])], axis=0)  # [M,N]
+        else:
+            hr_m = hr.reshape(-1).detach().cpu().numpy()
+            arr = arr.reshape(arr.shape[0], -1)
+        hr_wet = (hr_m > wet_thr)
+        denom = int(hr_wet.sum())
+        if denom == 0:
+            continue
+        per_member_denoms = [d0 + denom for d0 in per_member_denoms]
+        for mi in range(min(M_eff, arr.shape[0])):
+            hits = int(((arr[mi] > wet_thr) & hr_wet).sum())
+            per_member_hits[mi] += float(hits)
+    # per-member rates then mean across members
+    rates = [ (per_member_hits[i] / per_member_denoms[i]) if per_member_denoms[i] > 0 else np.nan for i in range(M_eff) ]
+    rates = np.array(rates, dtype=float)
+    rates = rates[np.isfinite(rates)]
+    if rates.size == 0:
+        return float("nan")
+    return float(np.mean(rates))

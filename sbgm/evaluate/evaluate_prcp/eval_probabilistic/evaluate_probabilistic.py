@@ -28,6 +28,110 @@ from sbgm.evaluate.evaluate_prcp.eval_probabilistic.plot_probabilistic import (
     plot_probabilistic,
 )
 
+# Helper: select CRPS example dates (best/worst, deprioritize zeros)
+def _select_crps_example_dates(crps_csv_path: Path, n_examples: int = 6) -> list[tuple[str, float]]:
+    lines = crps_csv_path.read_text().strip().splitlines()
+    if len(lines) <= 1:
+        return []
+    rows: list[tuple[str, float]] = []
+    for ln in lines[1:]:
+        s = ln.split(",")
+        if len(s) < 2:
+            continue
+        date_s = s[0].strip()
+        try:
+            crps_v = float(s[1])
+        except Exception:
+            continue
+        rows.append((date_s, crps_v))
+    if not rows:
+        return []
+    rows_sorted = sorted(rows, key=lambda x: x[1])
+    eps = 0.01
+    nonzero_rows = [r for r in rows_sorted if r[1] > eps]
+    zero_rows = [r for r in rows_sorted if r[1] <= eps]
+    n_half = max(1, n_examples // 2)
+    if len(nonzero_rows) >= n_half:
+        best = nonzero_rows[:n_half]
+    else:
+        best = nonzero_rows + zero_rows[:(n_half - len(nonzero_rows))]
+    worst = rows_sorted[-n_half:]
+    return best + worst
+
+# Helper: build and save member-based CRPS example payload for plotting
+def _build_and_save_crps_examples_members(
+    resolver,
+    tables_dir: Path,
+    *,
+    n_members_to_show: int = 4,
+    member_seed: int = 1234,
+) -> None:
+    crps_csv = tables_dir / "prob_crps_daily.csv"
+    if not crps_csv.exists():
+        return
+    selected = _select_crps_example_dates(crps_csv, n_examples=6)
+    if not selected:
+        return
+
+    rng = np.random.RandomState(member_seed)
+    payload: Dict[str, Any] = {"dates": np.array([d for d, _ in selected])}
+
+    for d, _ in selected:
+        obs = resolver.load_obs(d)            # [H,W]
+        ens = resolver.load_ens(d)            # [M,H,W]
+        try:
+            pmm = resolver.load_pmm(d)        # [H,W] (optional but desired)
+        except Exception:
+            pmm = None
+        try:
+            mask = resolver.load_mask(d)
+        except Exception:
+            mask = None
+
+        if obs is None or ens is None:
+            continue
+
+        obs_t = torch.from_numpy(np.asarray(obs)) if not torch.is_tensor(obs) else obs
+        ens_t = torch.from_numpy(np.asarray(ens)) if not torch.is_tensor(ens) else ens
+
+        # Ensemble CRPS (scalar) for the column title
+        crps_val = crps_ensemble(obs_t, ens_t, mask=mask, reduction="mean")
+        payload[f"CRPS_ENS_{d}"] = float(crps_val)
+
+        # Save HR (always)
+        payload[f"HR_{d}"] = np.asarray(obs_t.cpu()).astype(np.float32)
+
+        # Save PMM if available (for last row)
+        if pmm is not None:
+            payload[f"PMM_{d}"] = np.asarray(pmm).astype(np.float32)
+
+        # Choose members to display
+        M = ens_t.shape[0]
+        take = min(n_members_to_show, M)
+        idx = rng.choice(M, size=take, replace=False)
+
+        # Optional mask for MAE
+        m = None
+        if mask is not None:
+            m = np.asarray(mask).astype(bool)
+
+        # Save members and their MAE (CRPS for a single member reduces to MAE)
+        hr_np = payload[f"HR_{d}"]
+        for j, k in enumerate(idx):
+            mem = ens_t[k].cpu().numpy().astype(np.float32)
+            payload[f"MEM_{j}_{d}"] = mem
+            if m is not None:
+                mae = np.nanmean(np.abs(np.where(m, mem, np.nan) - np.where(m, hr_np, np.nan)))
+            else:
+                mae = float(np.mean(np.abs(mem - hr_np)))
+            payload[f"MAE_MEM_{j}_{d}"] = float(mae)
+
+    # Ensure all payload values are array-like before saving to satisfy type checkers
+    np.savez_compressed(
+        tables_dir / "prob_crps_examples_members.npz",
+        **{k: np.asarray(v) for k, v in payload.items()}
+    )
+
 def run_probabilistic(
         resolver,
         eval_cfg,
@@ -264,6 +368,19 @@ def run_probabilistic(
     # ================================================================================
     # 4) plots
     # ================================================================================
+    # Build member-based CRPS example payload for plotting (HR + members only)
+    try:
+        n_show = int(getattr(eval_cfg, "crps_examples_n_members", 4))
+        seed = int(getattr(eval_cfg, "ensemble_member_seed", 1234))
+        _build_and_save_crps_examples_members(
+            resolver,
+            tables_dir,
+            n_members_to_show=n_show,
+            member_seed=seed,
+        )
+    except Exception as e:
+        logger.warning(f"[eval_probabilistic] Could not build CRPS member examples: {e}")
+
     plot_probabilistic(
         out_root,
         gen_root=Path(eval_cfg.gen_dir),

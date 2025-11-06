@@ -43,21 +43,33 @@ def plot_scale_psd(scale_root: Path) -> None:
 
     # Set colors
     col_hr = get_color_for_model("HR")
-    col_gen = get_color_for_model("gen")
+    col_gen = get_color_for_model("PMM")
     col_lr = get_color_for_model("LR")
+    col_gen_ens = get_color_for_model("ensemble")
 
-    data = np.load(npz_path)
-    k = data["k"]               # [K]
-    psd_hr = data["psd_hr"]     # [N, K]
-    psd_gen = data["psd_gen"]   # [N, K]
-    psd_lr = data["psd_lr"]     # [N, K]
-    psd_lr_hr = data["psd_lr_hr"]  # [N, K] – LR evaluated on HR grid
-    dates = data["dates"]          # [N]
-    psd_hr_ci_lo = data.get("psd_hr_ci_lo", None)
-    psd_hr_ci_hi = data.get("psd_hr_ci_hi", None)
-    psd_gen_ci_lo = data.get("psd_gen_ci_lo", None)
-    psd_gen_ci_hi = data.get("psd_gen_ci_hi", None)
-    lr_nyquist = float(data.get("lr_nyquist", np.array(0.0)))
+    with np.load(npz_path) as data:
+        files = set(data.files)
+        def _opt(key):
+            return data[key] if key in files else None
+        k = data["k"]               # [K]
+        psd_hr = data["psd_hr"]     # [N, K]
+        psd_gen = data["psd_gen"]   # [N, K]
+        psd_lr = data["psd_lr"]     # [N, K]
+        psd_lr_hr = data["psd_lr_hr"]  # [N, K]
+        dates = data["dates"]          # [N]
+        psd_hr_ci_lo = _opt("psd_hr_ci_lo")
+        psd_hr_ci_hi = _opt("psd_hr_ci_hi")
+        psd_gen_ci_lo = _opt("psd_gen_ci_lo")
+        psd_gen_ci_hi = _opt("psd_gen_ci_hi")
+        lr_nyquist_arr = _opt("lr_nyquist")
+        lr_nyquist = float(lr_nyquist_arr) if lr_nyquist_arr is not None else 0.0
+        
+        psd_gen_ens_mean = _opt("psd_gen_ens_mean")
+        psd_gen_ens_ci_lo = _opt("psd_gen_ens_ci_lo")
+        psd_gen_ens_ci_hi = _opt("psd_gen_ens_ci_hi")
+
+    if psd_gen_ens_mean is None:
+        logger.info("[plot_scale_psd] No ensemble PSD arrays found in NPZ -> only PMM will be plotted.")
 
     # mean over dates
     eps = 1e-12
@@ -74,6 +86,7 @@ def plot_scale_psd(scale_root: Path) -> None:
     hr_mean = np.maximum(hr_mean, eps)
     gen_mean = np.maximum(gen_mean, eps)
     lr_mean = np.maximum(lr_mean, eps)
+
 
     if lr_nyquist > 0.0:
         lr_mask_lo = k <= lr_nyquist * 1.0001
@@ -98,6 +111,16 @@ def plot_scale_psd(scale_root: Path) -> None:
     if lr_hr_mean is not None:
         lr_hr_mean = np.maximum(lr_hr_mean, eps)
         lr_hr_mean = lr_hr_mean[mask_pos][order]
+
+    gen_ens_mean = None
+    gen_ens_ci_lo = None
+    gen_ens_ci_hi = None
+    if psd_gen_ens_mean is not None:
+        arr = np.maximum(np.asarray(psd_gen_ens_mean), eps)[mask_pos][order]
+        gen_ens_mean = arr
+        if psd_gen_ens_ci_lo is not None and psd_gen_ens_ci_hi is not None:
+            gen_ens_ci_lo = np.maximum(np.asarray(psd_gen_ens_ci_lo), eps)[mask_pos][order]
+            gen_ens_ci_hi = np.maximum(np.asarray(psd_gen_ens_ci_hi), eps)[mask_pos][order]
 
     # --- Compute band powers and ratios from mean PSDs (as plotted) ---
     # 1. k-array in plotted order
@@ -207,6 +230,12 @@ def plot_scale_psd(scale_root: Path) -> None:
                         np.maximum(gen_mean - gen_std, eps),
                         gen_mean + gen_std,
                         color=col_gen, alpha=0.12)
+
+    # GEN ensemble mean + CI band (if available)
+    if gen_ens_mean is not None:
+        ax.plot(lam, gen_ens_mean, color=col_gen_ens, lw=1.2, ls="-.", label="GEN (ens mean)")
+        if gen_ens_ci_lo is not None and gen_ens_ci_hi is not None:
+            ax.fill_between(lam, gen_ens_ci_lo, gen_ens_ci_hi, color=col_gen_ens, alpha=0.08) # type: ignore
 
     # LR
     if lr_nyquist > 0.0 and lam_nyq is not None:
@@ -392,7 +421,6 @@ def plot_psd_lowhigh_diag(scale_root: Path) -> None:
             if _ok_low(gl_lr):
                 assert gl_lr is not None
                 gen_low_lr.append(float(gl_lr))
-                gen_low_lr.append(float(gl_lr))
             gh_hr = None
             if (hr_highk is not None and gen_highk is not None
                     and np.isfinite(hr_highk) and np.isfinite(gen_highk)
@@ -513,6 +541,29 @@ def plot_fss_curves(scale_root: Path) -> None:
         logger.warning(f"[plot_fss_curves] Did not find {summary_path} – skipping FSS plot.")
         return
 
+    ens_summary_path = tables / "scale_fss_ens_summary.csv"
+    by_thr_ens: dict[str, list[tuple[float, float]]] = {}
+    if ens_summary_path.exists():
+        with open(ens_summary_path, "r") as f:
+            lines2 = [l.strip() for l in f.readlines() if l.strip()]
+        if len(lines2) > 1:
+            header2 = lines2[0].split(",")
+            rows2 = [l.split(",") for l in lines2[1:]]
+            fss_cols2 = [(i, col) for i, col in enumerate(header2) if col.lower().startswith("fss_")]
+            for r in rows2:
+                base_thr = r[0].strip()
+                if base_thr == "":
+                    continue
+                for idx, col in fss_cols2:
+                    try:
+                        scale_km = float(col.split("_")[1].replace("km", ""))
+                    except Exception:
+                        continue
+                    v = r[idx].strip()
+                    if v == "":
+                        continue
+                    by_thr_ens.setdefault(base_thr, []).append((scale_km, float(v)))
+
     # ------------------------------------------------------------
     # 1) Read summary (always available) – gives us GEN per threshold
     # ------------------------------------------------------------
@@ -624,6 +675,11 @@ def plot_fss_curves(scale_root: Path) -> None:
         data = by_thr[thr]
         gen_pairs = sorted(data["gen"], key=lambda t: t[0])
         lr_pairs = sorted(data["lr"], key=lambda t: t[0]) if data["lr"] else []
+        # Ensemble mean curve if available
+        ens_pairs = sorted(by_thr_ens.get(thr, []), key=lambda t: t[0])
+        if ens_pairs:
+            ax.plot([p[0] for p in ens_pairs], [p[1] for p in ens_pairs],
+                    linestyle="-.", linewidth=1.2, color="0.2", label="GEN (ens mean)")
 
         x_gen = [p[0] for p in gen_pairs]
         y_gen = [p[1] for p in gen_pairs]

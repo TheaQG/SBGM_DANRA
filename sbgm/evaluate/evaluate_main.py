@@ -74,6 +74,8 @@ def evaluation_main(cfg):
         hr_dx_km=float(fe.get("hr_dx_km", fe.get("grid_km_per_px", 2.5))),
         lr_dx_km=float(fe.get("lr_dx_km", fe.get("lr_grid_km_per_px", 31.0))),
 
+        crps_examples_n_members=int(fe.get("crps_examples_n_members", 4)),
+
         # FSS evaluation config fields
         thresholds_mm=tuple(fe.get("thresholds_mm", (1.0, 5.0, 10.0))),
         fss_scales_km=tuple(fe.get("fss_scales_km", (5, 10, 20))),
@@ -124,6 +126,10 @@ def evaluation_main(cfg):
         spatial_vmin=float(fe.get("spatial_vmin", None)) if fe.get("spatial_vmin", None) is not None else None,
         spatial_vmax=float(fe.get("spatial_vmax", None)) if fe.get("spatial_vmax", None) is not None else None,
         spatial_show_diff=bool(fe.get("spatial_show_diff", True)),
+        spatial_include_gen=bool(fe.get("spatial_include_gen", False)),
+        spatial_include_ens=bool(fe.get("spatial_include_ens", True)),
+        spatial_include_hr=bool(fe.get("spatial_include_hr", True)),
+        spatial_include_lr=bool(fe.get("spatial_include_lr", True)),
 
         # Temporal evaluation config fields
         temporal_include_lr=bool(fe.get("temporal_include_lr", True)),
@@ -131,6 +137,7 @@ def evaluation_main(cfg):
         temporal_max_lag=int(fe.get("temporal_max_lag", 30)),
         temporal_max_spell=int(fe.get("temporal_max_spell", 25)),
         temporal_group_by=str(fe.get("temporal_group_by", "year")),
+        temporal_ensemble_pool_mode=str(fe.get("temporal_ensemble_pool_mode", "member_mean")),
 
         # Dates evaluation config fields
         dates_list = fe.get("dates_list", []),
@@ -147,7 +154,16 @@ def evaluation_main(cfg):
         ensemble_reduction_fallback=str(fe.get("ensemble_reduction_fallback", "pmm")),
         ensemble_cache_members=bool(fe.get("ensemble_cache_members", False)),
         dist_ensemble_pool_mode=str(fe.get("dist_ensemble_pool_mode", "pool")),
-                                 
+
+        # Features evaluation config fields
+        sal_structure_mode=str(fe.get("sal_structure_mode", "object")),
+        sal_threshold_kind=str(fe.get("sal_threshold_kind", "quantile")),  # unified singular name
+        sal_threshold_value=float(fe.get("sal_threshold_value", 0.90)),
+        sal_connectivity=int(fe.get("sal_connectivity", 8)),
+        sal_min_area_px=int(fe.get("sal_min_area_px", 9)),
+        sal_smooth_sigma=(float(_tmp) if (_tmp := fe.get("sal_smooth_sigma", 0.75)) is not None else None),
+        sal_peakedness_mode=str(fe.get("sal_peakedness_mode", "largest")),
+
     )
 
     # map YAML flags -> new modular task names

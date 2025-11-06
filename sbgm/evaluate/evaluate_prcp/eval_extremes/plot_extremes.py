@@ -9,13 +9,13 @@ logger = logging.getLogger(__name__)
 from sbgm.evaluate.evaluate_prcp.plot_utils import (_nice, _savefig, _ensure_dir)
 from sbgm.variable_utils import get_color_for_model
 
-SERIES_ORDER  = ["HR", "GEN", "LR"]
-SERIES_LABELS = {"HR": "HR (DANRA)", "GEN": "Generated", "LR": "LR upsampled"}
-
+SERIES_ORDER  = ["HR", "GEN_ENS", "GEN", "LR"]
+SERIES_LABELS = {"HR": "HR (DANRA)", "GEN": "PMM", "GEN_ENS": "Generated (ens)", "LR": "LR upsampled"}
 col_hr = get_color_for_model("HR")
-col_gen = get_color_for_model("gen")
+col_pmm = get_color_for_model("pmm")
+col_ens = get_color_for_model("ensemble")
 col_lr = get_color_for_model("LR")
-SERIES_COLORS = {"HR": col_hr, "GEN": col_gen, "LR": col_lr}
+SERIES_COLORS = {"HR": col_hr, "GEN": col_pmm, "GEN_ENS": col_ens, "LR": col_lr}
 
 SET_DPI = 300
 
@@ -24,6 +24,8 @@ def _norm_series_name(s: str) -> str:
     t = s.strip().upper()
     if t.startswith("HR"):
         return "HR"
+    if t.startswith("GEN_ENS") or "GEN/ENS" in t or "ENS" in t:
+        return "GEN_ENS"    
     if t.startswith("GEN") or "GENERATED" in t:
         return "GEN"
     if t.startswith("LR"):
@@ -93,6 +95,7 @@ def plot_return_levels(gev_csv: Path, out_png: Path):
             if which not in present:
                 continue
             col = SERIES_COLORS[which]
+            ls = ":" if which == "GEN_ENS" else "-"            
             r = [rr for rr in rows if rr[0]==which and int(rr[1])==k][0]
             nb = int(r[2])
             rl  = [float(x) for x in r[3:3+len(rps)]]
@@ -100,7 +103,7 @@ def plot_return_levels(gev_csv: Path, out_png: Path):
             hi  = [float(x) for x in r[3+2*len(rps):3+3*len(rps)]]
             # thin line + faint fill
             ax.plot(rps, rl, marker="o", ms=3, lw=1.5, color=col,
-                    label=f"{SERIES_LABELS[which]} (n={nb})")
+                    label=f"{SERIES_LABELS[which]} (n={nb})", ls=ls)
             ax.fill_between(rps, lo, hi, alpha=0.18, color=col, linewidth=0)
         ax.set_xscale("log")
         ax.set_xlabel("Return period (years)")
@@ -142,13 +145,14 @@ def plot_pot(para_csv: Path, out_png: Path):
         if which not in present:
             continue
         col = SERIES_COLORS[which]
+        ls = ":" if which == "GEN_ENS" else "-"        
         r = [rr for rr in rows if rr[0] == which][0]
         # Columns: which,u,xi,beta,k_exc,lambda_per_day, rl..., rl_lo..., rl_hi...
         u = float(r[1])
         rl  = [float(x) for x in r[6:6+len(rps)]]
         lo  = [float(x) for x in r[6+len(rps):6+2*len(rps)]]
         hi  = [float(x) for x in r[6+2*len(rps):6+3*len(rps)]]
-        ax.plot(rps, rl, marker="o", ms=3, lw=1.5, color=col, label=SERIES_LABELS[which])
+        ax.plot(rps, rl, marker="o", ms=3, lw=1.5, color=col, label=SERIES_LABELS[which], ls=ls)
         ax.fill_between(rps, lo, hi, alpha=0.18, color=col, linewidth=0) # type: ignore
     ax.set_xscale("log")
     ax.set_xlabel("Return period (years)")
@@ -184,6 +188,15 @@ def plot_tails(tails_csv: Path, out_png: Path):
     }
     series = [s for s in SERIES_ORDER if s in data]
 
+    # Try to load error bands for GEN_ENS if available
+    bands = None
+    npz_path = tails_csv.parent / "ext_tails_ens_bands.npz"
+    if npz_path.exists():
+        try:
+            bands = np.load(npz_path)
+        except Exception as e:
+            logger.warning(f"[plot_tails] Could not load ensemble bands: {e}")
+
     _nice()
     fig, axs = plt.subplots(1, 3, figsize=(12.4, 3.8))
     # --- left: P95/P99 grouped bars ---
@@ -194,10 +207,20 @@ def plot_tails(tails_csv: Path, out_png: Path):
     for i, which in enumerate(series):
         offs = (i - (len(series)-1)/2) * w
         vals = [data[which]["P95"], data[which]["P99"]]
+        yerr = None
+        if which == "GEN_ENS" and bands is not None:
+            try:
+                yerr = [bands.get("P95_std", None), bands.get("P99_std", None)]
+                yerr = np.array([float(yerr[0]) if yerr[0] is not None else 0.0,
+                                 float(yerr[1]) if yerr[1] is not None else 0.0])
+            except Exception:
+                yerr = None        
         ax.bar(x + offs, vals, width=w,
                label=SERIES_LABELS[which],
                color=SERIES_COLORS[which],
-               edgecolor="black", linewidth=0.7, alpha=0.8)
+               edgecolor="black", linewidth=0.7, alpha=0.8,
+               yerr=yerr if yerr is not None else None,
+               capsize=2)
     ax.set_xticks(x); ax.set_xticklabels(cats)
     ax.set_title(f"Distribution tails ({basis_desc.split(':')[-1].strip()})")
     ax.set_ylabel("mm/day")
@@ -209,10 +232,19 @@ def plot_tails(tails_csv: Path, out_png: Path):
     x = np.arange(1)  # single category
     for i, which in enumerate(series):
         offs = (i - (len(series)-1)/2) * w
+        yerr = None
+        if which == "GEN_ENS" and bands is not None:
+            try:
+                y = float(bands.get("wet_freq_std", 0.0))
+                yerr = np.array([y])
+            except Exception:
+                yerr = None        
         ax.bar(x + offs, [data[which]["wet"]], width=w,
                label=SERIES_LABELS[which],
                color=SERIES_COLORS[which],
-               edgecolor="black", linewidth=0.7, alpha=0.8)
+               edgecolor="black", linewidth=0.7, alpha=0.8,
+               yerr=yerr if yerr is not None else None,
+               capsize=2)
     ax.set_xticks([0]); ax.set_xticklabels(["≥ threshold"])
     ax.set_ylim(0, 1)
     ax.set_title("Wet-day frequency")
@@ -223,10 +255,19 @@ def plot_tails(tails_csv: Path, out_png: Path):
     ax = axs[2]
     for i, which in enumerate(series):
         offs = (i - (len(series)-1)/2) * w
+        yerr = None
+        if which == "GEN_ENS" and bands is not None:
+            try:
+                y = float(bands.get("hit_std", 0.0))
+                yerr = np.array([y])
+            except Exception:
+                yerr = None        
         ax.bar([0 + offs], [data[which]["hit"]], width=w,
                label=SERIES_LABELS[which],
                color=SERIES_COLORS[which],
-               edgecolor="black", linewidth=0.7, alpha=0.8)
+               edgecolor="black", linewidth=0.7, alpha=0.8,
+               yerr=yerr if yerr is not None else None,
+               capsize=2)
     ax.set_xticks([0]); ax.set_xticklabels(["HR-wet days predicted wet"])
     ax.set_ylim(0, 1)
     ax.set_title("Wet-day hit rate")

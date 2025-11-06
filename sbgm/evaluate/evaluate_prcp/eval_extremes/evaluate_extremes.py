@@ -9,7 +9,8 @@ from sbgm.evaluate.evaluate_prcp.eval_extremes.metrics_extremes import (
     build_daily_series, seasonal_block_index, rxk_from_series,
     fit_gev_block_maxima_with_ci, fit_pot_gpd_with_ci,
     percentiles_and_wetfreq, SeriesBundle, pooled_pixel_percentiles_and_wetfreq,
-    pooled_wet_hit_rate
+    pooled_wet_hit_rate, build_daily_series_ensemble, pooled_pixel_percentiles_and_wetfreq_ens,
+    pooled_wet_hit_rate_ens, pooled_wet_hit_rate_ens_member_mean, percentiles_and_wetfreq_ens_member_mean
 )
 from sbgm.evaluate.evaluate_prcp.eval_extremes.plot_extremes import plot_extremes
 
@@ -65,6 +66,14 @@ def run_extremes(
         resolver, dates, mask_hw=resolver.load_mask(dates[0]),
         agg=agg_kind, include_lr=include_lr
     )
+    ens_sb = None
+    if bool(getattr(eval_cfg, "use_ensemble", False)):
+        ens_sb = build_daily_series_ensemble(
+            resolver, dates, mask_hw=resolver.load_mask(dates[0]),
+            agg=agg_kind,
+            n_members=getattr(eval_cfg, "ensemble_n_members", None),
+            seed=int(getattr(eval_cfg, "ensemble_member_seed", 1234)),
+        )    
     logger.info(f"[extremes] Built daily series for {len(sb.dates)} days; "
                 f"HR nans: {np.isnan(sb.hr).sum()}, GEN nans: {np.isnan(sb.gen).sum()}" +
                 (f", LR nans: {np.isnan(sb.lr).sum()}" if sb.lr is not None else "")
@@ -109,6 +118,31 @@ def run_extremes(
                 gev_rows.append(",".join(row))
             except Exception as e:
                 logger.warning(f"[extremes] GEV failed for {which} Rx{k}: {e}")
+    if ens_sb is not None:
+        for k in rxks:
+            # per-member block maxima -> fit -> aggregate return levels
+            rls = []
+            try:
+                for mi in range(ens_sb.gen_members.shape[0]):
+                    rx = rxk_from_series(ens_sb.gen_members[mi], k=k, block_id=block_id)
+                    fit = fit_gev_block_maxima_with_ci(
+                        rx, rps_years=gev_rps,
+                        blocks_per_year=(4.0 if block_id is not None else 1.0),
+                        n_boot=200,
+                    )
+                    rls.append(fit["rl"])  # [R]
+                rls = np.stack(rls, axis=0)  # [M,R]
+                rl_mean = np.nanmean(rls, axis=0)
+                rl_lo  = np.nanpercentile(rls, 10, axis=0)
+                rl_hi  = np.nanpercentile(rls, 90, axis=0)
+                nb = int(np.median([len(rxk_from_series(ens_sb.gen_members[mi], k=k, block_id=block_id)) for mi in range(ens_sb.gen_members.shape[0])]))
+                row = ["GEN_ENS", str(int(k)), str(nb)] + \
+                      [f"{v:.6f}" for v in rl_mean] + \
+                      [f"{v:.6f}" for v in rl_lo] + \
+                      [f"{v:.6f}" for v in rl_hi]
+                gev_rows.append(",".join(row))
+            except Exception as e:
+                logger.warning(f"[extremes] Ensemble GEV failed for Rx{k}: {e}")
     (tables / "ext_rxk_gev.csv").write_text("\n".join(gev_rows))
 
     # ------------------ POT/GPD ------------------
@@ -143,6 +177,35 @@ def run_extremes(
             pot_rows.append(",".join(row))
         except Exception as e:
             logger.warning(f"[extremes] POT failed for {which}: {e}")
+    if ens_sb is not None:
+        try:
+            # choose u per-member if quantile, else fixed as configured or HR-quantile
+            for_medians_u = []
+            rls = []
+            for mi in range(ens_sb.gen_members.shape[0]):
+                series = ens_sb.gen_members[mi]
+                if pot_thr_kind == "quantile":
+                    u = float(np.nanpercentile(series, pot_thr_val * 100.0))
+                elif pot_thr_kind == "hr_quantile":
+                    u = float(u_hr) if 'u_hr' in locals() and u_hr is not None else float(np.nanpercentile(sb.hr, pot_thr_val * 100.0))
+                else:
+                    u = float(pot_thr_val)
+                for_medians_u.append(u)
+                fit = fit_pot_gpd_with_ci(series, threshold=u, rps_years=pot_rps, days_per_year=days_per_year, n_boot=200)
+                rls.append(fit["rl"])  # [R]
+            rls = np.stack(rls, axis=0)
+            rl_mean = np.nanmean(rls, axis=0)
+            rl_lo  = np.nanpercentile(rls, 10, axis=0)
+            rl_hi  = np.nanpercentile(rls, 90, axis=0)
+            u_med = float(np.nanmedian(np.array(for_medians_u)))
+            row = ["GEN_ENS", f"{u_med:.6f}", "nan", "nan",  # xi,beta not defined for aggregated
+                   "nan", "nan"] + \
+                  [f"{v:.6f}" for v in rl_mean] + \
+                  [f"{v:.6f}" for v in rl_lo] + \
+                  [f"{v:.6f}" for v in rl_hi]
+            pot_rows.append(",".join(row))
+        except Exception as e:
+            logger.warning(f"[extremes] Ensemble POT failed: {e}")
     (tables / "ext_pot_gpd.csv").write_text("\n".join(pot_rows))
 
     tails_rows = ["which,P95,P99,wet_freq,wet_hit_rate,n_days"]
@@ -176,6 +239,43 @@ def run_extremes(
                 f"{wet_hit:.6f}",
                 str(int(pooled[which]['n_points']))
             ]))
+        if ens_sb is not None:
+            ens_pool = percentiles_and_wetfreq_ens_member_mean(
+                resolver, dates, mask_hw=resolver.load_mask(dates[0]),
+                wet_thr=wet_thr, p_list=(95.0, 99.0),
+                n_members=getattr(eval_cfg, "ensemble_n_members", None),
+                seed=int(getattr(eval_cfg, "ensemble_member_seed", 1234)),
+            )
+            ens_hit = pooled_wet_hit_rate_ens_member_mean(
+                resolver, dates, mask_hw=resolver.load_mask(dates[0]),
+                wet_thr=wet_thr,
+                n_members=getattr(eval_cfg, "ensemble_n_members", None),
+                seed=int(getattr(eval_cfg, "ensemble_member_seed", 1234)),
+            )
+            if ens_pool is not None and np.isfinite(ens_hit):
+                tails_rows.append(",".join([
+                    "GEN_ENS",
+                    f"{ens_pool['P95']:.6f}", f"{ens_pool['P99']:.6f}",
+                    f"{ens_pool['wet_freq']:.6f}", f"{ens_hit:.6f}", str(int(ens_pool['n_points']))
+                ]))
+                # Also compute std for hit-rate and persist stds for plotting error bars
+                from sbgm.evaluate.evaluate_prcp.eval_extremes.metrics_extremes import pooled_wet_hit_rate_ens_member_stats
+                hit_mean, hit_std = pooled_wet_hit_rate_ens_member_stats(
+                    resolver, dates, mask_hw=resolver.load_mask(dates[0]),
+                    wet_thr=wet_thr,
+                    n_members=getattr(eval_cfg, "ensemble_n_members", None),
+                    seed=int(getattr(eval_cfg, "ensemble_member_seed", 1234)),
+                )
+                try:
+                    np.savez_compressed(
+                        tables / "ext_tails_ens_bands.npz",
+                        P95_std=np.float64(ens_pool.get("P95_std", np.nan)),
+                        P99_std=np.float64(ens_pool.get("P99_std", np.nan)),
+                        wet_freq_std=np.float64(ens_pool.get("wet_freq_std", np.nan)),
+                        hit_std=np.float64(hit_std),
+                    )
+                except Exception:
+                    pass
     else:
         # current domain-series logic
         hr_is_wet = (series_list[0][1] > wet_thr).astype(bool)
@@ -215,4 +315,3 @@ def run_extremes(
         logger.warning(f"[extremes] Plotting failed: {e}")
 
     logger.info(f"[extremes] Done. Outputs at: {out_root}")
-    #   

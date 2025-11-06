@@ -10,6 +10,7 @@ from sbgm.evaluate.evaluate_prcp.eval_distributions.metrics_distributions import
     collect_pooled_distributions,
     collect_daily_histograms,
     compute_distributional_metrics,
+    collect_ensemble_histograms
 )
 from sbgm.evaluate.evaluate_prcp.eval_distributions.plot_distributions import (
     plot_distributional,
@@ -105,8 +106,42 @@ def run_distributional(
     except Exception as e:
         logger.warning(f"[eval_distributional] Could not build daily histograms: {e}")
 
+    # Ensemble-native histograms (optional)
+    ens_out: Dict[str, Any] | None = None
+    try:
+        if bool(getattr(eval_cfg, "use_ensemble", False)):
+            mode = str(getattr(eval_cfg, "dist_ensemble_pool_mode", "pool"))
+            ens_out = collect_ensemble_histograms(
+                resolver=resolver,
+                dates=dates,
+                bins=bins,
+                mode=mode,
+                n_members=getattr(eval_cfg, "ensemble_n_members", None),
+                seed=int(getattr(eval_cfg, "ensemble_member_seed", 1234)),
+            )
+            if ens_out:
+                if mode == "pool" and "counts_pool" in ens_out:
+                    p = tables_dir / "dist_gen_ens_pool.csv"
+                    with open(p, "w") as f:
+                        f.write("bin_idx,count\n")
+                        for i, c in enumerate(ens_out["counts_pool" ].astype(int)):
+                            f.write(f"{i},{int(c)}\n")
+                if mode == "member_mean" and "pdf_mean" in ens_out:
+                    p = tables_dir / "dist_gen_ens_mean.csv"
+                    with open(p, "w") as f:
+                        f.write("bin_idx,pdf\n")
+                        for i, v in enumerate(ens_out["pdf_mean" ].astype(float)):
+                            f.write(f"{i},{float(v)}\n")
+                # Save extra arrays for optional plotting of spread
+                np.savez_compressed(
+                    tables_dir / "dist_member_histograms.npz",
+                    **{k: v for k, v in ens_out.items() if k in ("bins","counts_members","n_members","pdf_mean","pdf_q10","pdf_q50","pdf_q90","mode")}
+                )
+    except Exception as e:
+        logger.warning(f"[eval_distributional] Ensemble histogram build failed: {e}")
+
     # metrics (vs HR)
-    metrics_rows = compute_distributional_metrics(pooled)
+    metrics_rows = compute_distributional_metrics(pooled, ensembles=ens_out)
     with open(tables_dir / "dist_metrics.csv", "w") as f:
         f.write("ref,comp,wasserstein,ks_stat,ks_p,kl_hr_to_x\n")
         for r in metrics_rows:

@@ -31,7 +31,9 @@ import logging
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _savefig, _nice, _to_date_safe, _season_from_month
+from sbgm.evaluate.evaluate_prcp.plot_utils import (
+    _ensure_dir, _savefig, _nice, _to_date_safe, _season_from_month, overlay_outline, get_dk_lsm_outline
+)
 from sbgm.variable_utils import get_cmap_for_variable, get_color_for_model
 
 logger = logging.getLogger(__name__)
@@ -549,166 +551,117 @@ def plot_crps_examples(
         eval_root: str | Path,
         *,
         gen_root: Optional[str | Path] = None,
-        n_examples: int = 6,  # 3 best + 3 worst
+        n_examples: int = 6,  # selection done when NPZ is created
 ):
     eval_root = Path(eval_root)
     tables_dir = eval_root / "tables"
     figs_dir = _ensure_dir(eval_root / "figures")
 
-    crps_path = tables_dir / "prob_crps_daily.csv"
-    if not crps_path.exists():
+    npz_path = tables_dir / "prob_crps_examples_members.npz"
+    if not npz_path.exists():
         return
 
-    lines = crps_path.read_text().strip().splitlines()
-    if len(lines) <= 1:
+    data = np.load(npz_path, allow_pickle=True)
+    dates = [str(s) for s in data["dates"]]
+    T = len(dates)
+    if T == 0:
         return
 
-    rows = []
-    for ln in lines[1:]:
-        s = ln.split(",")
-        if len(s) < 2:
-            continue
-        date_s = s[0].strip()
-        try:
-            crps_v = float(s[1])
-        except Exception:
-            continue
-        rows.append((date_s, crps_v))
-
-    if not rows:
+    # Count saved members by probing keys
+    def members_saved_for(d: str) -> int:
+        j = 0
+        while f"MEM_{j}_{d}" in data:
+            j += 1
+        return j
+    n_mem = max(members_saved_for(d) for d in dates)
+    if n_mem == 0:
         return
 
-    # pick 3 best + 3 worst, deprioritizing zero-CRPS days (no-rain)
-    rows_sorted = sorted(rows, key=lambda x: x[1])
-    eps = 0.01
-    nonzero_rows = [r for r in rows_sorted if r[1] > eps]
-    zero_rows = [r for r in rows_sorted if r[1] <= eps]
-    n_half = max(1, n_examples // 2)
-    if len(nonzero_rows) >= n_half:
-        best = nonzero_rows[:n_half]
-    else:
-        # Take all nonzero, fill up with zero-CRPS days
-        best = nonzero_rows + zero_rows[:(n_half - len(nonzero_rows))]
-    worst = rows_sorted[-n_half:]
-    selected = best + worst
+    # Will there be a PMM row?
+    has_pmm = any((f"PMM_{d}" in data) for d in dates)
+    nrows = 1 + n_mem + (1 if has_pmm else 0)   # HR + members + optional PMM
+    ncols = T
 
-    # --------------------------
-    # get generation root
-    # --------------------------
-    if gen_root is not None:
-        gen_root = Path(gen_root)
-        if not gen_root.exists():
-            logger.warning(f"[plot_crps_examples] Provided gen_root={gen_root} does not exist - falling back to inference.")
-            gen_root = None
-
-    if gen_root is None:
-        # automatic inference as fallback
-        model_name = eval_root.parents[2].name  # folder right above 'prcp'
-        for p in eval_root.parents:
-            if p.name == "generated_samples":
-                cand = p / "generation" / model_name
-                if cand.exists():
-                    gen_root = cand
-                    break
-                cand2 = p / "generation"
-                if cand2.exists():
-                    gen_root = cand2
-                    break
-
-    # --------------------------
-    # if still None -> fallback bar plot
-    # --------------------------
-    if gen_root is None or not gen_root.exists():
-        logger.info(f"[plot_crps_examples] Could not determine generation root from {eval_root}; falling back to bar plot.")
-        _nice()
-        fig, ax = plt.subplots()
-        labs = [d for d, _ in selected]
-        vals = [v for _, v in selected]
-        x = np.arange(len(vals))
-        ax.bar(x, vals)
-        ax.set_xticks(x, labs, rotation=30, ha="right")
-        ax.set_ylabel("CRPS")
-        ax.set_title("CRPS - selected days")
-        _savefig(fig, figs_dir / "prob_crps_examples.png", dpi=SET_DPI)
-        return
-
-    # --------------------------
-    # helpers to load HR / PMM
-    # --------------------------
-    def _load_np(p: Path, keys: list[str]):
-        if not p.exists():
-            return None
-        d = np.load(p, allow_pickle=True)
-        for k in keys:
-            if k in d:
-                arr = np.asarray(d[k])
-                # squeeze singleton leading dims
-                while arr.ndim > 2 and 1 in arr.shape:
-                    arr = np.squeeze(arr)
-                return arr
-        return None
-
-    panels = []
-    # use project-wide colormap for precipitation
+    # Mask-aware cmap
     cmap = get_cmap_for_variable("prcp")
-    for date_s, crps_v in selected:
-        hr = _load_np(gen_root / "lr_hr" / f"{date_s}.npz",
-                      ["hr", "hr_phys", "target", "truth", "obs", "y"])
-        if hr is None:
-            hr = _load_np(gen_root / "lr_hr_phys" / f"{date_s}.npz",
-                          ["hr", "hr_phys", "target", "truth", "obs", "y"])
-        pmm = _load_np(gen_root / "pmm_phys" / f"{date_s}.npz",
-                       ["pmm", "x", "y_pred"])
-        if pmm is None:
-            pmm = _load_np(gen_root / "pmm" / f"{date_s}.npz",
-                           ["pmm", "x", "y_pred"])
-        panels.append((date_s, crps_v, hr, pmm))
+    # try:
+    #     cmap = cmap.copy() 
+    #     cmap.set_bad("#c2c2c2")
+    #     cmap.set_under("#c2c2c2")
+    # except Exception:
+    #     pass
 
-    _nice()
-    ncols = len(panels)
-    # IMPORTANT: no constrained_layout here, since _savefig() does tight_layout()
-    fig, axs = plt.subplots(2, ncols, figsize=(3.2 * ncols, 6.0))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2 * ncols, 2.6 * nrows))
+    if nrows == 1: axes = np.array([axes])
+    if ncols == 1: axes = axes[:, None]
+    dk_mask = get_dk_lsm_outline()
+    # Flip
+    if dk_mask is not None:
+        dk_mask = np.flipud(dk_mask)
 
-    last_im = None
-    for j, (date_s, crps_v, hr, pmm) in enumerate(panels):
-        ax_hr = axs[0, j] if ncols > 1 else axs[0]
-        ax_pm = axs[1, j] if ncols > 1 else axs[1]
+    for t, d in enumerate(dates):
+        hr = data[f"HR_{d}"]
 
-        # per-day color range
-        this_vals = []
+        # Stack values for dynamic vmax: HR + all members (+ PMM if present)
+        stacks = [hr]
+        for j in range(n_mem):
+            k_mem = f"MEM_{j}_{d}"
+            if k_mem in data:
+                stacks.append(data[k_mem])
+        if has_pmm and (f"PMM_{d}" in data):
+            stacks.append(data[f"PMM_{d}"])
 
-        if hr is not None:
-            this_vals.append(hr.ravel())
-        if pmm is not None:
-            this_vals.append(pmm.ravel())
-        if this_vals:
-            this_all = np.concatenate(this_vals)
-            vmax_j = float(np.percentile(this_all, 99.5))
-            if vmax_j < 1.0:
-                vmax_j = 1.0
-        else:
-            vmax_j = 1.0
-        vmin_j = 0.0
+        vals = np.concatenate([a[~np.isnan(a)].ravel() for a in stacks if a is not None]) if stacks else np.array([1.0])
+        vmax = float(np.percentile(vals, 99.5)) if vals.size else 1.0
+        vmax = max(vmax, 1.0)
+        vmin = 0.0
 
-        hr_or_zeros = hr if hr is not None else np.zeros((2, 2))
-        pmm_or_zeros = pmm if pmm is not None else np.zeros((2, 2))
-
-        im = ax_hr.imshow(hr_or_zeros, origin="lower", vmin=vmin_j, vmax=vmax_j, cmap=cmap)
-        ax_hr.set_title(f"{date_s}\nCRPS={crps_v:.3f}")
+        # --- Row 0: HR with bold CRPS in the title
+        ax_hr = axes[0, t]
+        im = ax_hr.imshow(hr, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
+        overlay_outline(ax_hr, dk_mask, color="black", linewidth=0.6)        
+        crps_val = data.get(f"CRPS_ENS_{d}", np.nan)
+        ax_hr.set_title(f"{d}\nCRPS={crps_val:.3f}", fontweight="bold")
         ax_hr.set_xticks([]); ax_hr.set_yticks([])
-
-        ax_pm.imshow(pmm_or_zeros, origin="lower", vmin=vmin_j, vmax=vmax_j, cmap=cmap)
-        ax_pm.set_xticks([]); ax_pm.set_yticks([])
-
-        if j == 0:
+        if t == 0:
             ax_hr.set_ylabel("HR")
-            ax_pm.set_ylabel("PMM")
 
-        # Individual colorbar for each column (day pair), attached to PMM axis
-        divider = make_axes_locatable(ax_pm)
+        # Attach a slim colorbar to the HR axis (per column)
+        divider = make_axes_locatable(ax_hr)
         cax = divider.append_axes("right", size="4%", pad=0.05)
         fig.colorbar(im, cax=cax, label="mm/day")
 
+        # --- Member rows with per-member MAE
+        for j in range(n_mem):
+            ax = axes[1 + j, t]
+            kf = f"MEM_{j}_{d}"
+            if kf in data:
+                mem = data[kf]
+                ax.imshow(mem, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
+                overlay_outline(ax, dk_mask, color="black", linewidth=0.6)                
+                mae = data.get(f"MAE_MEM_{j}_{d}", np.nan)
+                ax.set_title(f"m{j}  |  MAE={mae:.3f}")
+            else:
+                ax.text(0.5, 0.5, "—", ha="center", va="center")
+            ax.set_xticks([]); ax.set_yticks([])
+            if t == 0:
+                ax.set_ylabel("Ens member")
+
+        # --- Last row: PMM (if present)
+        if has_pmm:
+            ax_pmm = axes[-1, t]
+            if f"PMM_{d}" in data:
+                pmm = data[f"PMM_{d}"]
+                ax_pmm.imshow(pmm, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
+                overlay_outline(ax_pmm, dk_mask, color="black", linewidth=0.6)                
+                ax_pmm.set_title("PMM")
+            else:
+                ax_pmm.text(0.5, 0.5, "—", ha="center", va="center")
+            ax_pmm.set_xticks([]); ax_pmm.set_yticks([])
+            if t == 0:
+                ax_pmm.set_ylabel("PMM")
+
+    fig.suptitle("CRPS examples: HR (title shows ensemble CRPS), ensemble members (titles show MAE), PMM (bottom row)", y=0.995)
     _savefig(fig, figs_dir / "prob_crps_examples.png", dpi=SET_DPI)
 
 
@@ -830,6 +783,10 @@ def plot_crps_spatial(eval_root: str | Path):
     cmap = get_cmap_for_variable("prcp")
     fig, ax = plt.subplots()
     im = ax.imshow(crps_map, origin="lower", cmap=cmap)
+    dk_mask = get_dk_lsm_outline()
+    if dk_mask is not None:
+        dk_mask = np.flipud(dk_mask)
+    overlay_outline(ax, dk_mask, color="black", linewidth=0.6)    
     ax.set_title(f"Mean CRPS (per pixel, over time)\nOverall mean: {mean_crps:.2f}")
     ax.set_xticks([]); ax.set_yticks([])
     fig.colorbar(im, ax=ax, label="CRPS")

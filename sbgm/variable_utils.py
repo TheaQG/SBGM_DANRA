@@ -15,13 +15,16 @@ from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 
 # --- 1) Sequential colormap: white → teal → slategray ---
 precip_colors = [
-    "#ffffff",  # white
-    "#ccece6",  # very light aqua
+    "#ffffff",  # white (0 mm baseline, not underflow)
+    "#c9f3eb",  # very light aqua
     "#66c2a4",  # medium teal
     "#2b8c85",  # dark teal
     "#264653"   # slate gray-blue (muted)
 ]
 precip_cmap = LinearSegmentedColormap.from_list("precip_white_tealgray", precip_colors, N=256)
+
+# Set default underflow color for near-zero/negative rainfall
+precip_cmap.set_under("#c2c2c2")  # gray for dry pixels (< 0.01 mm)
 
 # --- 2) Diverging colormap: brown → white → teal-gray ---
 bias_colors = [
@@ -266,9 +269,9 @@ def get_color_for_model(model_str: str):
     if model_str_norm in ["hr", "danra"]:
         return "#4C4949"
     elif model_str_norm in ["pmm"]:
-        return "#1b9e77"
+        return "#124737"
     elif model_str_norm in ["lr", "era5"]:
-        return "#d95f02"
+        return "#bb692a"
     elif model_str_norm in ["ens", "ensemble", "gen", "generated", "model"]:
         return "#1b9e77"
     else:

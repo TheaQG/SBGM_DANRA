@@ -11,6 +11,7 @@ from sbgm.evaluate.evaluate_prcp.eval_scale.metrics_scale import (
     compare_psd_triplet,
     compute_fss_at_scales,
     compute_iss_at_scales,
+    align_psd_on_k,
 )
 
 from sbgm.evaluate.evaluate_prcp.eval_scale.plot_scale import (
@@ -74,12 +75,24 @@ def run_scale(
     low_k_max: float = float(getattr(eval_cfg, "low_k_max", 1.0 / 200.0))
     high_k_min: float = float(getattr(eval_cfg, "high_k_min", 1.0 / 20.0))
 
+    # --- ensemble switches (optional) ---
+    use_ensemble: bool = bool(getattr(eval_cfg, "use_ensemble", True))
+    ensemble_n_members = getattr(eval_cfg, "ensemble_n_members", None)
+    ensemble_member_seed = int(getattr(eval_cfg, "ensemble_member_seed", 1234))
+
+    logger.info(f"[eval_scale] use_ensemble={use_ensemble}, n_members={ensemble_n_members}, seed={ensemble_member_seed}")
+
     dates: List[str] = list(resolver.list_dates())
     if not dates:
         logger.warning("[eval_scale] No dates found from resolver – nothing to do.")
         return
 
     logger.info(f"[eval_scale] Running on {len(dates)} dates.")
+
+    # Ensemble availability counters
+    ens_dates_ok = 0
+    ens_dates_badshape = 0
+    ens_dates_missing = 0
 
     # ================================================================================
     # 2. Accumulators 
@@ -104,6 +117,19 @@ def run_scale(
     iss_lines: List[str] = [",".join(iss_header)]
     iss_store: Dict[tuple[float, float], List[float]] = {}
 
+    # Ensemble PSD accumulators (store per-day mean over members, then aggregate over days)
+    psd_gen_ens_mean_list: List[np.ndarray] = []
+    psd_gen_ens_std_list:  List[np.ndarray] = []
+    psd_gen_ens_have = False
+
+    # Ensemble FSS/ISS daily rows (like existing *_lines but with _ENS)
+    fss_ens_lines: List[str] = [",".join(fss_header)]  # same header: date,thr_mm,fss_5km,...
+    iss_ens_lines: List[str] = [",".join(iss_header)]
+
+    # Ensemble summaries (per (thr, scale) collect member means per day → then grand mean/std)
+    fss_ens_store: Dict[tuple[float, float], List[float]] = {}
+    iss_ens_store: Dict[tuple[float, float], List[float]] = {}
+
     # ================================================================================
     # 3. Loop over dates
     # ================================================================================
@@ -124,6 +150,63 @@ def run_scale(
             gen = torch.from_numpy(np.asarray(gen))
         if mask is not None and not torch.is_tensor(mask):
             mask = torch.from_numpy(np.asarray(mask))
+        # determine HR spatial shape early so ensemble validation can use it
+        if hr.dim() < 2:
+            logger.warning(f"[eval_scale] HR for {d} has shape {tuple(hr.shape)} – expected at least 2D; skipping.")
+            continue
+        H, W = int(hr.shape[-2]), int(hr.shape[-1])
+
+        # Optional: load ensemble members on HR grid
+        gen_members = None
+        if use_ensemble:
+            # unified helper to try multiple resolver APIs
+            def _try_load(name: str):
+                fn = getattr(resolver, name, None)
+                if not callable(fn):
+                    return None
+                # try with (date, n, seed)
+                try:
+                    return fn(d, n=ensemble_n_members, seed=ensemble_member_seed)
+                except TypeError:
+                    pass
+                # try with (date, n_members, seed)
+                try:
+                    return fn(d, n_members=ensemble_n_members, seed=ensemble_member_seed)
+                except TypeError:
+                    pass
+                # try with (date) only
+                try:
+                    return fn(d)
+                except Exception:
+                    return None
+
+            for name in ("load_ens", "load_gen_members", "load_members", "load_ensemble"):
+                gen_members = _try_load(name)
+                if gen_members is not None:
+                    break
+
+        if gen_members is not None:
+            # Ensure gen_members is a torch tensor of float type (handles np arrays, lists, or tensors)
+            gen_members = torch.as_tensor(gen_members, dtype=torch.float32)
+            # common shapes: [M,H,W], [M,1,H,W]; squeeze channel if present
+            if gen_members.dim() == 4 and gen_members.shape[1] == 1:
+                gen_members = gen_members.squeeze(1)
+            # optional subsample if a larger set returned but user asked for n
+            if ensemble_n_members is not None and gen_members.shape[0] > int(ensemble_n_members):
+                torch.manual_seed(ensemble_member_seed)
+                idx = torch.randperm(gen_members.shape[0])[: int(ensemble_n_members)]
+                gen_members = gen_members[idx]
+                
+            if gen_members.dim() != 3 or gen_members.shape[1:] != (H, W):
+                ens_dates_badshape += 1
+                logger.warning(
+                    f"[eval_scale] Ensemble for {d} has shape {tuple(gen_members.shape)}, expected [M,H,W]. Skipping ensemble for this date.")
+                gen_members = None
+            else:
+                ens_dates_ok += 1
+        else:
+            if use_ensemble:
+                ens_dates_missing += 1
 
         hr = hr.float()
         gen = gen.float()
@@ -254,6 +337,27 @@ def run_scale(
             ])
         )
 
+        # ---------------- Ensemble PSD on HR spacing ----------------
+        if gen_members is not None:
+            M = int(gen_members.shape[0])
+            psd_m_list = []
+            for mi in range(M):
+                psd_m = psd_from_2d(
+                    gen_members[mi],
+                    dx_km=hr_dx_km,
+                    mask_2d=mask,
+                    window="hann",
+                    detrend="none",
+                    normalize="none",
+                )
+                # align member PSD to HR k-grid used this date
+                Pm_on_hr = align_psd_on_k(psd_m, k_this)
+                psd_m_list.append(Pm_on_hr)
+            psd_m_arr = np.stack(psd_m_list, axis=0)  # [M,K]
+            psd_gen_ens_have = True
+            psd_gen_ens_mean_list.append(psd_m_arr.mean(axis=0))
+            psd_gen_ens_std_list.append(psd_m_arr.std(axis=0, ddof=1) if M > 1 else np.zeros_like(psd_m_arr[0]))
+
         # ================================================================================
         # 3b. FSS computation: GEN vs HR 
         # ================================================================================
@@ -296,6 +400,48 @@ def run_scale(
             for s in iss_scales_km:
                 key = (float(thr), float(s))
                 iss_store.setdefault(key, []).append(float(iss_dict[f"{int(s)}km"]))
+
+        # ---------------- Ensemble FSS/ISS ----------------
+        if gen_members is not None:
+            M = int(gen_members.shape[0])
+            # Compute per-member FSS/ISS, then record the *member-mean* per scale per date
+            for thr in fss_thresholds:
+                vals_per_scale: Dict[float, List[float]] = {float(s): [] for s in fss_scales_km}
+                for mi in range(M):
+                    gb = gen_members[mi].view(1,1,H,W)
+                    fss_m = compute_fss_at_scales(
+                        gen_bt=gb, hr_bt=hr_b, mask=mask_b,
+                        grid_km_per_px=hr_dx_km,
+                        fss_km=list(fss_scales_km),
+                        thr_mm=float(thr),
+                    )
+                    for s in fss_scales_km:
+                        vals_per_scale[float(s)].append(float(fss_m[f"{int(s)}km"]))
+                # member-mean row (same shape as GEN row)
+                line_vals = [d, f"{float(thr):.2f}"] + [f"{float(np.mean(vals_per_scale[float(s)])):.6f}" for s in fss_scales_km]
+                fss_ens_lines.append(",".join(line_vals))
+                # store for summary
+                for s in fss_scales_km:
+                    key = (float(thr), float(s))
+                    fss_ens_store.setdefault(key, []).append(float(np.mean(vals_per_scale[float(s)])))
+
+            for thr in iss_thresholds:
+                vals_per_scale: Dict[float, List[float]] = {float(s): [] for s in iss_scales_km}
+                for mi in range(M):
+                    gb = gen_members[mi].view(1,1,H,W)
+                    iss_m = compute_iss_at_scales(
+                        gen_bt=gb, hr_bt=hr_b, mask=mask_b,
+                        grid_km_per_px=hr_dx_km,
+                        iss_scales_km=list(iss_scales_km),
+                        thr_mm=float(thr),
+                    )
+                    for s in iss_scales_km:
+                        vals_per_scale[float(s)].append(float(iss_m[f"{int(s)}km"]))
+                line_vals = [d, f"{float(thr):.2f}"] + [f"{float(np.mean(vals_per_scale[float(s)])):.6f}" for s in iss_scales_km]
+                iss_ens_lines.append(",".join(line_vals))
+                for s in iss_scales_km:
+                    key = (float(thr), float(s))
+                    iss_ens_store.setdefault(key, []).append(float(np.mean(vals_per_scale[float(s)])))
 
         # ===============================================================================
         # 3c. Optional: LR baseline FSS 
@@ -374,9 +520,64 @@ def run_scale(
             dates=np.array(dates, dtype="U"),
             lr_nyquist=np.array(0.0 if lr_nyquist is None else lr_nyquist),
         )
+    if use_ensemble:
+        logger.info(
+            f"[eval_scale] Ensemble availability: ok={ens_dates_ok}, badshape={ens_dates_badshape}, missing={ens_dates_missing} (out of {len(dates)} dates)")
+        if ens_dates_ok == 0:
+            logger.warning("[eval_scale] No ensemble data were processed -> ensemble curves/tables will be absent.")
+    # ---------------- Ensemble PSD curves (mean over members per day, then over days) ----------------
+    if k_ref is not None and psd_gen_ens_have and psd_gen_ens_mean_list:
+        psd_gen_ens_mean = np.stack(psd_gen_ens_mean_list, axis=0)  # [N_days,K]
+        psd_gen_ens_std  = np.stack(psd_gen_ens_std_list,  axis=0)  # [N_days,K]
+        N_days_ens = psd_gen_ens_mean.shape[0]
+
+        # mean over days; SE for CI across days (member spread already inside std term but we just show day-to-day SE)
+        gen_ens_mean = psd_gen_ens_mean.mean(axis=0)
+        if N_days_ens > 1:
+            gen_ens_std_days = psd_gen_ens_mean.std(axis=0, ddof=1)
+            se = gen_ens_std_days / np.sqrt(N_days_ens)
+            gen_ens_ci_lo = gen_ens_mean - 1.96 * se
+            gen_ens_ci_hi = gen_ens_mean + 1.96 * se
+        else:
+            gen_ens_std_days = np.zeros_like(gen_ens_mean)
+            gen_ens_ci_lo = gen_ens_mean.copy()
+            gen_ens_ci_hi = gen_ens_mean.copy()
+
+        # append to the same NPZ (new keys); re-save is fine here
+        with np.load(tables_dir / "scale_psd_curves.npz") as _npz_existing:
+            existing = {k: _npz_existing[k] for k in _npz_existing.files}
+        np.savez_compressed(
+            tables_dir / "scale_psd_curves.npz",
+            **existing,
+            psd_gen_ens_mean=gen_ens_mean,   # [K]
+            psd_gen_ens_ci_lo=gen_ens_ci_lo, # [K]
+            psd_gen_ens_ci_hi=gen_ens_ci_hi, # [K]
+        )
 
     (tables_dir / "scale_fss_daily.csv").write_text("\n".join(fss_lines))
     (tables_dir / "scale_iss_daily.csv").write_text("\n".join(iss_lines))
+    # Ensemble daily tables
+    (tables_dir / "scale_fss_ens_daily.csv").write_text("\n".join(fss_ens_lines))
+    (tables_dir / "scale_iss_ens_daily.csv").write_text("\n".join(iss_ens_lines))
+
+    # Ensemble summaries (mean over days of per-day member means)
+    fss_ens_summ = [",".join(["thr_mm"] + [f"fss_{int(s)}km" for s in fss_scales_km])]
+    for thr in fss_thresholds:
+        row = [f"{float(thr):.2f}"]
+        for s in fss_scales_km:
+            vals = fss_ens_store.get((float(thr), float(s)), [])
+            row.append(f"{float(np.mean(vals)):.6f}" if vals else "")
+        fss_ens_summ.append(",".join(row))
+    (tables_dir / "scale_fss_ens_summary.csv").write_text("\n".join(fss_ens_summ))
+
+    iss_ens_summ = [",".join(["thr_mm"] + [f"iss_{int(s)}km" for s in iss_scales_km])]
+    for thr in iss_thresholds:
+        row = [f"{float(thr):.2f}"]
+        for s in iss_scales_km:
+            vals = iss_ens_store.get((float(thr), float(s)), [])
+            row.append(f"{float(np.mean(vals)):.6f}" if vals else "")
+        iss_ens_summ.append(",".join(row))
+    (tables_dir / "scale_iss_ens_summary.csv").write_text("\n".join(iss_ens_summ))
     
     # FSS summary
     summ_lines = [",".join(["thr_mm"] + [f"fss_{int(s)}km" for s in fss_scales_km])]
@@ -403,6 +604,11 @@ def run_scale(
         iss_summ_lines.append(",".join(row))
     (tables_dir / "scale_iss_summary.csv").write_text("\n".join(iss_summ_lines))
 
+    if use_ensemble:
+        logger.info(
+            f"[eval_scale] Ensemble availability: ok={ens_dates_ok}, badshape={ens_dates_badshape}, missing={ens_dates_missing} (out of {len(dates)} dates)")
+        if ens_dates_ok == 0:
+            logger.warning("[eval_scale] No ensemble data were processed -> PSD/FSS/ISS ensemble plots will not appear.")
 
     logger.info(f"[eval_scale] Done. Outputs at: {out_root}")
 

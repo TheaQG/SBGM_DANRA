@@ -207,6 +207,9 @@ def plot_dates_montages(
     lr_cmap = base_cmap
 
     dk_outline = get_dk_lsm_outline()
+    # flip upside down for plotting
+    if dk_outline is not None:
+        dk_outline = np.flipud(dk_outline)
 
     # Collect rows and learn max #members to size the grid
     rows: list[list[tuple[str, np.ndarray]]] = []
