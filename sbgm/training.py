@@ -20,7 +20,7 @@ from typing import Optional
 from torch.cuda.amp import autocast, GradScaler
 
 from sbgm.heads.rain_gate import RainGate
-from sbgm.special_transforms import build_back_transforms_from_stats, remap_between_scalings_from_stats, lr_baseline_to_hr_zspace
+from sbgm.special_transforms import build_back_transforms_from_stats, lr_baseline_to_hr_zspace
 from sbgm.utils import get_model_string, extract_samples
 from sbgm.plotting_utils import (
     get_cmaps,
@@ -1264,6 +1264,7 @@ class TrainingPipeline_general:
                                             S_noise=float(edm_cfg.get('S_noise', 1.0)),
                                             lr_ups=lr_ups_baseline,
                                             cfg_guidance=guidance_cfg if guidance_cfg.get('enabled', False) else None,
+                                            sigma_star=float(edm_cfg.get('sigma_star', 1.0)),
                 )
             elif sampler is not None:
                 generated_samples = sampler(

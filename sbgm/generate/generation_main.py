@@ -6,7 +6,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from sbgm.training_utils import get_model, get_final_gen_dataloader
-from sbgm.evaluate_sbgm.generation import GenerationRunner, GenerationConfig
+from sbgm.generate.generation import GenerationRunner, GenerationConfig
 from sbgm.utils import get_model_string
 
 logger = logging.getLogger(__name__)

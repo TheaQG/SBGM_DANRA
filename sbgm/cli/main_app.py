@@ -46,7 +46,17 @@ def main():
     logger = logging.getLogger(__name__)
     parser = argparse.ArgumentParser(description="SBGM full pipeline launcher")
     parser.add_argument("--config_path", required=True, help="Path to the yaml config")
-    parser.add_argument("--mode", choices=["train", "generate", "evaluate", "full_pipeline", "data_splits", "quicklook", "baseline"], default="full_pipeline")
+    
+    parser.add_argument(
+        "--mode",
+        choices=[
+            "train", "generate", "evaluate", "full_pipeline",
+            "data_splits", "quicklook", "baseline",
+            "sigma_star_generation", "sigma_star_evaluation"
+            ],
+            default="full_pipeline"
+            )
+    
     parser.add_argument("--baseline_type", choices=["bilinear", "qm", "unet_sr"], default="bilinear", help="If mode is 'baseline', which baseline to run.")
     parser.add_argument("--baseline_split", choices=["train", "valid", "test"], default="test", help="If mode is 'baseline', which split to use.")
     parser.add_argument("--skip_train", action="store_true")
@@ -57,7 +67,17 @@ def main():
     args = parser.parse_args()
 
 
+    from omegaconf import DictConfig, ListConfig
+    from typing import cast
+
     cfg = load_config(args.config_path)
+    # Ensure cfg is a DictConfig (some loaders may return a ListConfig); accept a single-element ListConfig wrapping a DictConfig
+    if isinstance(cfg, ListConfig):
+        if len(cfg) == 1 and isinstance(cfg[0], DictConfig):
+            cfg = cfg[0]
+        else:
+            raise RuntimeError("Expected a DictConfig or a single-element ListConfig containing a DictConfig for cfg.")
+    cfg = cast(DictConfig, cfg)
 
     # # Apply baseline CLI overrides if provided
     # if args.baseline_type is not None:
@@ -100,7 +120,14 @@ def main():
     logger.info("Cfg hash        : %s", h)
 
     # Imports kept here to avoid circular imports
-    from sbgm.cli import launch_sbgm, launch_generation, launch_evaluation, launch_quicklook
+    from sbgm.cli import (
+        launch_sbgm,
+        launch_generation,
+        launch_evaluation,
+        launch_quicklook,
+        launch_generation_sigma_star,
+        launch_evaluation_sigma_star,
+        )
     from data_analysis_pipeline.cli import launch_split_creation
 
     # === Dispatch with banners ===
@@ -174,7 +201,17 @@ def main():
         run_baseline_eval(cfg)
         log_banner(f"BASELINE EVALUATION DONE")
 
-        
+    elif args.mode == "sigma_star_generation":
+        log_banner("SIGMA_STAR GENERATION START")
+        launch_generation_sigma_star.run(cfg)
+        log_banner("SIGMA_STAR GENERATION DONE")
+
+    elif args.mode == "sigma_star_evaluation":
+        log_banner("SIGMA_STAR EVALUATION START")
+        # use args.make_plots to also toggle making qualitative example montages
+        launch_evaluation_sigma_star.run(cfg, make_plots=make_plots, make_examples=args.make_plots)
+        log_banner("SIGMA_STAR EVALUATION DONE")
+
     logger.info("=== SBGM_SD MAIN APP DONE ===")
 
 

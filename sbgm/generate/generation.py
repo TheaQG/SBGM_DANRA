@@ -370,6 +370,7 @@ class GenerationRunner:
                     S_noise=float(edm_cfg.get('S_noise', self.gen_config.S_noise)),
                     lr_ups=lr_ups_M,
                     cfg_guidance=guidance_cfg if guidance_cfg.get('enabled', False) else None,
+                    sigma_star=float(edm_cfg.get('sigma_star', 1.0)),
                 )
             else:
                 raise NotImplementedError("Currently only EDM sampler is supported in generation.")
