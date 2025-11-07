@@ -1,7 +1,7 @@
 """
 Main entrypoint for σ*-dependent evaluation.
 """
-
+import json
 import logging
 from pathlib import Path
 from sbgm.evaluate.evaluate_prcp.eval_sigma_star.metrics_sigma_control import evaluate_sigma_control
@@ -20,6 +20,24 @@ def run(cfg, make_plots=True):
     logger.info(f"[SigmaControl] Evaluating σ* grid {sigma_grid} for {model_name}")
 
     metrics_paths = evaluate_sigma_control(cfg, sigma_grid, base_gen, out_dir)
+
+    # Write sigma-control metadata for plotting/context
+    try:
+        scfg = getattr(getattr(cfg, "full_gen_eval", {}), "sigma_control", {}) if hasattr(cfg, "full_gen_eval") else {}
+        meta = {
+            "sigma_star_grid": [float(s) for s in sigma_grid],
+            "ramp": {
+                "mode": str(getattr(scfg, "sigma_star_mode", getattr(getattr(cfg, "edm", {}), "sigma_star_mode", "global"))),
+                "start_frac": float(getattr(scfg, "ramp_start_frac", getattr(getattr(cfg, "edm", {}), "ramp_start_frac", 0.60))),
+                "end_frac": float(getattr(scfg, "ramp_end_frac", getattr(getattr(cfg, "edm", {}), "ramp_end_frac", 0.85))),
+                "start_sigma": getattr(scfg, "ramp_start_sigma", getattr(getattr(cfg, "edm", {}), "ramp_start_sigma", None)),
+                "end_sigma": getattr(scfg, "ramp_end_sigma", getattr(getattr(cfg, "edm", {}), "ramp_end_sigma", None)),
+            }
+        }
+        with open(Path(out_dir) / "sigma_control_meta.json", "w") as f:
+            json.dump(meta, f)
+    except Exception as e:
+        logger.warning(f"[SigmaControl] Failed to write sigma_control_meta.json: {e}")
 
     figures_dir = Path(out_dir) / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)

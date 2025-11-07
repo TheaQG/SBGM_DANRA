@@ -5,12 +5,19 @@ import logging
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as mcm
 from matplotlib.gridspec import GridSpec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from typing import Optional, Union, List, Dict
 
 from sbgm.utils import _squeeze_geo_value
-from sbgm.variable_utils import get_units, get_cmaps, get_cmap_for_variable
+from sbgm.variable_utils import (
+    get_units,
+    get_cmaps,
+    get_cmap_for_variable,
+    get_color_for_model,
+    get_color_for_model_cycle,
+)
 
 
 # Set up logging
@@ -20,6 +27,316 @@ logger = logging.getLogger(__name__)
 # --- Robust conversion for imshow ---
 import numpy as _np
 import torch as _torch
+from pathlib import Path
+from datetime import datetime
+
+
+def _savefig(fig, out_path: Path, dpi: int = 300):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+
+
+def _nice():
+    # lightweight, you can override with your global style later
+    plt.rcParams.update({
+        "figure.figsize": (5.5, 4.0),
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.alpha": 0.6,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "font.size": 10,
+    })
+
+def _to_date_safe(s: str) -> Optional[datetime]:
+    s = s.strip()
+    # accept "YYYY-MM-DD" and "YYYYMMDD"
+    try:
+        if len(s) == 8 and s.isdigit():
+            return datetime.strptime(s, "%Y%m%d")
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _season_from_month(m: int) -> str:
+    if m in (12, 1, 2):
+        return "DJF"
+    if m in (3, 4, 5):
+        return "MAM"
+    if m in (6, 7, 8):
+        return "JJA"
+    return "SON"
+
+
+
+# ------------------------------
+# DK outline via LSM (cached)
+# ------------------------------
+_DK_LSM_CACHE: np.ndarray | None = None
+
+def _load_dk_lsm_outline(
+    bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
+    base: str = "/scratch/project_465001695/quistgaa/Data/Data_DiffMod",
+    rel_path: str = "data_lsm/truth_fullDomain/lsm_full.npz",
+    key_candidates: tuple[str, ...] = ("lsm_hr", "lsm", "mask", "roi", "lsm_full", "data", "arr_0"),
+) -> np.ndarray | None:
+    """Load and crop a land-sea mask and return a boolean [H,W] mask for Denmark.
+    bounds is interpreted as (y0, y1, x0, x1) with y1/x1 exclusive; e.g., (200,328,380,508) → 128x128.
+    """
+    try:
+        logger.info("[DEBUG] Loading DK LSM outline from %s/%s", base, rel_path)
+        # base = os.environ.get(env_key, None)
+        # if not base:
+        #     return None
+        p = Path(base) / rel_path
+        if not p.exists():
+            logger.warning("[DEBUG] DK LSM outline file not found: %s", str(p))
+            return None
+        d = np.load(p, allow_pickle=True)
+        # Print the keys available in the npz file for debugging
+        arr = None
+        if hasattr(d, "files"):
+            for k in key_candidates:
+                if k in d.files:
+                    arr = d[k]
+                    break
+        if arr is None:
+            logger.warning("[DEBUG] DK LSM outline: no suitable key found in %s", str(p))
+            return None
+        a = np.asarray(arr)
+        # normalize to [H,W]
+        if a.ndim == 4 and a.shape[:2] == (1, 1):
+            a = a.squeeze(0).squeeze(0)
+        elif a.ndim == 3 and a.shape[0] == 1:
+            a = a.squeeze(0)
+        y0, y1, x0, x1 = bounds
+        a = np.flipud(a)  # flip vertically if needed
+        a = a[y0:y1, x0:x1]
+        m = (a >= 0.5)
+        m = np.flipud(m)  # flip back to original orientation
+
+        logger.info("[DEBUG] DK LSM outline loaded with shape %s", str(m.shape))
+        return m.astype(bool, copy=False)
+    except Exception as e:
+        logger.exception("[DEBUG] Exception while loading DK LSM outline: %s", str(e))
+        return None
+
+def get_dk_lsm_outline(
+    bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
+) -> np.ndarray | None:
+    """Return cached DK outline mask (boolean [H,W]) or None if unavailable."""
+    global _DK_LSM_CACHE
+    if _DK_LSM_CACHE is None:
+        _DK_LSM_CACHE = _load_dk_lsm_outline()
+    return _DK_LSM_CACHE
+
+def overlay_outline(ax, mask: np.ndarray | None, *, color: str = "black", linewidth: float = 0.8):
+    """Overlay a contour outline (level 0.5) on the given axes if mask is provided."""
+    if mask is None:
+        return
+    try:
+        ax.contour(mask.astype(float, copy=False), levels=[0.5], colors=color, linewidths=linewidth)
+    except Exception:
+        pass
+
+
+# === Centralized imshow for variables with DK outline ===
+def imshow_variable(
+    ax,
+    img2d: np.ndarray,
+    *,
+    variable: str,
+    bounds: tuple[int, int, int, int] = (200, 328, 380, 508),    
+    vmin: float | None = None,
+    vmax: float | None = None,
+    cmap: str | None = None,
+    add_dk_outline: bool = True,
+    outline_color: str = "white",
+    outline_linewidth: float = 0.8,
+    under_color: str | None = None,
+    under_threshold: float | None = None,
+):
+    """
+    Centralized imshow for spatial maps that:
+      - picks the correct colormap for `variable` (via get_cmap_for_variable) unless `cmap` is provided
+      - inverts y-axis to be consistent with array conventions used elsewhere
+      - optionally overlays a cached DK land/sea outline
+      - values below `under_threshold` are drawn with `under_color` if provided
+      - typical use: precipitation “no-rain” background set to gray
+      
+    Returns the image handle from imshow.
+    """
+    if img2d is None:
+        raise ValueError("imshow_variable: img2d is None")
+    arr = np.asarray(img2d)
+    if arr.ndim != 2:
+        # Squeeze simple singletons, otherwise pick first channel
+        arr = np.squeeze(arr)
+        if arr.ndim != 2:
+            arr = arr.reshape((-1, arr.shape[-2], arr.shape[-1]))[0]
+    cm_in = cmap or get_cmap_for_variable(variable)
+    try:
+        # use matplotlib.cm.get_cmap (imported as mcm) to avoid relying on pyplot attribute
+        if isinstance(cm_in, str):
+            try:
+                cm_obj = mcm.get_cmap(cm_in)
+            except Exception:
+                cm_obj = cm_in
+        else:
+            cm_obj = cm_in
+    except Exception:
+        cm_obj = cm_in
+
+    # Optionally set an "under" color (values < vmin) for near-zero masks (e.g., no-rain as gray)
+    if under_color is not None:
+        # Try the modern `with_extremes` API if available, otherwise fall back to `set_under`
+        w_ext = getattr(cm_obj, "with_extremes", None)
+        if callable(w_ext):
+            try:
+                cm_obj = w_ext(under=under_color)
+            except Exception:
+                # ignore and fall back to set_under if present
+                pass
+        else:
+            s_under = getattr(cm_obj, "set_under", None)
+            if callable(s_under):
+                try:
+                    s_under(under_color)
+                except Exception:
+                    pass
+
+    # If an under_threshold is specified and vmin not provided, use it
+    if under_threshold is not None and vmin is None:
+        vmin = float(under_threshold)
+
+    im = ax.imshow(arr, cmap=cm_obj, vmin=vmin, vmax=vmax, interpolation="nearest", origin="lower")
+    ax.invert_yaxis()
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    if add_dk_outline:
+        mask = get_dk_lsm_outline(bounds)
+        overlay_outline(ax, mask, color=outline_color, linewidth=outline_linewidth)
+
+    return im
+
+
+# === Apply model color scheme to lines/markers ===
+def apply_model_colors(
+    ax,
+    *,
+    exclude_kind: str | None = None,
+    assume_kind: str | None = None,
+):
+    """
+    Recolors existing line artists in `ax` to follow model colors defined in variable_utils.get_color_for_model.
+    - We infer the intended model from each legend label or Line2D label.
+    - If exclude_kind == 'seasonal', we skip recoloring (keeps user's preferred seasonal palette).
+    - If assume_kind provided, it's only metadata; current logic relies on labels.
+
+    Typical usage right after plotting lines and before/after ax.legend().
+    """
+    if exclude_kind and exclude_kind.lower() == "seasonal":
+        return
+
+    # Collect handles and labels robustly
+    handles, labels = ax.get_legend_handles_labels()
+    if not labels:
+        # Try to infer from lines if no legend exists yet
+        lines = [l for l in ax.get_lines() if hasattr(l, "get_label")]
+        handles = lines
+        labels = [l.get_label() for l in lines]
+
+    for h, lab in zip(handles, labels):
+        key = None
+        if lab is not None:
+            s = lab.strip().lower()
+            if any(k in s for k in ["hr", "danra", "truth", "high-res"]):
+                key = "hr"
+            elif "pmm" in s:
+                key = "pmm"
+            elif any(k in s for k in ["gen", "generated", "model", "ens"]):
+                key = "generated"
+            elif any(k in s for k in ["lr", "era5", "low-res"]):
+                key = "lr"
+        if key is None:
+            continue
+        try:
+            color = get_color_for_model(key)
+            # Set both face/edge colors as appropriate
+            if hasattr(h, "set_color"):
+                h.set_color(color)
+            if hasattr(h, "set_markerfacecolor"):
+                h.set_markerfacecolor(color)
+            if hasattr(h, "set_markeredgecolor"):
+                h.set_markeredgecolor(color)
+            if hasattr(h, "set_facecolor"):
+                h.set_facecolor(color)
+            if hasattr(h, "set_edgecolor"):
+                h.set_edgecolor(color)
+        except Exception:
+            # best-effort; keep going
+            pass
+
+
+# === Convenience wrapper for spatial panel plotting ===
+def plot_spatial_panel(
+    ax,
+    img2d: np.ndarray,
+    *,
+    bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
+    variable: str,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    add_dk_outline: bool = True,
+    outline_color: str = "white",
+    outline_linewidth: float = 0.8,
+    title: str | None = None,
+    under_color: str | None = None,
+    under_threshold: float | None = None,
+):
+    """
+    Convenience wrapper used by spatial map routines to ensure:
+      - correct variable colormap
+      - DK outline overlay
+      - tight axis cosmetics
+    """
+    im = imshow_variable(
+        ax,
+        img2d,
+        variable=variable,
+        vmin=vmin,
+        vmax=vmax,
+        add_dk_outline=add_dk_outline,
+        outline_color=outline_color,
+        outline_linewidth=outline_linewidth,
+        under_color=under_color,
+        under_threshold=under_threshold,
+        bounds=bounds,
+    )
+    if title:
+        ax.set_title(title, fontsize=10)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.1)
+    ax.figure.colorbar(im, cax=cax, orientation="vertical")
+    return im
+# === IO-agnostic maybe_compute helper ===
+def maybe_compute(cache_exists: bool, plot_only: bool, compute_fn, *args, **kwargs):
+    """
+    Calling-side helper for heavy steps:
+      - If plot_only is True and cache_exists, SKIP compute_fn and return None.
+      - Else, run compute_fn(*args, **kwargs) and return its result.
+
+    This keeps plotting_utils IO-agnostic; the caller is responsible for checking
+    the concrete cache path(s) and for loading cached results when plot_only=True.
+    """
+    if plot_only and cache_exists:
+        logger.info("[plot_only] Skipping heavy computation because cache exists.")
+        return None
+    return compute_fn(*args, **kwargs)
 
 def _to_imshow_image(arr, prefer_channel: int = 0):
     """

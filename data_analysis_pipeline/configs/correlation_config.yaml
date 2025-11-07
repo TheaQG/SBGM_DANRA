@@ -1,3 +1,6 @@
+global:
+  plot_only: false
+
 paths:
   output_dir: ${env:FIGS_SAVE_DIR}
   stats_save_dir: ${env:STATS_SAVE_DIR}

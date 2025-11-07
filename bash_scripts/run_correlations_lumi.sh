@@ -32,6 +32,7 @@ export FIGS_SAVE_DIR="$ROOT_DIR/data_analysis_pipeline/saved/correlation_run/fig
 export CONFIG_DIR="$ROOT_DIR/data_analysis_pipeline/configs/correlation_config.yaml"
 # === Optional: create logs directory if it doesn't exist ===
 mkdir -p logs
+ 
 echo "starting comparison run"
 echo "Container: $CONTAINER"
 echo "Root Directory: $ROOT_DIR"

@@ -1,3 +1,5 @@
+global:
+  plot_only: false
 
 plotting:
   save_cutout_example: true
@@ -8,12 +10,14 @@ plotting:
   visualize_data: true
   visualize_aggregated: true
   plot_stats: [mean, std, min, max] # Which statistics to plot
+  zero_floor_mm_day: 0.01
 
 statistics:
   save_global_pixel_stats: true
   stats_save_dir: ${env:STATS_SAVE_DIR}
   aggregate: true
   print_results: ["global"]
+  save_full_stats_npz: true
 
 data:
   aggregation_time: monthly

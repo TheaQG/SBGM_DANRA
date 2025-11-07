@@ -33,7 +33,13 @@ def edm_sampler(score_model,
                 cfg_guidance: dict | None = None,
                 cfg_diagnostics: dict | None = None,
                 *,
-                sigma_star: float = 1.0
+                sigma_star: float = 1.0,
+                # --- scale-aware control (late-step ramp) ---
+                sigma_star_mode: str = "global",   # "global" or "late_ramp"
+                ramp_start_frac: float = 0.60,     # start of ramp as fraction of steps (0..1)
+                ramp_end_frac: float = 0.85,       # end of ramp as fraction of steps (0..1)
+                ramp_start_sigma: float | None = None,  # optional: start ramp when sigma <= this
+                ramp_end_sigma: float | None = None,    # optional: end ramp when sigma <= this
                 ):
   """
       Karras EDM sampler with Heun updates.
@@ -65,7 +71,11 @@ def edm_sampler(score_model,
   if cfg_enabled and cfg_guidance is not None:
     logger.info(f"[sampler] CFG enabled: base_scale={base_scale}, sigma_weighted={bool(cfg_guidance.get('sigma_weighted', True))}, "
                 f"drop_lr_ups_in_uncond={bool(cfg_guidance.get('drop_lr_ups_in_uncond', False))}")
-
+  
+  logger.info(f"[sampler] sigma*: {sigma_star:.3f}, mode={sigma_star_mode}, "
+              f"ramp_frac=({ramp_start_frac:.2f},{ramp_end_frac:.2f}), "
+              f"ramp_sigma=({ramp_start_sigma},{ramp_end_sigma})")
+  
   # Set the max guidance scale and make sure that base_scale <= gmax
   gmax = float(cfg_guidance.get('guidance_scale_max', base_scale)) if (cfg_enabled and cfg_guidance is not None) else base_scale
   base_scale = min(base_scale, gmax)
@@ -117,19 +127,60 @@ def edm_sampler(score_model,
     sig = (max_inv + ramp * (min_inv - max_inv)) ** rho_ # Karras sigma
     return sig
   
+  def _smoothstep01(x: torch.Tensor) -> torch.Tensor:
+      # clamp to [0,1] then apply smoothstep 3x^2 - 2x^3
+      x = torch.clamp(x, 0.0, 1.0)
+      return x * x * (3.0 - 2.0 * x)
+    
   # Build base sigma schedule
   sigmas = get_sigmas_K(num_steps, float(sigma_min), float(sigma_max), float(rho))
 
   # === Scale-aware sigma_star inference knob ===
   if not torch.is_tensor(sigmas):
-    sigmas = torch.tensor(sigmas, dtype=torch.float32, device=device)
+      sigmas = torch.tensor(sigmas, dtype=torch.float32, device=device)
 
-  # Scale the schedule
-  sigmas = sigma_star * sigmas
+  # Build per-step scale factors f_i
+  if sigma_star_mode.lower() == "global":
+      f = torch.full_like(sigmas, float(sigma_star))
+  else:
+      # Late-step ramp: start~end window in which the scale increases from 1 -> sigma_star
+      N = int(sigmas.shape[0])
 
-  # Scale churn bounds too, as they are in sigma units
-  S_min_eff = float(S_min) * float(sigma_star)
-  S_max_eff = float(S_max) * float(sigma_star)
+      if (ramp_start_sigma is not None) and (ramp_end_sigma is not None):
+          # Use sigma thresholds (later steps have smaller sigma)
+          if torch.any(sigmas <= float(ramp_start_sigma)):
+              i0 = int(torch.nonzero(sigmas <= float(ramp_start_sigma), as_tuple=False).min().item())
+          else:
+              i0 = int(0.6 * (N - 1))
+          if torch.any(sigmas <= float(ramp_end_sigma)):
+              i1 = int(torch.nonzero(sigmas <= float(ramp_end_sigma), as_tuple=False).min().item())
+          else:
+              i1 = int(0.85 * (N - 1))
+      else:
+          # Fractional indices
+          i0 = max(0, min(int(round(ramp_start_frac * (N - 1))), N - 1))
+          i1 = max(i0, min(int(round(ramp_end_frac   * (N - 1))), N - 1))
+
+      idx = torch.arange(N, device=device, dtype=torch.float32)
+      denom = max(float(i1 - i0), 1.0)
+      t = (idx - float(i0)) / denom
+      w = _smoothstep01(t)
+      w = torch.where(idx < i0, torch.zeros_like(w), w)
+      w = torch.where(idx > i1, torch.ones_like(w), w)
+      f = 1.0 + (float(sigma_star) - 1.0) * w
+
+  # Apply per-step scaling
+  sigmas = f * sigmas
+
+  # Effective churn window:
+  # - global: keep scaling bounds
+  # - late_ramp: leave bounds in original units; scaled 'sigma' already controls entry.
+  if sigma_star_mode.lower() == "global":
+      S_min_eff = float(S_min) * float(sigma_star)
+      S_max_eff = float(S_max) * float(sigma_star)
+  else:
+      S_min_eff = float(S_min)
+      S_max_eff = float(S_max)
 
   # Append terminal sigma=0 step
   sigmas = torch.cat([sigmas, sigmas.new_zeros(1)]) # add sigma=0 for final step
@@ -205,7 +256,7 @@ def edm_sampler(score_model,
 
     x_in = x
     # Churn (stochasticity injection at high sigmas)
-    if (S_min_eff <= sigma <= S_max_eff) and (S_churn > 0):
+    if (S_min_eff <= float(sigma) <= S_max_eff) and (S_churn > 0):
       gamma = min(S_churn / num_steps, math.sqrt(2.0) - 1.0) # Stochasticity factor
       eps = torch.randn_like(x) * S_noise # Noise scaled by S_noise
       sigma_hat = sigma * (1 + gamma) # Increased sigma with stochasticity injection

@@ -277,3 +277,39 @@ def get_color_for_model(model_str: str):
     else:
         # Default color
         return "#7570b3"
+
+
+
+# === Model color helpers ===
+def get_color_for_model_cycle(models: list[str]) -> list[str]:
+    """
+    Convenience: return a list of hex colors for a given ordered list of model labels.
+    Labels can be e.g. ['HR','PMM','LR'] or ['DANRA','generated','ERA5'].
+    Falls back to default color for unknown labels.
+    """
+    if models is None:
+        return []
+    return [get_color_for_model(m) for m in models]
+
+
+def normalize_model_label(label: str) -> str:
+    """
+    Normalize a legend label to a canonical model keyword used by get_color_for_model.
+    Examples:
+      'HR (DANRA)' -> 'HR'
+      'High-Res'   -> 'HR'
+      'PMM (ens)'  -> 'PMM'
+      'Gen'|'Generated'|'Model' -> 'generated'
+      'LR (ERA5)'  -> 'LR'
+    """
+    s = (label or "").strip().lower()
+    # canonical groups
+    if any(k in s for k in ["hr", "danra", "high-res", "high resolution", "truth"]):
+        return "hr"
+    if any(k in s for k in ["pmm"]):
+        return "pmm"
+    if any(k in s for k in ["gen", "generated", "model", "ensemble"]):
+        return "generated"
+    if any(k in s for k in ["lr", "era5", "low-res", "low resolution"]):
+        return "lr"
+    return s    

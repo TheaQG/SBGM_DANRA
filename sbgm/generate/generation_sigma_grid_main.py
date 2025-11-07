@@ -80,6 +80,14 @@ def generation_sigma_grid_main(cfg):
     grid = [float(x) for x in grid]
     logger.info(f"[generation_sigma_grid_main] sigma_star_grid = {grid}")
 
+    # ----------------------- Sigma* ramp settings (optional late-step control) -----------------------
+    scfg = cfg.get('full_gen_eval', {}).get('sigma_control', {})
+    ramp_mode = str(scfg.get('sigma_star_mode', cfg.get('edm', {}).get('sigma_star_mode', 'global')))
+    ramp_start_frac = float(scfg.get('ramp_start_frac', cfg.get('edm', {}).get('ramp_start_frac', 0.60)))
+    ramp_end_frac   = float(scfg.get('ramp_end_frac',   cfg.get('edm', {}).get('ramp_end_frac',   0.85)))
+    ramp_start_sigma = scfg.get('ramp_start_sigma', cfg.get('edm', {}).get('ramp_start_sigma', None))
+    ramp_end_sigma   = scfg.get('ramp_end_sigma',   cfg.get('edm', {}).get('ramp_end_sigma',   None))
+
     # ----------------------- Base output -----------------------
     base_out = _resolve_base_out_dir(cfg)
 
@@ -88,6 +96,12 @@ def generation_sigma_grid_main(cfg):
         # 1) Set effective sigma_star in config (read by GenerationRunner via edm_cfg)
         cfg.setdefault('edm', {})
         cfg.edm['sigma_star'] = float(sstar)
+        # --- Push ramp settings into cfg.edm for sampler ---
+        cfg.edm['sigma_star_mode'] = ramp_mode
+        cfg.edm['ramp_start_frac'] = ramp_start_frac
+        cfg.edm['ramp_end_frac']   = ramp_end_frac
+        cfg.edm['ramp_start_sigma'] = ramp_start_sigma
+        cfg.edm['ramp_end_sigma']   = ramp_end_sigma
 
         # 2) Subdir for this sigma*
         subdir = base_out / f"sigma_star={sstar:.2f}"

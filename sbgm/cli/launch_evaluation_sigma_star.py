@@ -24,7 +24,7 @@ from typing import Optional, List, cast
 from omegaconf import OmegaConf, DictConfig
 
 from sbgm.evaluate.evaluate_prcp.eval_sigma_star.evaluate_sigma_control import run as run_sigma_star_eval
-from sbgm.evaluate.evaluate_prcp.eval_sigma_star.plot_sigma_control import plot_sigma_control_examples
+from sbgm.evaluate.evaluate_prcp.eval_sigma_star.plot_sigma_control import plot_sigma_control_examples_grid
 
 logger = logging.getLogger("launch_evaluation_sigma_star")
 
@@ -40,7 +40,15 @@ def run(cfg: DictConfig, make_plots: bool = True, make_examples: bool = False):
         model_name = cfg.experiment.name
         gen_base = Path(cfg.paths.sample_dir) / "generation" / model_name
         sigma_grid = list(cfg.full_gen_eval.sigma_star_grid)
-        plot_sigma_control_examples(cfg, sigma_star_grid=sigma_grid, gen_base_dir=gen_base, out_dir=out_dir)
+        plot_sigma_control_examples_grid(            cfg,
+            sigma_star_grid=sigma_grid,
+            gen_base_dir=gen_base,
+            out_dir=out_dir,
+            n_members=int(getattr(getattr(cfg, "full_gen_eval", {}), "example_n_members", 3)),
+            date=getattr(getattr(cfg, "full_gen_eval", {}), "example_date", None),
+            land_only=bool(getattr(getattr(cfg, "full_gen_eval", {}), "eval_land_only", True)),
+            fname="examples_sigma_grid.png",
+        )
 
     logger.info(f"[launch_evaluation_sigma_star] Done. Results at: {out_dir}")
     return out_dir

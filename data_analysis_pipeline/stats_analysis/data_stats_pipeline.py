@@ -19,6 +19,9 @@ def run_data_statistics(cfg):
     all_results = {}
 
     split = cfg.get("data", {}).get("split", "all")
+    plot_only = bool(cfg.get("global", {}).get("plot_only", False))
+    if plot_only:
+        logger.info("[stats] Plot-only: will try to load cached statistics from disk and skip heavy recomputation.")
 
     data_dir = cfg.get("data", {}).get("data_dir", ".")
     # Check if data_dir ends with _small, if so set data_batch_small to True
@@ -43,6 +46,71 @@ def run_data_statistics(cfg):
     def process_variable(var_cfg, variable, agg_method, agg_time, level):
         logger.info(f"Processing {level.upper()} variable: {variable} ({var_cfg.get('model', '')}) | agg_method={agg_method} | agg_time={agg_time}")
 
+        crop_region_str = "_".join(map(str, var_cfg.get("crop_region", []))) if var_cfg.get("crop_region", []) else "full"
+        domain_size_str = "x".join(map(str, var_cfg.get("domain_size", []))) if var_cfg.get("domain_size", []) else "full"
+        logger.info(f"Crop region: {crop_region_str} | Domain size: {domain_size_str}")
+
+        if plot_only:
+            from data_analysis_pipeline.stats_analysis.statistics import load_global_stats
+            # Try load global stats
+            global_stats = load_global_stats(variable, var_cfg.get("model",""), domain_size_str, crop_region_str, split, stats_save_dir)
+            # Try load NPZ with time series and cutout stats
+            stats_dir = os.path.join(stats_save_dir, var_cfg.get("model",""), variable, split)
+            cand_small = os.path.join(stats_dir, f"stats_timeseries_cutout__{var_cfg.get('model','')}__{domain_size_str}__crop__{crop_region_str}__{variable}__{split}__small.npz")
+            cand_full  = os.path.join(stats_dir, f"stats_timeseries_cutout__{var_cfg.get('model','')}__{domain_size_str}__crop__{crop_region_str}__{variable}__{split}.npz")
+            npz_path = cand_small if os.path.exists(cand_small) else (cand_full if os.path.exists(cand_full) else None)
+            time_series_stats = {}
+            cutout_stats = {}
+            if npz_path:
+                try:
+                    with np.load(npz_path) as npz:
+                        # timestamps optional
+                        if "timestamps_iso" in npz:
+                            from datetime import datetime as _dt
+                            time_series_stats["timestamps"] = [ _dt.fromisoformat(s) for s in npz["timestamps_iso"].tolist() ]
+                        for k in ["mean","std","min","max","median","percentile_25","percentile_75"]:
+                            if k in npz:
+                                time_series_stats[k] = npz[k]
+                        for k in ["mean","std","min","max","median","percentile_25","percentile_75"]:
+                            nk = f"cutout_{k}"
+                            if nk in npz:
+                                cutout_stats[k] = npz[nk]
+                    logger.info(f"[stats] Loaded cached full stats from {npz_path}")
+                except Exception as e:
+                    logger.warning(f"[stats] Failed to load cached NPZ stats at {npz_path}: {e}")
+            else:
+                logger.warning(f"[stats] No cached NPZ stats found at {stats_dir}. Skipping plots that require raw data.")
+            # Collect results and (optionally) plot with data=None
+            all_results[f"{level}__{variable}"] = {
+                "global": global_stats if global_stats else {},
+                "cutout": cutout_stats,
+                "timeseries": time_series_stats,
+            }
+            if cfg.get("plotting", {}).get("visualize_data", False):
+                current_fig_save_path = os.path.join(fig_save_dir, var_cfg.get("model", ""), variable, split)
+                visualize_statistics(
+                    variable,
+                    None,  # data=None in plot-only
+                    {
+                        "global": global_stats if global_stats else {},
+                        "cutout": cutout_stats,
+                        "timeseries": time_series_stats,
+                    },
+                    cfg,
+                    model=var_cfg.get("model", ""),
+                    load_global=False,
+                    domain_str=domain_size_str,
+                    crop_region_str=crop_region_str,
+                    split=split,
+                    fig_save_path=current_fig_save_path,
+                    dir_load_glob=stats_save_dir,
+                    aggregated=False,
+                    show_transformed=False,
+                    transforms=[],
+                    log_scale=False,
+                )
+            return
+
         loader = DataLoader(
             base_dir=data_dir,
             n_workers=n_workers,
@@ -64,27 +132,23 @@ def run_data_statistics(cfg):
             save_glob_stats = False
             logger.info(f"Not saving global statistics for {variable}")
 
-        crop_region_str = "_".join(map(str, var_cfg.get("crop_region", []))) if var_cfg.get("crop_region", []) else "full"
-        domain_size_str = "x".join(map(str, var_cfg.get("domain_size", []))) if var_cfg.get("domain_size", []) else "full"
-        logger.info(f"Crop region: {crop_region_str} | Domain size: {domain_size_str}")
-
-
         global_stats, cutout_stats, time_series_stats = compute_statistics(
-                                                                raw_data,
-                                                                print_stats=True,
-                                                                return_all=True,
-                                                                save_glob_stats=save_glob_stats,
-                                                                variable=variable,
-                                                                model=var_cfg.get("model", ""),
-                                                                split=split,
-                                                                domain_str=domain_size_str,
-                                                                crop_region_str=crop_region_str,
-                                                                cfg=cfg,
-                                                                stats_save_path=stats_save_dir,
-                                                                log_stats=variable in ['prcp', 'cape'],
-                                                                pool_pixels=True,
-                                                                small_data_batch=small_data_batch,
-                                                                )
+                                                                                                                            raw_data,
+                                                            print_stats=True,
+                                                            return_all=True,
+                                                            save_glob_stats=save_glob_stats,
+                                                            variable=variable,
+                                                            model=var_cfg.get("model", ""),
+                                                            split=split,
+                                                            domain_str=domain_size_str,
+                                                            crop_region_str=crop_region_str,
+                                                            cfg=cfg,
+                                                            stats_save_path=stats_save_dir,
+                                                            log_stats=variable in ['prcp', 'cape'],
+                                                            pool_pixels=True,
+                                                            small_data_batch=small_data_batch,
+                                                            save_full_stats_npz=cfg.get("statistics", {}).get("save_full_stats_npz", True),
+                                                        )
         all_results[f"{level}__{variable}"] = {
             "global": global_stats,
             "cutout": cutout_stats,
@@ -93,8 +157,9 @@ def run_data_statistics(cfg):
         
         if cfg.get("plotting", {}).get("save_cutout_example", False):
             current_fig_save_path = os.path.join(fig_save_dir, var_cfg.get("model", ""), variable, split)
-            logger.info(f"Saving cutout example for variable {variable}")
-            plot_cutout_example(raw_data, variable, cfg, current_fig_save_path)
+            bounds = var_cfg.get("crop_region", [])
+            logger.warning(f"Saving cutout example for variable {variable}, cutout region: {bounds}")
+            plot_cutout_example(raw_data, variable, cfg, current_fig_save_path, bounds=bounds)
 
         if cfg.get("plotting", {}).get("visualize_data", False):
             current_fig_save_path = os.path.join(fig_save_dir, var_cfg.get("model", ""), variable, split)
@@ -137,24 +202,25 @@ def run_data_statistics(cfg):
         if cfg.get("statistics", {}).get("aggregate", False):
             logger.info(f"Computing aggregated statistics for {level.upper()} variable '{variable}' using method: {agg_method}, time: {agg_time}")
             global_stats, cutout_stats, time_series_stats = compute_statistics(
-                                                                    raw_data,
-                                                                    aggregate=True,
-                                                                    agg_method=agg_method,
-                                                                    agg_time=cfg.get("data", {}).get("aggregation_time", "monthly"),
-                                                                    return_all=True,
-                                                                    print_stats=True,
-                                                                    save_glob_stats=save_glob_stats,
-                                                                    variable=variable,
-                                                                    model=var_cfg.get("model", ""),
-                                                                    split=split,
-                                                                    domain_str=domain_size_str,
-                                                                    crop_region_str=crop_region_str,
-                                                                    cfg=cfg,
-                                                                    stats_save_path=stats_save_dir,
-                                                                    log_stats=variable in ['prcp', 'cape'],
-                                                                    pool_pixels=True,
-                                                                    small_data_batch=small_data_batch
-                                                                    )
+                                                                raw_data,
+                                                                aggregate=True,
+                                                                agg_method=agg_method,
+                                                                agg_time=cfg.get("data", {}).get("aggregation_time", "monthly"),
+                                                                return_all=True,
+                                                                print_stats=True,
+                                                                save_glob_stats=save_glob_stats,
+                                                                variable=variable,
+                                                                model=var_cfg.get("model", ""),
+                                                                split=split,
+                                                                domain_str=domain_size_str,
+                                                                crop_region_str=crop_region_str,
+                                                                cfg=cfg,
+                                                                stats_save_path=stats_save_dir,
+                                                                log_stats=variable in ['prcp', 'cape'],
+                                                                pool_pixels=True,
+                                                                small_data_batch=small_data_batch,
+                                                                save_full_stats_npz=cfg.get("statistics", {}).get("save_full_stats_npz", True),
+                                                            )
             all_results[f"{level}__agg__{variable}"] = {
                 "global": global_stats,
                 "cutout": cutout_stats,

@@ -3,6 +3,7 @@ import datetime
 import os
 import json
 import numpy as np
+from typing import Dict, Any
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -130,6 +131,7 @@ def compute_statistics(data,
                        stats_save_path=".",
                        log_stats=False,
                        pool_pixels=True,
+                       save_full_stats_npz: bool = True,
                        ):
     """
         Compute statistics for the given data.
@@ -207,6 +209,34 @@ def compute_statistics(data,
         logger.info("\n   COMPUTED BASIC STATS:")
         for key, value in global_stats_result.items():
             logger.info(f"          {key}: {value}")
+
+    # === Optional save of full stats (time series + per-pixel) to NPZ for plot-only reloads ===
+    if save_full_stats_npz:
+        # Build save dir and filename consistent with global stats JSON
+        save_dir = os.path.join(stats_save_path, model, variable, split)
+        os.makedirs(save_dir, exist_ok=True)
+        if small_data_batch:
+            fname = f"stats_timeseries_cutout__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}__small.npz"
+        else:
+            fname = f"stats_timeseries_cutout__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}.npz"
+        fpath = os.path.join(save_dir, fname)
+        try:
+            # Flatten dicts to arrays where possible; store timestamps as ISO strings if present
+            ts = {}
+            if return_timeseries and time_series_stats:
+                ts = {k: np.array(v) for k, v in time_series_stats.items() if k != "timestamps"}
+                if "timestamps" in time_series_stats and time_series_stats["timestamps"] is not None:
+                    ts["timestamps_iso"] = np.array([
+                        (t.isoformat() if hasattr(t, "isoformat") else str(t))
+                        for t in time_series_stats["timestamps"]
+                    ])
+            co = {}
+            if return_cutout_stats and cutout_stats:
+                co = {f"cutout_{k}": np.array(v) for k, v in cutout_stats.items()}
+            np.savez_compressed(fpath, **ts, **co)
+            logger.info(f"[INFO] Saved time series and cutout stats to {fpath}")
+        except Exception as e:
+            logger.warning(f"[WARN] Failed to save NPZ full stats to {fpath}: {e}")
 
     return global_stats_result, cutout_stats, time_series_stats
 

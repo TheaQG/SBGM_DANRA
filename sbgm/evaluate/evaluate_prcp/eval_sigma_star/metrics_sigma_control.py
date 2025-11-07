@@ -2,6 +2,7 @@
 Compute sigma*-dependent evaluation metrics (self-contained):
 - LR-GEN correlation in a low-pass band (≤ LR Nyquist), with smooth taper
 - PSD slope in a mesoscale band (e.g., 5-20 km), for GEN and HR
+- High-k power gain > LR Nyquist: G_high = sum_k>k_Nyq P_GEN(k) / sum_k>k_Nyq P_HR(k)
 - CRPS of the ensemble vs HR (Hersbach fair estimator)
 
 All numeric helpers (mask handling, low-pass, PSD) are implemented locally so
@@ -10,6 +11,7 @@ this block can evolve independently of other evaluation modules.
 Saves:
   - tables/metrics_by_sigma.csv : per-(sigma*, date) rows
   - tables/agg_summary.csv      : per-sigma* aggregates (mean/std for each metric)
+  - tables/sigma_psd_curves.npz : k-grid and mean/std PSD curves for HR, LR (upsampled), and GEN per σ*, plus LR Nyquist
 """
 from __future__ import annotations
 from pathlib import Path
@@ -407,6 +409,7 @@ def evaluate_sigma_control(
     psd_acc_gen: DefaultDict[float, list[np.ndarray]] = defaultdict(list)
     psd_acc_hr: DefaultDict[float, list[np.ndarray]] = defaultdict(list)
     k_ref_np: np.ndarray | None = None
+    psd_acc_lr: DefaultDict[float, list[np.ndarray]] = defaultdict(list)
 
     for sigma_star in sigma_star_grid:
         subdir = gen_base_dir / f"sigma_star={float(sigma_star):.2f}"
@@ -437,6 +440,7 @@ def evaluate_sigma_control(
                 continue
 
             # --- PSD curves for GEN (ensemble mean per date) and HR ---
+            hk_gain = float("nan")
             try:
                 # GEN ensemble mean field for PSD (average across members)
                 if isinstance(ens, torch.Tensor):
@@ -447,12 +451,46 @@ def evaluate_sigma_control(
                 k_gen, P_gen = isotropic_psd_curve(gen_mean_2d, dx_km=hr_dx_km)
                 k_hr,  P_hr  = isotropic_psd_curve(hr, dx_km=hr_dx_km)
 
+                # --- High-k power gain above LR Nyquist (phase-insensitive) ---
+                k_arr = k_hr.detach().cpu().numpy()
+                P_gen_np = P_gen.detach().cpu().numpy()
+                P_hr_np = P_hr.detach().cpu().numpy()
+                k_nyq = 1.0 / (2.0 * float(lr_dx_km))
+                hi = (k_arr > k_nyq)
+                if np.any(hi):
+                    num = float(np.sum(P_gen_np[hi]))
+                    den = float(np.sum(P_hr_np[hi])) + 1e-20
+                    hk_gain = num / den
+                else:
+                    hk_gain = float("nan")
+
                 # Keep a single common k-grid (from HR) as reference
                 if k_ref_np is None:
                     k_ref_np = k_hr.detach().cpu().numpy()
 
                 psd_acc_gen[float(sigma_star)].append(P_gen.detach().cpu().numpy())
                 psd_acc_hr[float(sigma_star)].append(P_hr.detach().cpu().numpy())
+
+                # LR upsampled to HR grid for PSD reference
+                try:
+                    lr_arr = lr
+                    # Normalize LR shapes to [H,W]
+                    if lr_arr.dim() == 2:
+                        lr2d = lr_arr
+                    elif lr_arr.dim() == 3 and lr_arr.shape[0] == 1:
+                        lr2d = lr_arr.squeeze(0)
+                    elif lr_arr.dim() == 4 and lr_arr.shape[0] == 1 and lr_arr.shape[1] == 1:
+                        lr2d = lr_arr.squeeze(0).squeeze(0)
+                    else:
+                        lr2d = lr_arr[0] if lr_arr.dim() == 3 else lr_arr[0,0]
+                    if tuple(lr2d.shape) != (hr.shape[-2], hr.shape[-1]):
+                        lr4d = lr2d.unsqueeze(0).unsqueeze(0)
+                        lr2d = F.interpolate(lr4d, size=(hr.shape[-2], hr.shape[-1]),
+                                             mode="bilinear", align_corners=False).squeeze(0).squeeze(0)
+                    k_lrpsd, P_lr = isotropic_psd_curve(lr2d, dx_km=hr_dx_km)
+                    psd_acc_lr[float(sigma_star)].append(P_lr.detach().cpu().numpy())
+                except Exception as e:
+                    logger.warning(f"[sigma_control] LR PSD curve failed on {date} @ sigma*={sigma_star:.2f}: {e}")
             except Exception as e:
                 logger.warning(f"[sigma_control] PSD curve failed on {date} @ sigma*={sigma_star:.2f}: {e}")
 
@@ -478,6 +516,7 @@ def evaluate_sigma_control(
                 "slope_hr": float(slope_hr) if np.isfinite(slope_hr) else np.nan,
                 "slope_err": float(slope_err) if np.isfinite(slope_err) else np.nan,
                 "crps": float(crps),
+                "hk_gain": float(hk_gain),
             })
 
     metrics_path = tables_dir / "metrics_by_sigma.csv"
@@ -576,15 +615,31 @@ def evaluate_sigma_control(
                 psd_gen_mean[i] = stack.mean(axis=0)
                 psd_gen_std[i]  = stack.std(axis=0)
 
+            # Aggregate LR curves (σ*-invariant, but follow same grouping for simplicity)
+            lr_stack = None
+            for s in sigmas_sorted:
+                if psd_acc_lr.get(float(s)):
+                    lr_stack = np.stack(psd_acc_lr[float(s)], axis=0)
+                    break
+            if lr_stack is not None and lr_stack.size > 0:
+                psd_lr_mean = lr_stack.mean(axis=0)
+                psd_lr_std  = lr_stack.std(axis=0)
+            else:
+                psd_lr_mean = np.zeros_like(k_ref_np)
+                psd_lr_std  = np.zeros_like(k_ref_np)
+
             np.savez(
                 tables_dir / "sigma_psd_curves.npz",
                 k=k_ref_np,
                 sigma_vals=sigmas_sorted,
                 psd_hr_mean=psd_hr_mean,
                 psd_hr_std=psd_hr_std,
+                psd_lr_mean=psd_lr_mean,
+                psd_lr_std=psd_lr_std,                
                 psd_gen_mean=psd_gen_mean,
                 psd_gen_std=psd_gen_std,
                 lr_nyquist=(1.0 / (2.0 * lr_dx_km)),
+                psd_band_km=np.array(psd_band, dtype=np.float64),                
             )
     except Exception as e:
         logger.warning(f"[sigma_control] Failed to save sigma_psd_curves.npz: {e}")
