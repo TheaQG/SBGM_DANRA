@@ -191,6 +191,7 @@ edm:
   P_std: 1.2 # Standard deviation of P for EDM
   sigma_data: 1.0 # Data is assumed N(0,1) after normalization
   sigma_min: 0.002 # Minimum sigma for EDM
+  sigma_star: 1.0 # Sigma star for EDM (training)
   sigma_max: 80 # Maximum sigma for EDM
   rho: 7.0 # Rho parameter for EDM
   # Starting with modest churn, can increase later if samples too smooth
@@ -319,44 +320,132 @@ generation:
     # config_filename: config.yaml # Filename for the saved configuration
 
 full_gen_eval:
-  use_new_eval: true 
+  use_new_eval: true
   seed: 504 # Random seed for full evaluation
+  sigma_star_grid: [0.70, 0.85, 1.00, 1.15, 1.30]
+  sigma_control:
+    sigma_star_mode: late_ramp   # or "global"
+    ramp_start_frac: 0.60
+    ramp_end_frac: 0.85
+    # Optional noise-level gate (overrides fractions if both set):
+    # ramp_start_sigma: 0.8
+    # ramp_end_sigma: 0.2  
   ensemble_size: 32 # Number of ensemble members to generate for full evaluation
   max_dates: 800 # Maximum number of dates to evaluate (set to -1 for all available dates)
-  do_prob: true # Whether to do probabilistic generation evaluation
-  do_scale: true
-  do_cap: false # Whether to do capability generation evaluation
-  do_ext: false # Whether to do extreme generation evaluation
-  plot_only: false # Whether to only plot results without computing metrics (loads saved metrics)
-  gen_dir: null # Directory for generation outputs (if null, use default)
-  eval_dir: null # Directory for evaluation outputs (if null, use default)
+  eval_land_only: true
+  prefer_phys: true
+  lr_key: lr # lr | lr_lrspace | lr_hrspace
+  make_plots: true
+  
   hr_dx_km: 2.5 # High-resolution grid spacing in km
   lr_dx_km: 31.0 # Low-resolution grid spacing in km
-  fss_threshold_mm: [1.0, 5.0, 10.0, 20.0, 50.0] # FSS threshold in mm/day
-  compute_lr_fss: true # Whether to compute FSS on LR grid
   grid_km_per_px: 2.5 # Grid spacing in km/px
   lr_grid_km_per_px: 31 # LR grid spacing in km/px
+
+  # Ensemble evaluation config fields
+  use_ensemble: true
+  ensemble_n_members: null # optional sub-sample, null for all
+  ensemble_member_seed: 1234
+  ensemble_reduction_fallback: pmm
+  ensemble_cache_members: false
+  dist_ensemble_pool_mode: pool # pool | member_mean
+  
+  # Which tasks to perform.
+  do_prob: true # Whether to do probabilistic generation evaluation
+  do_scale: false
+  do_dist: false
+  do_ext: false # Whether to do extreme generation evaluation
+  do_spat: false # Whether to do spatial statistics evaluation
+  do_temp: true # Whether to do temporal statistics evaluation
+  do_feat: false # Whether to do feature-based evaluation
+  do_dates: false
+  plot_only: false # Whether to only plot results without computing metrics (loads saved metrics)
+  
+  gen_dir: null # Directory for generation outputs (if null, use default)
+  eval_dir: null # Directory for evaluation outputs (if null, use default)
+
+  fss_threshold_mm: [1.0, 5.0, 10.0, 20.0, 50.0] # FSS threshold in mm/day
   fss_scales_km: [5, 10, 20, 40] # FSS scales in km
-  thresholds_mm: [1.0, 5.0, 10.0] # Thresholds in mm/day for categorical metrics
+  compute_lr_fss: true # Whether to compute FSS on LR grid
+  
+  iss_thresholds_mm: [1.0, 5.0, 10.0, 20.0, 50.0] # Thresholds in km for ISS (if null, use fss_threshold_mm)
+  iss_scales_km: [5, 10, 20, 40] # Scales in km for ISS (if null, use fss_scales_km)
+  compute_lr_iss: true 
+
+  thresholds_mm: [1.0, 5.0, 10.0, 20.0] # Thresholds in mm/day for categorical metrics
   wet_threshold_mm: 0.5 # Threshold for wet day in mm/day
+
   reliability_bins: 10 # 
   spread_skill_bins: 10
   pit_bins: 20 # Number of bins for PIT histogram
+
+  variogram_p: 0.5 # 
+  variogram_max_pairs: 5000
+
   psd_ignore_low_k_bins: 2
   psd_normalize: none # "none" | "per_field" | "match_ref"
   low_k_max: 0.005 # 1/200 km^-1
   high_k_max: 0.05 # 1/20 km^-1
+
   random_ref_kind: phase_randomized
   seasonal_summaries: true
   region_mask_path: null
+
   pixel_dist_n_bins: 100
   pixel_dist_vmax_percentile: 99.5
-  pixel_dist_save_cap: 5_000_000
-  yearly_maps: ["mean", "sum", "rx1", "rx5"]
-  add_yearly_ratio_diff: true
-  seasons: ["DJF", "MAM", "JJA", "SON"]
-  eval_land_only: true
-  make_plots: true
+  pixel_dist_save_cap: 20_000_000
+  pixel_dist_include_lr: true
+
+  # --- extremes ---
+  ext_agg_kind: "mean"            # "mean" or "sum" over masked HR domain per day
+  ext_rxk_days: [1, 5]            # Rx1day, Rx5day
+  ext_gev_rps_years: [2, 5, 10, 20, 50]
+  ext_blocks_per_year: 12.0        # 4.0 = seasonal GEV (DJF/MAM/JJA/SON), 12.0 = monthly GEV
+  ext_pot_thr_kind: "hr_quantile"    # "quantile" or "value"
+  ext_pot_thr_val: 0.95           # if kind="quantile" → 95th pct; if "value" → mm/day
+  ext_pot_rps_years: [2, 5, 10, 20, 50]
+  ext_days_per_year: 365.25
+  ext_wet_threshold_mm: 1.0
+  ext_include_lr: true           # LR series collection; plots currently focus on HR vs GEN
+  ext_tails_basis: pooled_pixels
+
+  # spatial
+  spatial_corr_kinds: ["pearson", "spearman"] # 
+  spatial_deseasonalize: True
+  spatial_vmin: null
+  spatial_vmax: null
+  spatial_show_diff: true
+  spatial_include_gen: false
+  spatial_include_ens: true
+  spatial_include_hr:  true
+  spatial_include_lr:  true
+
+  # temporal
+  temporal_include_lr: true
+  temporal_wet_thr_mm: 1.0
+  temporal_max_lag: 30
+  temporal_max_spell: 25
+  temporal_group_by: year # | year | season | all
+  temporal_ensemble_pool_mode: member_mean # member_mean | pool
+
+  # features
+  sal_structure_mode: object        # or: std_proxy
+  sal_threshold_kind: quantile      # or: absolute
+  sal_threshold_value: 0.85         # 90th percentile OR absolute mm/day. 0.85 means keep more mesoscale structure
+  sal_connectivity: 8               # 4 or 8
+  sal_min_area_px: 16               # 9: 3x3 kernel. 16 or 25 to reduce salt-and-pepper, and stabilize S
+  sal_smooth_sigma: 1.0             # optional, helps noisy data. Higher smoothing -> smaller ensemble spread result
+  sal_peakedness_mode: herfindahl
+
+  # dates
+  dates_list: ["20190107", "20190203", "20190312"]
+  dates_include_lr: true
+  dates_include_members: true
+  dates_n_members: 3
+  dates_cmap: "auto"
+  dates_percentile: 99.5
+
+
 
 quicklook: # Quicklook generation settings
   n_dates: 6 # Number of dates to generate quicklooks for

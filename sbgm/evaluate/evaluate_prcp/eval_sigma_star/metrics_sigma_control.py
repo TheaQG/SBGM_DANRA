@@ -230,8 +230,18 @@ def lp_correlation_lr_gen(
     if gv.size == 0 or lv.size == 0:
         return float("nan")
 
-    r = np.corrcoef(gv, lv)[0, 1]
-    return float(r)
+    # Numerically safe Pearson correlation (avoid np.corrcoef NaNs when std=0)
+    gv = gv.astype(np.float64)
+    lv = lv.astype(np.float64)
+    gv -= gv.mean()
+    lv -= lv.mean()
+    sgv = gv.std()
+    slv = lv.std()
+    if sgv < 1e-12 or slv < 1e-12:
+        logger.warning("[sigma_control] LP corr std zero (sgv=%.3e, slv=%.3e) -> returning NaN", sgv, slv)
+        return float("nan")
+    r = float(np.dot(gv, lv) / (gv.size * sgv * slv))
+    return r
 
 @torch.no_grad()
 def isotropic_psd_curve(
@@ -391,6 +401,9 @@ def evaluate_sigma_control(
     tables_dir = out_dir / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
 
+    logger.info("[sigma_control] Evaluating %d sigma* values; output -> %s",
+            len(sigma_star_grid), str(tables_dir))
+
     # Spacings (km) for filters/PSD — fall back to sane defaults if not in cfg
     hr_dx_km = float(_cfg_get(cfg, "full_gen_eval.hr_dx_km", 2.5))
     lr_dx_km = float(_cfg_get(cfg, "full_gen_eval.lr_dx_km", 31.0))
@@ -416,6 +429,8 @@ def evaluate_sigma_control(
         if not subdir.exists():
             logger.warning(f"[sigma_control] Missing generation folder for sigma*={sigma_star:.2f}: {subdir}")
             continue
+        logger.info("[sigma_control] σ*=%.2f | reading from %s",
+            float(sigma_star), str(subdir))
 
         resolver = EvalDataResolver(
             gen_root=subdir,
@@ -426,6 +441,9 @@ def evaluate_sigma_control(
         dates = resolver.list_dates()
         if max_dates > 0:
             dates = dates[:max_dates]
+
+        logger.info("[sigma_control] σ*=%.2f | %d dates to evaluate (max_dates=%d)",
+            float(sigma_star), len(dates), max_dates)
 
         for date in dates:
             hr = resolver.load_obs(date)          # [H,W] or None
@@ -522,13 +540,14 @@ def evaluate_sigma_control(
     metrics_path = tables_dir / "metrics_by_sigma.csv"
     summary_path = tables_dir / "agg_summary.csv"
     
-    header_metrics = ["date","sigma_star","r_lp","slope_gen","slope_hr","slope_err","crps"]
+    header_metrics = ["date","sigma_star","r_lp","slope_gen","slope_hr","slope_err","crps","hk_gain"]
     header_summary = ["sigma_star",
-                      "r_lp_mean","r_lp_std",
-                      "slope_gen_mean","slope_gen_std",
-                      "slope_hr_mean","slope_hr_std",
-                      "slope_err_mean","slope_err_std",
-                      "crps_mean","crps_std"]
+                    "r_lp_mean","r_lp_std",
+                    "slope_gen_mean","slope_gen_std",
+                    "slope_hr_mean","slope_hr_std",
+                    "slope_err_mean","slope_err_std",
+                    "crps_mean","crps_std",
+                    "hk_gain_mean","hk_gain_std"]
 
     if len(results) == 0:
         logger.warning("[sigma_control] No results computed — check inputs.")
@@ -552,8 +571,8 @@ def evaluate_sigma_control(
     agg_dict = defaultdict(lambda: defaultdict(list))
     for row in results:
         sigma = row["sigma_star"]
-        for key in ["r_lp", "slope_gen", "slope_hr", "slope_err", "crps"]:
-            agg_dict[sigma][key].append(row[key])
+        for key in ["r_lp", "slope_gen", "slope_hr", "slope_err", "crps", "hk_gain"]:
+            agg_dict[sigma][key].append(row.get(key, float("nan")))
     
     agg_rows = []
     for sigma in sorted(agg_dict.keys()):
@@ -563,6 +582,7 @@ def evaluate_sigma_control(
         slope_hr_arr = np.array(vals["slope_hr"], dtype=np.float64)
         slope_err_arr = np.array(vals["slope_err"], dtype=np.float64)
         crps_arr = np.array(vals["crps"], dtype=np.float64)
+        hk_gain_arr = np.array(vals.get("hk_gain", []), dtype=np.float64)
 
         row = [
             sigma,
@@ -571,6 +591,7 @@ def evaluate_sigma_control(
             float(np.nanmean(slope_hr_arr)), float(np.nanstd(slope_hr_arr)),
             float(np.nanmean(slope_err_arr)), float(np.nanstd(slope_err_arr)),
             float(np.nanmean(crps_arr)), float(np.nanstd(crps_arr)),
+            float(np.nanmean(hk_gain_arr)), float(np.nanstd(hk_gain_arr)),
         ]
         agg_rows.append(row)
 
@@ -579,6 +600,8 @@ def evaluate_sigma_control(
         writer = csv.writer(f)
         writer.writerow(header_summary)
         writer.writerows(agg_rows)
+
+    logger.info("[sigma_control] Wrote summary: %s (σ* values=%d)", str(summary_path), len(agg_rows))        
 
     # --- Save PSD curves (averaged across dates) for each sigma* ---
     try:
@@ -641,6 +664,8 @@ def evaluate_sigma_control(
                 lr_nyquist=(1.0 / (2.0 * lr_dx_km)),
                 psd_band_km=np.array(psd_band, dtype=np.float64),                
             )
+        logger.info("[sigma_control] Saved PSD curves: %s",
+            str(tables_dir / "sigma_psd_curves.npz"))
     except Exception as e:
         logger.warning(f"[sigma_control] Failed to save sigma_psd_curves.npz: {e}")
 

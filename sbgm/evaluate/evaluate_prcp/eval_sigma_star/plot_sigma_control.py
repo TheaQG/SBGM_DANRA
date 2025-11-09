@@ -5,6 +5,9 @@ Plot sigma*-dependent evaluation metrics: correlation, PSD slope, and CRPS.
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
+import logging 
+
+logger = logging.getLogger(__name__)
 
 # Additional imports for color and data utilities
 from sbgm.variable_utils import get_color_for_model, get_cmap_for_variable
@@ -34,6 +37,10 @@ def plot_sigma_control(summary_csv, figures_dir, combined: bool = False):
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     data = np.genfromtxt(summary_csv, delimiter=',', names=True, dtype=None, encoding='utf-8')
+
+    if isinstance(data, np.ndarray) and data.size == 0:
+        logger.warning("[sigma_control.plot] Empty summary CSV: %s", str(summary_csv))
+        return {}
 
     # Handle empty summary gracefully
     if isinstance(data, np.ndarray) and data.size == 0:
@@ -169,6 +176,7 @@ def plot_sigma_control(summary_csv, figures_dir, combined: bool = False):
         figpaths["hk_gain"] = str(figures_dir / "high_k_gain_vs_sigma.png")
         _savefig(fig, Path(figpaths["hk_gain"]), dpi=SET_DPI)
 
+    logger.info("[sigma_control.plot] Wrote figures: %s", figpaths)
     return figpaths
 
 
@@ -365,6 +373,10 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
         lr_nyq = float(d["lr_nyquist"]) if "lr_nyquist" in d.files else 0.0
         psd_band = tuple(d["psd_band_km"]) if "psd_band_km" in d.files else (5.0, 20.0)
 
+    # brief sanity
+    if k.ndim != 1 or psd_gen_mean.ndim != 2:
+        logger.warning("[sigma_psd] Unexpected shapes: k=%s, gen_mean=%s", k.shape, psd_gen_mean.shape)
+
     # Optional: read ramp/meta info
     ramp_info = None
     meta_path = (Path(out_dir) / "sigma_control_meta.json")
@@ -486,4 +498,5 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
 
     out_path = figs / "sigma_psd_curves.png"
     _savefig(fig, out_path, dpi=SET_DPI)
+    logger.info("[sigma_psd] Saved PSD figure: %s", str(out_path))
     return str(out_path)

@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as mcm
 from matplotlib.gridspec import GridSpec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Tuple
 
 from sbgm.utils import _squeeze_geo_value
 from sbgm.variable_utils import (
@@ -75,7 +75,7 @@ def _season_from_month(m: int) -> str:
 # ------------------------------
 # DK outline via LSM (cached)
 # ------------------------------
-_DK_LSM_CACHE: np.ndarray | None = None
+_DK_LSM_CACHE: Dict[Tuple[int, int, int, int], np.ndarray] = {}
 
 def _load_dk_lsm_outline(
     bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
@@ -127,11 +127,22 @@ def _load_dk_lsm_outline(
 def get_dk_lsm_outline(
     bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
 ) -> np.ndarray | None:
-    """Return cached DK outline mask (boolean [H,W]) or None if unavailable."""
+    """
+    Return cached DK outline mask (boolean [H,W]) for the requested `bounds`.
+    Caches per-bounds so different crops return correctly sized masks.
+    """
     global _DK_LSM_CACHE
-    if _DK_LSM_CACHE is None:
-        _DK_LSM_CACHE = _load_dk_lsm_outline()
-    return _DK_LSM_CACHE
+    try:
+        key = (int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3]))
+    except Exception:
+        # Fallback to default if bounds malformed
+        key = (200, 328, 380, 508)
+    if key in _DK_LSM_CACHE:
+        return _DK_LSM_CACHE[key]
+    m = _load_dk_lsm_outline(bounds=key)
+    if m is not None:
+        _DK_LSM_CACHE[key] = m
+    return m
 
 def overlay_outline(ax, mask: np.ndarray | None, *, color: str = "black", linewidth: float = 0.8):
     """Overlay a contour outline (level 0.5) on the given axes if mask is provided."""
@@ -213,13 +224,15 @@ def imshow_variable(
         vmin = float(under_threshold)
 
     im = ax.imshow(arr, cmap=cm_obj, vmin=vmin, vmax=vmax, interpolation="nearest", origin="lower")
-    ax.invert_yaxis()
+    if add_dk_outline:
+        mask = get_dk_lsm_outline(bounds)
+        # flip upside down to match imshow orientation
+        mask = np.flipud(mask)  # type: ignore
+        overlay_outline(ax, mask, color=outline_color, linewidth=outline_linewidth)
+    # ax.invert_yaxis()
     ax.set_xticks([])
     ax.set_yticks([])
 
-    if add_dk_outline:
-        mask = get_dk_lsm_outline(bounds)
-        overlay_outline(ax, mask, color=outline_color, linewidth=outline_linewidth)
 
     return im
 

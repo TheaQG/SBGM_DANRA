@@ -20,6 +20,7 @@ def run(cfg, make_plots=True):
     logger.info(f"[SigmaControl] Evaluating σ* grid {sigma_grid} for {model_name}")
 
     metrics_paths = evaluate_sigma_control(cfg, sigma_grid, base_gen, out_dir)
+    logger.info("[SigmaControl] Metrics written: %s", metrics_paths)
 
     # Write sigma-control metadata for plotting/context
     try:
@@ -62,4 +63,5 @@ def run(cfg, make_plots=True):
         plot_sigma_control_psd_curves(out_dir)
 
     logger.info(f"[SigmaControl] Done. Results in {out_dir}")
+    logger.info("[SigmaControl] Figures in: %s", str(Path(out_dir) / "figures"))
     return out_dir
