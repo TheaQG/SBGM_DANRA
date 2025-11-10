@@ -372,6 +372,12 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
         psd_gen_std  = d["psd_gen_std"]  # [S,K]
         lr_nyq = float(d["lr_nyquist"]) if "lr_nyquist" in d.files else 0.0
         psd_band = tuple(d["psd_band_km"]) if "psd_band_km" in d.files else (5.0, 20.0)
+        psd_hr_logmu  = d["psd_hr_logmu"]  if "psd_hr_logmu"  in d.files else None
+        psd_hr_logstd = d["psd_hr_logstd"] if "psd_hr_logstd" in d.files else None
+        psd_lr_logmu  = d["psd_lr_logmu"]  if "psd_lr_logmu"  in d.files else None
+        psd_lr_logstd = d["psd_lr_logstd"] if "psd_lr_logstd" in d.files else None
+        psd_gen_logmu  = d["psd_gen_logmu"]  if "psd_gen_logmu"  in d.files else None
+        psd_gen_logstd = d["psd_gen_logstd"] if "psd_gen_logstd" in d.files else None
 
     # brief sanity
     if k.ndim != 1 or psd_gen_mean.ndim != 2:
@@ -401,10 +407,18 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
     fig, ax = plt.subplots(figsize=(9.0, 6.0))
 
     # HR and LR references
-    hr = np.maximum(psd_hr_mean[mpos][order], 1e-12)
-    lr = np.maximum(psd_lr_mean[mpos][order], 1e-12)
-    ax.plot(lam, hr, color=get_color_for_model("hr"), lw=2.0, label="HR (DANRA)")
-    ax.plot(lam, lr, color=get_color_for_model("lr"), lw=1.6, ls="--", label="LR (ERA5↑)")
+    hr_lin = np.maximum(psd_hr_mean[mpos][order], 1e-12)
+    lr_lin = np.maximum(psd_lr_mean[mpos][order], 1e-12)
+    ax.plot(lam, hr_lin, color=get_color_for_model("hr"), lw=2.0, label="HR (DANRA)")
+    ax.plot(lam, lr_lin, color=get_color_for_model("lr"), lw=1.6, ls="--", label="LR (ERA5↑)")
+    z = 1.0
+    # Only fill bands if both log-mean and log-std are available
+    if (psd_hr_logmu is not None) and (psd_hr_logstd is not None):
+        mu = psd_hr_logmu[mpos][order]; sd = psd_hr_logstd[mpos][order]
+        ax.fill_between(lam, 10**(mu - z*sd), 10**(mu + z*sd), color=get_color_for_model("hr"), alpha=0.15)
+    if (psd_lr_logmu is not None) and (psd_lr_logstd is not None):
+        mu = psd_lr_logmu[mpos][order]; sd = psd_lr_logstd[mpos][order]
+        ax.fill_between(lam, 10**(mu - z*sd), 10**(mu + z*sd), color=get_color_for_model("lr"), alpha=0.12)
 
     # Shaded slope band (in λ)
     lam_lo, lam_hi = float(psd_band[0]), float(psd_band[1])  # e.g., 5–20 km
@@ -422,40 +436,45 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
     for i, s in enumerate(sigma_vals):
         c = cmap(0.15 + 0.75 * (1 - i / max(1, S-1)))  # darkest for smallest σ*
         mean_i = np.maximum(psd_gen_mean[i][mpos][order], 1e-12)
-        std_i  = np.maximum(psd_gen_std[i][mpos][order], 0.0)
         ax.plot(lam, mean_i, lw=1.8, color=c, label=fr"GEN (σ*={s:.2f})")
-        # CI shading (±1σ in PSD domain)
-        upper = mean_i + std_i
-        lower = np.clip(mean_i - std_i, 1e-14, None)
-        ax.fill_between(lam, lower, upper, color=c, alpha=0.25, linewidth=0)
+        z = 1.0
+        # Use log-mean/log-std band if both are available, otherwise fall back to linear std
+        if (psd_gen_logmu is not None) and (psd_gen_logstd is not None):
+            mu = psd_gen_logmu[i][mpos][order]
+            sd = psd_gen_logstd[i][mpos][order]
+            lower = 10**(mu - z*sd)
+            upper = 10**(mu + z*sd)
+        else:
+            std_i = np.maximum(psd_gen_std[i][mpos][order], 0.0)
+            lower = np.clip(mean_i - std_i, 1e-14, None)
+            upper = mean_i + std_i
+        ax.fill_between(lam, lower, upper, color=c, alpha=0.22)
 
-        # Compute slope in the band using log10 fit
+        # Compute slope in the band using log10 fit on k (unsorted k_pos domain)
+        eps = 1e-20
         k_lo = 1.0 / right
         k_hi = 1.0 / left
         mband = (k_pos > k_lo) & (k_pos < k_hi)
+
         if mband.any():
-            x = np.log10(k_pos[mband])
-            y = np.log10(psd_gen_mean[i][mpos][mband])
-            coef = np.polyfit(x, y, 1)
+            xk = np.log10(k_pos[mband])
+            yk_gen = np.log10(np.clip(psd_gen_mean[i][mpos][mband], eps, None))
+            coef = np.polyfit(xk, yk_gen, 1)
             slopes_txt.append(fr"σ*={s:.2f}: {coef[0]:.2f}")
         else:
             slopes_txt.append(fr"σ*={s:.2f}: n/a")
 
-    # Compute HR and LR slopes in the same mesoscale band
-    k_lo = 1.0 / right
-    k_hi = 1.0 / left
-    mband_hr = (k_pos > k_lo) & (k_pos < k_hi)
-    mband_lr = (k_pos > k_lo) & (k_pos < k_hi)
+    # Compute HR and LR slopes in the same mesoscale band (use mean PSD curves)
+    eps = 1e-20
+    mband_ref = (k_pos > (1.0 / right)) & (k_pos < (1.0 / left))
     hr_slope = np.nan
     lr_slope = np.nan
-    if mband_hr.any():
-        xh = np.log10(k_pos[mband_hr])
-        yh = np.log10(hr[mband_hr])
-        hr_slope = np.polyfit(xh, yh, 1)[0]
-    if mband_lr.any():
-        xl = np.log10(k_pos[mband_lr])
-        yl = np.log10(lr[mband_lr])
-        lr_slope = np.polyfit(xl, yl, 1)[0]
+    if mband_ref.any():
+        xk = np.log10(k_pos[mband_ref])
+        yk_hr = np.log10(np.clip(psd_hr_mean[mpos][mband_ref], eps, None))
+        hr_slope = np.polyfit(xk, yk_hr, 1)[0]
+        yk_lr = np.log10(np.clip(psd_lr_mean[mpos][mband_ref], eps, None))
+        lr_slope = np.polyfit(xk, yk_lr, 1)[0]
     slopes_txt.append(fr"HR: {hr_slope:.2f}")
     slopes_txt.append(fr"LR: {lr_slope:.2f}")
 

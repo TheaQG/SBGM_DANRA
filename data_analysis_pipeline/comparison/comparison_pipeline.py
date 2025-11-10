@@ -22,6 +22,9 @@ def run_comparison_pipeline(cfg):
         (Distributional, Field-based, Time-series based)
     """
 
+    # Global flags
+    plot_only = cfg.get("global", {}).get("plot_only", False)
+
     # === Extract config sections ===
     highres_cfg = cfg["highres"]
     lowres_cfg = cfg["lowres"]
@@ -48,6 +51,11 @@ def run_comparison_pipeline(cfg):
         save_path = os.path.join(save_path, split) if split != "all" else save_path
     print_results = comparison_cfg.get("print_results", True)
     max_days = comparison_cfg.get("max_days", None)  # Limit number of days to process (for testing)
+
+    # Cache directory for precomputed comparison artifacts
+    cache_dir = os.path.join(save_path if save_path else "./figures/comparison", "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    logger.info(f"[COMPARE] Mode: {'PLOT-ONLY' if plot_only else 'COMPUTE+PLOT'} | Cache: {cache_dir}")
 
     logger.info(f"\n[COMPARE] Saving figures to: {save_path if save_figures else 'Not saving figures'}")
 
@@ -121,7 +129,10 @@ def run_comparison_pipeline(cfg):
                             model2=model_lr,
                             save_path=save_path if save_figures else "",
                             show=show,
-                            print_results=print_results
+                            print_results=print_results,
+                            bounds=tuple(highres_cfg.get("crop_region", [200, 328, 380, 508])),
+                            plot_only=plot_only,
+                            cache_dir=cache_dir,                            
                             )
                 logger.info("=========== Single day field comparison completed ===========\n")
 
@@ -148,6 +159,10 @@ def run_comparison_pipeline(cfg):
                 hr_dict = {d: c for d, c in zip(hr_data["timestamps"], hr_data["cutouts"])}
                 lr_dict = {d: c for d, c in zip(lr_data["timestamps"], lr_data["cutouts"])}
 
+                # --- Read new options from config ---
+                add_dk_outline = field_mode_cfg.get("add_dk_outline", True)
+                include_difference = field_mode_cfg.get("include_difference", False)
+
                 plot_samples_grid(
                     hr=hr_dict,
                     lr=lr_dict,
@@ -158,6 +173,9 @@ def run_comparison_pipeline(cfg):
                     combine_into_grid=field_mode_cfg.get("combine_into_grid", True),
                     save_path=save_path if save_path is not None else f"./figures/comparison/{variable}",
                     show=show,
+                    add_dk_outline=add_dk_outline,
+                    include_difference=include_difference,
+                    bounds=tuple(highres_cfg.get("crop_region", [200, 328, 380, 508])),                    
                     )
                 logger.info("=========== Qualitative visual comparison completed ===========\n")
         
@@ -209,6 +227,7 @@ def run_comparison_pipeline(cfg):
                             variable,
                             save_path=save_path if save_figures else "",
                             show=show)
+            # (no caching change here yet)
             if print_results:
                 logger.info("=== Time series comparison summary ===")
                 for metric, stats in result.items():
@@ -252,7 +271,10 @@ def run_comparison_pipeline(cfg):
                                         model_lr,
                                         variable,
                                         save_path=save_path if save_figures else "",
-                                        show=show)
+                                        show=show,
+                                        cache_dir=cache_dir,
+                                        plot_only=plot_only,
+                                        )
                         if print_results:
                             logger.info(f"=== Power Spectra comparison for {date} ===")
                             if ps_metrics is not None:
@@ -278,7 +300,10 @@ def run_comparison_pipeline(cfg):
                                         model_lr,
                                         variable,
                                         save_path=save_path if save_figures else "",
-                                        show=show)
+                                        show=show,
+                                        cache_dir=cache_dir,
+                                        plot_only=plot_only,
+                                        )
                         if print_results:
                             logger.info(f"=== Pixel Distribution comparison for {date} ===")
                             if stats is not None:
@@ -311,7 +336,10 @@ def run_comparison_pipeline(cfg):
                                         dx_model1 = highres_cfg.get("grid_spacing_km", 1.0),
                                         dx_model2 = lowres_cfg.get("grid_spacing_km", 1.0),
                                         save_path=save_path if save_figures else "",
-                                        show=show)
+                                        show=show,
+                                        cache_dir=cache_dir,
+                                        plot_only=plot_only,
+                                        )
                         if print_results:
                             logger.info("=== Batch Power Spectra comparison summary ===")
                             for metric, stats in ps_summary.items():
@@ -346,7 +374,10 @@ def run_comparison_pipeline(cfg):
                                         variable,
                                         log_hist=plot_log,
                                         save_path=save_path if save_figures else "",
-                                        show=show)
+                                        show=show,
+                                        cache_dir=cache_dir,
+                                        plot_only=plot_only,
+                                        )
                         if print_results:
                             logger.info("=== Batch Pixel Distribution comparison summary ===")
                             if pixel_stats is not None:

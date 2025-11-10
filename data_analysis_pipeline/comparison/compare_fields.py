@@ -4,9 +4,12 @@
         - Spatial: Error maps, differen fields, ratio maps
 """
 import logging
+import os
 import numpy as np
 import matplotlib.pyplot as plt
+
 from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable
+from sbgm.plotting_utils import plot_spatial_panel, get_dk_lsm_outline, overlay_outline
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
@@ -51,7 +54,8 @@ def plot_difference_map(
             variable="variable",
             title='Difference Map',
             save_path=None,
-            show=False):
+            show=False,
+            bounds=None):
     """
     Plot the difference map between two data fields and the two fields themselves.
     
@@ -80,24 +84,61 @@ def plot_difference_map(
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
     axs = axs.ravel()  # Flatten
 
-    panels = [
-        (data_model1, f'{variable} - {model1}', get_cmap_for_variable(variable), (vmin, vmax)),
-        (data_model2, f'{variable} - {model2}', get_cmap_for_variable(variable), (vmin, vmax)),
-        (diff_map, f'{variable} - Difference ({model1} - {model2})', 'bwr', (-dmax, dmax) if dmax is not None else (None, None))
-    ]
+    bnds = tuple(bounds) if bounds is not None else (200, 328, 380, 508)
+    is_precip = variable.lower() in ["prcp", "precip", "precipitation"]
 
-    for ax, (arr, ttl, cmap, lims) in zip(axs, panels):
-        vmin_i, vmax_i = lims
-        im = ax.imshow(arr, cmap=cmap, vmin=vmin_i, vmax=vmax_i, origin='lower')
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title(ttl)
+    # Panel 1: model1 with correct cmap + DK outline
+    im1 = plot_spatial_panel(
+        axs[0],
+        np.asarray(data_model1),
+        variable=variable,
+        vmin=vmin, vmax=vmax,
+        add_dk_outline=True,
+        outline_color="darkgrey",
+        outline_linewidth=0.8,
+        title=f"{variable} - {model1}",
+        under_color="#bdbdbd" if is_precip else None,
+        under_threshold=0.01 if is_precip else None,
+        bounds=bnds,
+    )
+    axs[0].figure.axes[-1].set_ylabel(f"[{unit}]" if unit else "")
 
-        # Compact, consistent colorbars using axes_grid1 (same width across panels)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="3.5%", pad=0.05)
-        cb = plt.colorbar(im, cax=cax, orientation="vertical")
-        cb.set_label(f"[{unit}]" if unit else "")
+    # Panel 2: model2 with correct cmap + DK outline
+    im2 = plot_spatial_panel(
+        axs[1],
+        np.asarray(data_model2),
+        variable=variable,
+        vmin=vmin, vmax=vmax,
+        add_dk_outline=True,
+        outline_color="darkgrey",
+        outline_linewidth=0.8,
+        title=f"{variable} - {model2}",
+        under_color="#bdbdbd" if is_precip else None,
+        under_threshold=0.01 if is_precip else None,
+        bounds=bnds,
+    )
+    axs[1].figure.axes[-1].set_ylabel(f"[{unit}]" if unit else "")
+
+    # Panel 3: difference with diverging cmap
+    vmin_d, vmax_d = ((-dmax, dmax) if dmax is not None else (None, None))
+    try:
+        diff_cmap = get_cmap_for_variable(f"{variable}_bias")
+    except Exception:
+        diff_cmap = "bwr"
+    im3 = axs[2].imshow(diff_map, cmap=diff_cmap, vmin=vmin_d, vmax=vmax_d, origin="lower")
+    axs[2].set_xticks([]); axs[2].set_yticks([]); axs[2].set_title(f"{variable} - Difference ({model1} - {model2})")
+    # DK outline on difference panel
+    try:
+        mask = get_dk_lsm_outline(bnds)
+        if mask is not None:
+            mask = np.flipud(np.asarray(mask))  # align with imshow origin='lower'
+        overlay_outline(axs[2], mask, color="darkgrey", linewidth=0.8)
+    except Exception:
+        pass    
+    divider = make_axes_locatable(axs[2])
+    cax3 = divider.append_axes("right", size="3.5%", pad=0.05)
+    cb3 = plt.colorbar(im3, cax=cax3, orientation="vertical")
+    cb3.set_label(f"[{unit}]" if unit else "")
 
     fig.suptitle(title, fontsize=16)
     
@@ -119,11 +160,48 @@ def compare_single_day_fields(
                     model2="Model 2",
                     save_path=None,
                     show=False,
-                    print_results=True):
+                    print_results=True,
+                    bounds=None,
+                    plot_only: bool = False,
+                    cache_dir: str | None = None):
     """
     Compare two 2D fields from the same date.
     Supports inputs as either raw arrays or {'cutout': ..., 'timestamp': ...} dicts.
     """
+
+    """
+    Compare two 2D fields from the same date.
+    Supports inputs as either raw arrays or {'cutout': ..., 'timestamp': ...} dicts.
+    """
+
+    def _cache_fname(date_str):
+        if cache_dir is None or date_str is None:
+            return None
+        safe = f"{variable}_{model1}_vs_{model2}_{date_str}_fields.npz".replace(' ', '_')
+        return os.path.join(cache_dir, safe)
+
+    def _save_cache(path, arr1, arr2, stats):
+        if path is None:
+            return
+        try:
+            import numpy as np
+            np.savez_compressed(path, data_model1=np.asarray(arr1), data_model2=np.asarray(arr2), **stats)
+            logger.info(f"      [cache] Saved field cache to {path}")
+        except Exception as e:
+            logger.warning(f"      [cache] Failed to save field cache to {path}: {e}")
+
+    def _load_cache(path):
+        try:
+            import numpy as np
+            with np.load(path) as z:
+                a1 = z["data_model1"]
+                a2 = z["data_model2"]
+                stats = {k: float(z[k]) for k in ["bias","rmse","corr","std_diff"] if k in z}
+            logger.info(f"      [cache] Loaded field cache from {path}")
+            return a1, a2, stats
+        except Exception as e:
+            logger.warning(f"      [cache] Failed to load field cache {path}: {e}")
+            return None, None, {}
 
     # === DICT-WRAPPED INPUTS ===
     timestamp1 = None
@@ -140,8 +218,24 @@ def compare_single_day_fields(
 
     date_str = timestamp1.strftime("%Y%m%d") if timestamp1 else None
 
+    cache_path = _cache_fname(date_str)
+    if plot_only and cache_path and os.path.exists(cache_path):
+        # Load arrays and stats from cache, skip recompute
+        dm1, dm2, stats_loaded = _load_cache(cache_path)
+        if dm1 is not None and dm2 is not None:
+            if print_results and stats_loaded:
+                logger.info(f"[cache] Stats (loaded): bias={stats_loaded.get('bias', np.nan):.3f}, rmse={stats_loaded.get('rmse', np.nan):.3f}, corr={stats_loaded.get('corr', np.nan):.3f}, std_diff={stats_loaded.get('std_diff', np.nan):.3f}")
+            if show or save_path:
+                title = f'{variable} | {model1} vs {model2} | {date_str if date_str else "N/A"}'
+                plot_difference_map(dm1, dm2, model1=model1, model2=model2, variable=variable, title=title, save_path=save_path if save_path else None, show=show, bounds=bounds)
+            return stats_loaded if stats_loaded else {"bias": np.nan, "rmse": np.nan, "corr": np.nan, "std_diff": np.nan}
+
     # === COMPUTE STATS ===
     stats = compute_field_stats(data_model1, data_model2, mask)
+
+    # Save compute results for future plot-only runs
+    if cache_path:
+        _save_cache(cache_path, data_model1, data_model2, stats)
 
     if print_results:
         logger.info(f"\nComparison stats for {variable} on {date_str if date_str else 'N/A'}:")
@@ -159,7 +253,8 @@ def compare_single_day_fields(
             variable=variable,
             title=title,
             save_path=save_path if save_path else None,
-            show=show
+            show=show,
+            bounds=bounds
             )
 
     return stats

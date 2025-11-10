@@ -165,7 +165,7 @@ def imshow_variable(
     vmax: float | None = None,
     cmap: str | None = None,
     add_dk_outline: bool = True,
-    outline_color: str = "white",
+    outline_color: str = "darkgrey",
     outline_linewidth: float = 0.8,
     under_color: str | None = None,
     under_threshold: float | None = None,
@@ -305,7 +305,7 @@ def plot_spatial_panel(
     vmin: float | None = None,
     vmax: float | None = None,
     add_dk_outline: bool = True,
-    outline_color: str = "white",
+    outline_color: str = "darkgrey",
     outline_linewidth: float = 0.8,
     title: str | None = None,
     under_color: str | None = None,
@@ -544,7 +544,7 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
                 # m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
                 try:
                     # ax.contour(lsm_data, levels=[0.5], colors='white', linewidths=0.5)
-                    ax.contour(m.astype(float, copy=False), levels=[0.5], colors='white', linewidths=0.8)
+                    ax.contour(m.astype(float, copy=False), levels=[0.5], colors='darkgrey', linewidths=0.8)
                 except Exception as e:
                     logger.warning(f"LSM contour failed on {key}: {e}")
 
@@ -912,7 +912,7 @@ def plot_samples_and_generated(
             # Specifically NOT the HR lsm, if we change LR geographical domain
             if key.endswith('_lr') and "lsm" in sample and sample["lsm"] is not None and bool(cfg_vis.get('overlay_lsm_contour', True)):
                 lsm_data = to_numpy(sample["lsm"]).squeeze()
-                ax.contour(lsm_data, levels=[0.5], colors='white', linewidths=0.5)
+                ax.contour(lsm_data, levels=[0.5], colors='darkgrey', linewidths=0.5)
 
             # ========= column headers (title logic) =========
             if r == 0:

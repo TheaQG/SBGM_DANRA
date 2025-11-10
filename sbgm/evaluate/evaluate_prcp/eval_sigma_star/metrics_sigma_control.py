@@ -227,6 +227,18 @@ def lp_correlation_lr_gen(
         gv = g_lp.detach().cpu().numpy().ravel()
         lv = l_lp.detach().cpu().numpy().ravel()
 
+    # If masked LR variance is ~0, try again without mask (domain too small / dry day)
+    gv0 = gv; lv0 = lv
+    sgv0 = float(np.std(gv0))
+    slv0 = float(np.std(lv0))
+    if slv0 < 1e-12:
+        gv_full = g_lp.detach().cpu().numpy().ravel()
+        lv_full = l_lp.detach().cpu().numpy().ravel()
+        s_full = float(np.std(lv_full))
+        if s_full >= 1e-12:
+            gv, lv = gv_full, lv_full
+            logger.info("[sigma_control] LP corr fallback: using unmasked domain (masked LR std≈0, full std=%.3e)", s_full)
+
     if gv.size == 0 or lv.size == 0:
         return float("nan")
 
@@ -238,7 +250,7 @@ def lp_correlation_lr_gen(
     sgv = gv.std()
     slv = lv.std()
     if sgv < 1e-12 or slv < 1e-12:
-        logger.warning("[sigma_control] LP corr std zero (sgv=%.3e, slv=%.3e) -> returning NaN", sgv, slv)
+        logger.warning("[sigma_control] LP corr std zero after fallback (sgv=%.3e, slv=%.3e) -> NaN", sgv, slv)
         return float("nan")
     r = float(np.dot(gv, lv) / (gv.size * sgv * slv))
     return r
@@ -459,13 +471,13 @@ def evaluate_sigma_control(
 
             # --- PSD curves for GEN (ensemble mean per date) and HR ---
             hk_gain = float("nan")
+            # compute GEN ensemble mean field for PSD (average across members)
+            if isinstance(ens, torch.Tensor):
+                gen_mean_2d = ens.mean(dim=0)  # [H,W]
+            else:
+                gen_mean_2d = torch.from_numpy(np.asarray(ens)).mean(dim=0)  # type: ignore
             try:
-                # GEN ensemble mean field for PSD (average across members)
-                if isinstance(ens, torch.Tensor):
-                    gen_mean_2d = ens.mean(dim=0)  # [H,W]
-                else:
-                    gen_mean_2d = torch.from_numpy(np.asarray(ens)).mean(dim=0)  # type: ignore
-
+                # GEN ensemble mean already computed above
                 k_gen, P_gen = isotropic_psd_curve(gen_mean_2d, dx_km=hr_dx_km)
                 k_hr,  P_hr  = isotropic_psd_curve(hr, dx_km=hr_dx_km)
 
@@ -512,17 +524,28 @@ def evaluate_sigma_control(
             except Exception as e:
                 logger.warning(f"[sigma_control] PSD curve failed on {date} @ sigma*={sigma_star:.2f}: {e}")
 
+            # Diagnostics: std before LP (masked) to understand zero-variance cases
+            try:
+                if mask is not None:
+                    m = mask.bool()
+                    std_lr_raw = float(torch.nan_to_num(lr.squeeze()[m].float(), nan=0.0).std().cpu().item())
+                else:
+                    std_lr_raw = float(torch.nan_to_num(lr.squeeze().float(), nan=0.0).std().cpu().item())
+                logger.debug("[sigma_control] %s σ*=%.2f | raw LR std=%.3e", date, float(sigma_star), std_lr_raw)
+            except Exception:
+                pass
+
             # 1) Low-pass correlation (≤ LR Nyquist)
             r_lp = lp_correlation_lr_gen(
                 pmm, lr, mask,
                 hr_dx_km=hr_dx_km, lr_dx_km=lr_dx_km, taper_frac=taper_frac
             )
 
-            # 2) PSD slope for GEN and HR in mesoscale band
-            slope_gen = psd_slope_band(pmm, dx_km=hr_dx_km, band_km=psd_band)
-            slope_hr  = psd_slope_band(hr,  dx_km=hr_dx_km, band_km=psd_band)
-            slope_err = slope_gen - slope_hr if (np.isfinite(slope_gen) and np.isfinite(slope_hr)) else np.nan
-
+            # 2) PSD slope for GEN (ensemble mean) and HR in mesoscale band
+            slope_gen = psd_slope_band(gen_mean_2d, dx_km=hr_dx_km, band_km=psd_band)
+            slope_hr  = psd_slope_band(hr,         dx_km=hr_dx_km, band_km=psd_band)
+            slope_err = slope_gen - slope_hr if (np.isfinite(slope_gen)  and np.isfinite(slope_hr)) else np.nan
+            
             # 3) CRPS over land (if available)
             crps = crps_ensemble_local(hr, ens, mask=mask, reduction="mean").item()
 
@@ -618,18 +641,29 @@ def evaluate_sigma_control(
                         hr_stack = np.stack(psd_acc_hr[float(s)], axis=0)
                         break
 
+            # --- LOG-DOMAIN EPSILON ---
+            eps = 1e-14
+
+            # HR mean/std and log-domain mean/std
             if hr_stack is not None and hr_stack.size > 0:
                 psd_hr_mean = hr_stack.mean(axis=0)
                 psd_hr_std  = hr_stack.std(axis=0)
+                hr_log = np.log10(np.clip(hr_stack, eps, None))
+                psd_hr_logmu  = hr_log.mean(axis=0)
+                psd_hr_logstd = hr_log.std(axis=0)
             else:
                 psd_hr_mean = np.zeros_like(k_ref_np)
                 psd_hr_std  = np.zeros_like(k_ref_np)
+                psd_hr_logmu  = np.zeros_like(k_ref_np)
+                psd_hr_logstd = np.zeros_like(k_ref_np)                
 
-            # Stack GEN means/stds per sigma*
+            # Stack GEN means/stds per sigma* and log-domain stats
             S = len(sigmas_sorted)
             K = k_ref_np.shape[0]
             psd_gen_mean = np.zeros((S, K), dtype=np.float64)
             psd_gen_std  = np.zeros((S, K), dtype=np.float64)
+            psd_gen_logmu = np.zeros((S, K), dtype=np.float64)
+            psd_gen_logstd = np.zeros((S, K), dtype=np.float64)            
             for i, s in enumerate(sigmas_sorted):
                 arrs = psd_acc_gen[float(s)]
                 if len(arrs) == 0:
@@ -637,6 +671,9 @@ def evaluate_sigma_control(
                 stack = np.stack(arrs, axis=0)  # [N_dates, K]
                 psd_gen_mean[i] = stack.mean(axis=0)
                 psd_gen_std[i]  = stack.std(axis=0)
+                stack_log = np.log10(np.clip(stack, eps, None))
+                psd_gen_logmu[i]  = stack_log.mean(axis=0)
+                psd_gen_logstd[i] = stack_log.std(axis=0)
 
             # Aggregate LR curves (σ*-invariant, but follow same grouping for simplicity)
             lr_stack = None
@@ -647,9 +684,14 @@ def evaluate_sigma_control(
             if lr_stack is not None and lr_stack.size > 0:
                 psd_lr_mean = lr_stack.mean(axis=0)
                 psd_lr_std  = lr_stack.std(axis=0)
+                lr_log = np.log10(np.clip(lr_stack, eps, None))
+                psd_lr_logmu  = lr_log.mean(axis=0)
+                psd_lr_logstd = lr_log.std(axis=0)                
             else:
                 psd_lr_mean = np.zeros_like(k_ref_np)
                 psd_lr_std  = np.zeros_like(k_ref_np)
+                psd_lr_logmu  = np.zeros_like(k_ref_np)
+                psd_lr_logstd = np.zeros_like(k_ref_np)
 
             np.savez(
                 tables_dir / "sigma_psd_curves.npz",
@@ -661,6 +703,12 @@ def evaluate_sigma_control(
                 psd_lr_std=psd_lr_std,                
                 psd_gen_mean=psd_gen_mean,
                 psd_gen_std=psd_gen_std,
+                psd_hr_logmu=psd_hr_logmu,
+                psd_hr_logstd=psd_hr_logstd,
+                psd_lr_logmu=psd_lr_logmu,
+                psd_lr_logstd=psd_lr_logstd,
+                psd_gen_logmu=psd_gen_logmu,
+                psd_gen_logstd=psd_gen_logstd,                
                 lr_nyquist=(1.0 / (2.0 * lr_dx_km)),
                 psd_band_km=np.array(psd_band, dtype=np.float64),                
             )

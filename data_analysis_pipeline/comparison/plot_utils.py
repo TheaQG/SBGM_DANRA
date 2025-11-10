@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sbgm.variable_utils import get_cmap_for_variable, get_unit_for_variable
+from sbgm.plotting_utils import get_dk_lsm_outline, overlay_outline
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,9 @@ def plot_samples_grid(
     combine_into_grid: bool = True,
     save_path: str = "./figures/comparison",
     show: bool = False,
+    add_dk_outline: bool = True,
+    include_difference: bool = False,
+    bounds: tuple[int, int, int, int] | None = None,    
 ):
     """
     Publication-style qualitative comparison figure (HR vs LR) for one or more days.
@@ -56,6 +60,11 @@ def plot_samples_grid(
     cmap_hr = get_cmap_for_variable(variable)
     cmap_lr = get_cmap_for_variable(variable)  # same palette for comparability
     units = get_unit_for_variable(variable)
+    if bounds is None:
+        bnds = (200, 328, 380, 508)
+    else:
+        # Ensure a fixed-length 4-tuple of ints so static type checkers accept it
+        bnds = (int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3]))
 
     def _finite_minmax(*arrays):
         vals = []
@@ -96,9 +105,9 @@ def plot_samples_grid(
 
     def _plot_one_figure(day_list):
         n_rows = len(day_list)
-        n_cols = 2  # HR | LR
-        fig, axs = plt.subplots(n_rows, n_cols, figsize=(10, 4 * n_rows), squeeze=False)
-        fig.suptitle(f"Qualitative comparison – {variable} ({hr_model} vs {lr_model})", fontsize=14)
+        n_cols = 3 if include_difference else 2  # HR | LR | (optional) Difference
+        fig, axs = plt.subplots(n_rows, n_cols, figsize=(10 + 4*(n_cols-2), 4 * n_rows), squeeze=False)
+        fig.suptitle(f"Qualitative comparison - {variable} ({hr_model} vs {lr_model})", fontsize=14)
 
         for r, d in enumerate(day_list):
             fld_hr = np.asarray(hr[d])
@@ -109,23 +118,62 @@ def plot_samples_grid(
             if vmin is None or vmax is None:
                 vmin, vmax = np.nanmin(fld_hr), np.nanmax(fld_hr)
 
-            for c, (fld, model_label, cmap) in enumerate(
-                [(fld_hr, f"HR {hr_model}", cmap_hr), (fld_lr, f"LR {lr_model}", cmap_lr)]
-            ):
+            # Difference field and symmetric limits
+            # initialize defaults so variables are always bound for static analysis
+            diff_fld = None
+            diff_cmap = "bwr"
+            vmin_d = None
+            vmax_d = None
+            if include_difference:
+                diff_fld = fld_hr - fld_lr
+                fd = diff_fld[np.isfinite(diff_fld)]
+                dmax = float(np.max(np.abs(fd))) if fd.size else None
+                vmin_d, vmax_d = ((-dmax, dmax) if dmax is not None else (None, None))
+                try:
+                    diff_cmap = get_cmap_for_variable(f"{variable}_bias")
+                except Exception:
+                    diff_cmap = "bwr"
+
+            panels = [
+                (fld_hr, f"HR {hr_model}", cmap_hr, (vmin, vmax)),
+                (fld_lr, f"LR {lr_model}", cmap_lr, (vmin, vmax)),
+            ]
+            if include_difference:
+                panels.append((np.asarray(diff_fld), "Difference (HR - LR)", diff_cmap, (vmin_d, vmax_d)))
+
+            for c, (fld, model_label, cmap, lims) in enumerate(panels):
                 ax = axs[r, c]
-                im = ax.imshow(fld, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest", origin="lower")
-                ax.set_xticks([])
-                ax.set_yticks([])
+                vmin_i, vmax_i = lims
+                im = ax.imshow(fld, cmap=cmap, vmin=vmin_i, vmax=vmax_i, interpolation="nearest", origin="lower")
+                ax.set_xticks([]); ax.set_yticks([])
                 if r == 0:
-                    ax.set_title(f"{model_label}\n[{units}]", fontsize=11)
+                    ax.set_title(f"{model_label}\n[{units}]" if "Difference" not in model_label else f"{model_label}\n[{units}]", fontsize=11)
                 # Add Y label with date (leftmost column only)
                 if c == 0:
                     ax.set_ylabel(d.strftime("%Y-%m-%d"), fontsize=10)
 
-                _add_colorbar_and_boxplot(fig, ax, im, fld, (vmin, vmax))
+                # Outline
+                if add_dk_outline:
+                    try:
+                        mask = get_dk_lsm_outline(bnds)
+                        if mask is not None:
+                            mask = np.flipud(np.asarray(mask))  # align with imshow origin='lower'
+                            overlay_outline(ax, mask, color="darkgrey", linewidth=0.8)
+                    except Exception:
+                        pass
 
-        # fig.tight_layout(rect=[0, 0, 1, 0.97])
+                # Colorbar & boxplot
+                if "Difference" in model_label:
+                    # difference: only colorbar
+                    divider = make_axes_locatable(ax)
+                    cax = divider.append_axes("right", size="5%", pad=0.1)
+                    fig.colorbar(im, cax=cax, orientation="vertical")
+                else:
+                    _add_colorbar_and_boxplot(fig, ax, im, fld, (vmin, vmax))
+
         fname = f"{variable}_{hr_model}_vs_{lr_model}_qualitative"
+        if include_difference:
+            fname += "_with_diff"
         if len(day_list) == 1:
             fname += f"_{day_list[0].strftime('%Y%m%d')}"
         out = os.path.join(save_path, f"{fname}.png")
