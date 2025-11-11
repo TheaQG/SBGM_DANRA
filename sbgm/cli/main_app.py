@@ -26,7 +26,8 @@ from sbgm.logging_utils import (
     setup_logging, write_run_manifest, log_banner
 )
 from baselines.baseline_main import run as run_baselines
-from baselines.baseline_eval import run_all as run_baseline_eval
+# from baselines.baseline_eval import run_all as run_baseline_eval
+from baselines.evaluate_baselines.evaluation_baselines import run_all_baselines
 
 def check_model_exists(cfg):
     model_name = get_model_string(cfg)
@@ -51,7 +52,7 @@ def main():
         "--mode",
         choices=[
             "train", "generate", "evaluate", "full_pipeline",
-            "data_splits", "quicklook", "baseline",
+            "data_splits", "quicklook", "baseline", "baseline_eval",
             "sigma_star_generation", "sigma_star_evaluation"
             ],
             default="full_pipeline"
@@ -198,7 +199,8 @@ def main():
 
     elif args.mode == "baseline_eval":
         log_banner(f"BASELINE EVALUATION START")
-        run_baseline_eval(cfg)
+        # run_baseline_eval(cfg)
+        run_all_baselines(cfg)
         log_banner(f"BASELINE EVALUATION DONE")
 
     elif args.mode == "sigma_star_generation":

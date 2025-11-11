@@ -57,8 +57,14 @@ class TinyUNet(nn.Module):
             h = torch.cat([up, skips[-1-i]], dim=1)
             h = self.ups[2*i+1](h)
         y = self.head(h)
-        if self.residual and x.shape[1] == y.shape[1]:
-            y = y + x[:, :y.shape[1]]
+        if self.residual:
+            # Add explicit residual from LR-upsample reference (assumed first channel)
+            lr_ref = x[:, :1]
+            if lr_ref.shape[-2:] != y.shape[-2:]:
+                lr_ref = torch.nn.functional.interpolate(
+                    lr_ref, size=y.shape[-2:], mode='bilinear', align_corners=False
+                )
+            y = y + lr_ref
         return y  # Do NOT clamp during training if targets are scaled
 
             

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import logging
+import os
 from omegaconf import OmegaConf
 
 from baselines.adapter import BaselineAdapter
@@ -74,12 +75,22 @@ def run(cfg):
     cfg.baseline.type in {'bilinear', 'qm', 'unet_sr'}
     Uses build_dataset_for_split under the hood to construct datasets per split.
     """
-    btype = cfg.baseline.type.lower()
-    logger.info(f"[Baseline] run() called with baseline.type='{btype}'")
-    split_cfg = cfg.get('baseline', {}).get('split', 'test')
-    split_norm = _normalize_split(split_cfg)
+    # Robust config access with defaults (works for DictConfig or plain dict)
+    base = cfg.get('baseline', {})
+    # allow env-var overrides for batch jobs
+    btype = str(os.getenv('BASELINE_TYPE', base.get('type', 'all'))).lower()
 
-    def _run_single(bt: str):
+    # support either a single 'split' or a list in 'splits'
+    splits_cfg = base.get('splits', None)
+    if splits_cfg is None:
+        split_single = base.get('split', 'test')
+        splits = [split_single]
+    else:
+        splits = list(splits_cfg)
+
+    logger.info(f"[Baseline] run() called with baseline.type='{btype}', splits={splits}")
+
+    def _run_single(bt: str, split_norm: str):
         bt = bt.lower()
         save_root = Path(cfg.paths.sample_dir) / 'generation' / 'baselines' / bt / split_norm
         save_root.mkdir(parents=True, exist_ok=True)
@@ -108,19 +119,23 @@ def run(cfg):
             raise ValueError(f"Unknown baseline type: {bt}")
 
     if btype in {'all', 'auto', 'everything'}:
-        logger.info(f"[Baseline] Running ALL baselines sequentially on split '{split_norm}'")
-        order = ['bilinear', 'qm', 'unet_sr']
         results = {}
-        for bt in order:
-            logger.info(f"[Baseline] === Starting '{bt}' ===")
-            key, res = _run_single(bt)
-            results[key] = res
-            logger.info(f"[Baseline] === Finished '{bt}' ===")
+        order = ['bilinear', 'qm', 'unet_sr']
+        for split in splits:
+            split_norm = _normalize_split(split)
+            logger.info(f"[Baseline] Running ALL baselines on split '{split_norm}'")
+            for bt in order:
+                logger.info(f"[Baseline] === Starting '{bt}' ({split_norm}) ===")
+                key, res = _run_single(bt, split_norm)
+                results[(bt, split_norm)] = res
+                logger.info(f"[Baseline] === Finished '{bt}' ({split_norm}) ===")
         logger.info("[Baseline] All baselines completed.")
         return results
 
-    # Single baseline dispatch
-    logger.info(f"[Baseline] Running baseline type '{btype}' on split '{split_norm}' (cfg.baseline.split='{split_cfg}')")
-    _, result = _run_single(btype)
+    result = None
+    for split in splits:
+        split_norm = _normalize_split(split)
+        logger.info(f"[Baseline] Running baseline type '{btype}' on split '{split_norm}'")
+        _, result = _run_single(btype, split_norm)
 
     return result

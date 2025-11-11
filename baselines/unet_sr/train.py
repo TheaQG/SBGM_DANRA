@@ -15,6 +15,18 @@ from sbgm.special_transforms import build_back_transforms_from_stats
 
 logger = logging.getLogger(__name__)
 
+# --- light geometric augs to reduce overfitting / improve structure ---
+def _random_geo_augs(x: torch.Tensor, y: torch.Tensor, m: torch.Tensor):
+    # x:[B,C,H,W], y:[B,1,H,W], m:[B,1,H,W]
+    if torch.rand(1).item() < 0.5:
+        x = torch.flip(x, dims=[-1]); y = torch.flip(y, dims=[-1]); m = torch.flip(m, dims=[-1])
+    if torch.rand(1).item() < 0.5:
+        x = torch.flip(x, dims=[-2]); y = torch.flip(y, dims=[-2]); m = torch.flip(m, dims=[-2])
+    k = int(torch.randint(0, 4, ()).item())
+    if k:
+        x = torch.rot90(x, k, dims=[-2, -1]); y = torch.rot90(y, k, dims=[-2, -1]); m = torch.rot90(m, k, dims=[-2, -1])
+    return x, y, m
+
 # --- helper to construct back-transforms (mirrors generation.py logic)
 def _build_back_transforms(cfg: dict):
     """
@@ -261,10 +273,22 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
                         if pmm_phys_np is not None:
                             np.savez_compressed(out_root / 'pmm_phys' / f'{d}.npz', pmm=pmm_phys_np)
 
+                        # --- choose canonical LR for lr_hr_phys: prefer LR-in-its-own-stats ---
+                        canonical_lr_np = None
+                        if dual_lr:
+                            if main_scale == "HR":
+                                # ch0 used HR inverse; canonical should be the complementary LR inverse
+                                canonical_lr_np = lr1_phys_np if lr1_phys_np is not None else lr0_phys_np
+                            else:  # main_scale == "LR"
+                                canonical_lr_np = lr0_phys_np if lr0_phys_np is not None else lr1_phys_np
+                        else:
+                            canonical_lr_np = lr0_phys_np  # only mapping available
+                        
                         # Write lr_hr_phys: hr + canonical lr + optional lr0/lr1 for debugging
                         arrs = {}
                         if hr_phys_np  is not None: arrs['hr']  = hr_phys_np
-                        if lr0_phys_np is not None: arrs['lr']  = lr0_phys_np  # canonical = ch0 mapping
+                        if canonical_lr_np is not None: arrs['lr']  = canonical_lr_np  # canonical LR for eval/plots
+                        # keep explicit channels for debugging/inspection
                         if lr0_phys_np is not None: arrs['lr0'] = lr0_phys_np
                         if lr1_phys_np is not None: arrs['lr1'] = lr1_phys_np
                         if arrs:
@@ -322,14 +346,14 @@ def run_unet_sr(cfg, adapter_train, adapter_val, adapter_test, out_root: Path):
     hp = cfg.get('baseline', {}).get('unet_sr', {})
     in_ch   = hp.get('in_channels', 3)
     out_ch  = hp.get('out_channels', 1)
-    width   = hp.get('width', 48)
+    width   = hp.get('width', 64)
     depth   = hp.get('depth', 4)
     act     = hp.get('act', 'SiLU')
     residual= hp.get('residual', True)
     loss_nm = hp.get('loss', 'L1')
-    lr      = hp.get('lr', 1.5e-3)
-    bs      = hp.get('batch_size', 8)
-    steps   = hp.get('max_steps', 20000)
+    lr      = hp.get('lr', 0.002)
+    bs      = hp.get('batch_size', 16)
+    steps   = hp.get('max_steps', 60000)
     amp     = hp.get('amp', True)
 
     n_workers = cfg.get('num_workers', 4)
@@ -359,6 +383,7 @@ def run_unet_sr(cfg, adapter_train, adapter_val, adapter_test, out_root: Path):
     loss_fn = nn.SmoothL1Loss(reduction='none', beta=1.0) if loss_nm == 'L1' else nn.MSELoss(reduction='none')
     opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0)
     scaler = GradScaler(enabled=amp)
+    sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=max(lr * 0.1, 1e-5))
 
     # train loop
     step, best = 0, 1e9
@@ -366,12 +391,15 @@ def run_unet_sr(cfg, adapter_train, adapter_val, adapter_test, out_root: Path):
     while step < steps:
         for batch in tr_loader:
             x_in, y, lsm = batch.x_in.to(device), batch.y.to(device), batch.lsm.to(device).bool()
+            # simple on-the-fly flips/rotations (keeps geophysical coherence)
+            x_in, y, lsm = _random_geo_augs(x_in, y, lsm)            
             opt.zero_grad(set_to_none=True)
             with autocast(enabled=amp):
                 yhat = model(x_in)
                 loss = (loss_fn(yhat, y)[lsm]).mean()
             scaler.scale(loss).backward()
             scaler.step(opt); scaler.update()
+            sched.step()            
             step += 1
             if step % 100 == 0:
                 logger.info(f"[UNetSR] Progress: step {step}/{steps}")
