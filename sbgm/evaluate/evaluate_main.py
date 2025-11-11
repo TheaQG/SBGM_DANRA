@@ -58,6 +58,17 @@ def evaluation_main(cfg):
     logger.info(f"[evaluation_main] gen_root: {gen_root}")
     logger.info(f"[evaluation_main] eval_root: {eval_root}")
 
+    # Parse baselines_overlay block if present
+    bo = fe.get("baselines_overlay", {})
+    baselines_overlay = {
+        "enabled": bool(bo.get("enabled", False)),
+        "types": tuple(bo.get("types", ())),
+        "split": str(bo.get("split", "test")),
+        "labels": dict(bo.get("labels", {})),
+        "styles": dict(bo.get("styles", {})),
+        "sample_root": str(cfg["paths"]["sample_dir"]),
+    }
+
     # build NEW evaluation config (note: this is sbgm/evaluate/evaluation.py)
     ev_cfg = EvaluationConfig(
         gen_dir=str(gen_root),
@@ -73,6 +84,9 @@ def evaluation_main(cfg):
         
         hr_dx_km=float(fe.get("hr_dx_km", fe.get("grid_km_per_px", 2.5))),
         lr_dx_km=float(fe.get("lr_dx_km", fe.get("lr_grid_km_per_px", 31.0))),
+
+        # ------ new field for baselines_overlay ------
+        baselines_overlay=baselines_overlay,
 
         crps_examples_n_members=int(fe.get("crps_examples_n_members", 4)),
 

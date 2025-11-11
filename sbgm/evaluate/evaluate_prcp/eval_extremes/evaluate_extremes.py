@@ -40,7 +40,7 @@ def run_extremes(
     _ensure_dir(out_root / "figures")
 
     if plot_only:
-        plot_extremes(out_root)
+        plot_extremes(out_root, eval_cfg=eval_cfg)
         logger.info("[extremes] plot_only=True – plotted.")
         return
 
@@ -310,7 +310,7 @@ def run_extremes(
 
     # ------------------ plots ------------------
     try:
-        plot_extremes(out_root)
+        plot_extremes(out_root, eval_cfg=eval_cfg)
     except Exception as e:
         logger.warning(f"[extremes] Plotting failed: {e}")
 

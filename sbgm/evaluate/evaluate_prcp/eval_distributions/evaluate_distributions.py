@@ -50,7 +50,7 @@ def run_distributional(
     figs_dir.mkdir(parents=True, exist_ok=True)
 
     if plot_only:
-        plot_distributional(out_root)
+        plot_distributional(out_root, eval_cfg=eval_cfg)
         logger.info("[eval_distributional] plot_only=True – done plotting.")
         return
 
@@ -150,5 +150,5 @@ def run_distributional(
 
     # plots
     if bool(getattr(eval_cfg, "make_plots", True)):
-        plot_distributional(out_root)
+        plot_distributional(out_root, eval_cfg=eval_cfg)
         logger.info(f"[eval_distributional] Plots saved to {figs_dir}")

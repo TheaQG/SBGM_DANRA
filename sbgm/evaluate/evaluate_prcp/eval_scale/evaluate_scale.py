@@ -54,7 +54,7 @@ def run_scale(
     figs_dir = _ensure_dir(out_root / "figures")
 
     if plot_only:
-        plot_scale(out_root)
+        plot_scale(out_root, eval_cfg=eval_cfg)
         logger.info("[eval_scale] plot_only=True – done plotting.")
         return
 
@@ -617,5 +617,5 @@ def run_scale(
     # ===============================================================================
     make_plots = bool(getattr(eval_cfg, "make_plots", True))
     if make_plots:
-        plot_scale(out_root)
+        plot_scale(out_root, eval_cfg=eval_cfg)
         logger.info(f"[eval_scale] Plots saved to {figs_dir}")

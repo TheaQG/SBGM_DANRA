@@ -9,12 +9,15 @@ import logging
 from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _nice, _savefig
 from sbgm.variable_utils import get_color_for_model
 
+# Baseline overlays
+from sbgm.evaluate.evaluate_prcp.overlay_utils import resolve_baseline_dirs, load_csv_if_exists
+
 logger = logging.getLogger(__name__)
 
 SET_DPI = 300
 
 
-def plot_distributional(dist_root: str | Path) -> None:
+def plot_distributional(dist_root: str | Path, eval_cfg: Any | None = None) -> None:
     dist_root = Path(dist_root)
     tables = dist_root / "tables"
     figs = _ensure_dir(dist_root / "figures")
@@ -206,6 +209,54 @@ def plot_distributional(dist_root: str | Path) -> None:
         ax.plot(bin_centers, np.maximum(gen_ens_mean, eps), lw=1.6, ls=":", label="GEN (ens mean)", color=col_ens)
     if q10 is not None and q90 is not None:
         ax.fill_between(bin_centers, np.maximum(q10, eps), np.maximum(q90, eps), alpha=0.10, linewidth=0, label="Ens spread (10–90%)")
+
+    # === Baseline overlays ===
+    bo = getattr(eval_cfg, "baselines_overlay", None) if eval_cfg is not None else None
+    if bo:
+        try:
+            dirs = resolve_baseline_dirs(
+                sample_root=bo["sample_root"],
+                types=tuple(bo.get("types", ())),
+                split=str(bo.get("split", "test")),
+                eval_type="distributional"
+            )
+        except Exception as e:
+            logger.warning(f"[plot_distributional] Failed to resolve baseline dirs: {e}")
+            dirs = {}
+        for t, d in dirs.items():
+            try:
+                # Try to read baseline's dist_bins.csv
+                bins_arr = None
+                bins_path = d / "dist_bins.csv"
+                if bins_path.exists():
+                    bins_arr = np.loadtxt(bins_path, delimiter=",", skiprows=1) if bins_path.read_text().startswith("bin_edge") else np.loadtxt(bins_path, delimiter=",")
+                    if bins_arr.ndim > 1:
+                        bins_arr = bins_arr[:, 0]
+                else:
+                    logger.info(f"[plot_distributional] Baseline {t}: missing dist_bins.csv at {bins_path}")
+                    continue
+                bin_centers_b = 0.5 * (bins_arr[:-1] + bins_arr[1:])
+                # Try dist_gen.csv first, else dist_lr.csv
+                arr = load_csv_if_exists(d, "dist_gen")
+                if arr is None:
+                    arr = load_csv_if_exists(d, "dist_lr")
+                    if arr is None:
+                        logger.info(f"[plot_distributional] Baseline {t}: missing both dist_gen.csv and dist_lr.csv in {d}")
+                        continue
+                # arr: structured array with fields 'bin_idx' and 'count'
+                try:
+                    counts = np.asarray(arr["count"], dtype=float)
+                except Exception:
+                    # fallback for 2-column shape
+                    counts = np.asarray(arr[:, 1], dtype=float)
+                pdf = counts / (np.sum(counts) + eps)
+                label = bo.get("labels", {}).get(t, t)
+                style = bo.get("styles", {}).get(t, {})
+                ax.plot(bin_centers_b, pdf, label=label, **style)
+            except Exception as e:
+                logger.info(f"[plot_distributional] Baseline overlay for {t} failed: {e}")
+                continue
+
 
     ax.set_xlabel("Precipitation (mm/day)")
     ax.set_yscale("log")

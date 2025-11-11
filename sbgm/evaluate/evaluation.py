@@ -29,6 +29,10 @@ class EvaluationConfig:
     lr_key: Optional[str] = "lr" # which LR key to use from lr_hr_phys: "lr" | "lr_lrspace" | "lr_hrspace"
     grid_km_per_px: float = 2.5
     lr_grid_km_per_px: float = 31.0
+    
+    # New field for baselines overlay
+    baselines_overlay: Optional[Dict[str, Any]] = None
+    
     crps_examples_n_members: int = 4
     thresholds_mm: tuple = (1.0, 5.0, 10.0)
     fss_thresholds_mm: tuple = (1.0, 5.0, 10.0)
@@ -220,6 +224,7 @@ class EvaluationRunner:
                     use_ensemble: bool
                     ensemble_n_members: int | None
                     ensemble_member_seed: int
+                    baselines_overlay: Any | None
 
                 sc = _ScaleCfg()
                 sc.hr_dx_km = float(self.eval_cfg.hr_dx_km or self.eval_cfg.grid_km_per_px)
@@ -233,6 +238,7 @@ class EvaluationRunner:
                 sc.use_ensemble = bool(self.eval_cfg.use_ensemble)
                 sc.ensemble_n_members = self.eval_cfg.ensemble_n_members
                 sc.ensemble_member_seed = int(self.eval_cfg.ensemble_member_seed)
+                sc.baselines_overlay = getattr(self.eval_cfg, "baselines_overlay", None)
 
                 run_scale(
                     resolver=self.data,

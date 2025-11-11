@@ -8,6 +8,7 @@ import logging
 
 from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _savefig, _nice, _to_date_safe, _season_from_month
 from sbgm.variable_utils import get_units, get_color_for_model, get_cmap_for_variable
+from sbgm.evaluate.evaluate_prcp.overlay_utils import resolve_baseline_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ SET_DPI = 300
 # 1. PSD curves
 # ================================================================================
 
-def plot_scale_psd(scale_root: Path) -> None:
+def plot_scale_psd(scale_root: Path, eval_cfg: Any | None = None) -> None:
     """
     Read scale_psd_curves.npz and make a single log-log PSD plot:
       - HR: thick, solid
@@ -334,6 +335,52 @@ def plot_scale_psd(scale_root: Path) -> None:
         bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.7),
     )
 
+    # ---- Baseline overlays (PSD) ----
+    bo = getattr(eval_cfg, "baselines_overlay", None) if eval_cfg is not None else None
+    if bo and bo.get("enabled", False):
+        try:
+            dirs = resolve_baseline_dirs(
+                sample_root=bo["sample_root"],
+                types=tuple(bo.get("types", ())),
+                split=str(bo.get("split", "test")),
+                eval_type="scale",
+            )
+        except Exception as e:
+            logger.warning(f"[plot_scale_psd] resolve_baseline_dirs failed: {e}")
+            dirs = {}
+        labels = bo.get("labels", {})
+        styles = bo.get("styles", {})
+        for t, d in dirs.items():
+            b_npz = d / "scale_psd_curves.npz"
+            if not b_npz.exists():
+                continue
+            try:
+                with np.load(b_npz) as bdat:
+                    bk = bdat["k"]
+                    # prefer generated curve if present (baseline “forecast”)
+                    if "psd_gen" in bdat.files:
+                        bP = bdat["psd_gen"].mean(axis=0)
+                    elif "psd_lr" in bdat.files:
+                        bP = bdat["psd_lr"].mean(axis=0)
+                    elif "psd_lr_hr" in bdat.files:
+                        bP = bdat["psd_lr_hr"].mean(axis=0)
+                    else:
+                        continue
+                # convert to wavelength and sort like the main plot
+                mask_pos_b = bk > 0.0
+                lam_b = 1.0 / bk[mask_pos_b]
+                ord_b = np.argsort(lam_b)[::-1]
+                lam_b = lam_b[ord_b]
+                bP = np.maximum(bP[mask_pos_b][ord_b], eps)
+                label = labels.get(t, t)
+                style = dict(styles.get(t, {}))
+                ax.plot(lam_b, bP, label=label, **style)
+            except Exception as e:
+                logger.warning(f"[plot_scale_psd] Failed to overlay baseline '{t}': {e}")
+        # ensure legend includes baselines
+        handles, labels_legend = ax.get_legend_handles_labels()
+        ax.legend(handles, labels_legend, loc="best", fontsize=8)
+        
     _savefig(fig, figs / "scale_psd.png", dpi=SET_DPI)
 
 
@@ -346,7 +393,7 @@ def plot_scale_psd(scale_root: Path) -> None:
 
 # in sbgm/evaluate/evaluate_prcp/eval_scale/plot_scale.py
 
-def plot_psd_lowhigh_diag(scale_root: Path) -> None:
+def plot_psd_lowhigh_diag(scale_root: Path, eval_cfg: Any | None = None) -> None:
     """
     Summarize PSD low/high band ratios across *all* days.
 
@@ -521,7 +568,7 @@ def plot_psd_lowhigh_diag(scale_root: Path) -> None:
 # 3. FSS vs scale curves
 # ================================================================================
 
-def plot_fss_curves(scale_root: Path) -> None:
+def plot_fss_curves(scale_root: Path, eval_cfg: Any | None = None) -> None:
     """
     Read FSS outputs and make **one** multi-panel figure:
       - 1 subplot per base threshold (gen + LR if present)
@@ -667,6 +714,27 @@ def plot_fss_curves(scale_root: Path) -> None:
     # color cycle for per-threshold lines (will re-use in the last panel)
     colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3", "C4", "C5"])
 
+    # Baseline overlay config (optional)
+    bo = getattr(eval_cfg, "baselines_overlay", None) if eval_cfg is not None else None
+    if bo and bo.get("enabled", False):
+        try:
+            from sbgm.evaluate.evaluate_prcp.overlay_utils import resolve_baseline_dirs
+            _baseline_dirs_fss = resolve_baseline_dirs(
+                sample_root=bo["sample_root"],
+                types=tuple(bo.get("types", ())),
+                split=str(bo.get("split", "test")),
+                eval_type="scale",
+            )
+        except Exception as e:
+            logger.warning(f"[plot_fss_curves] resolve_baseline_dirs failed: {e}")
+            _baseline_dirs_fss = {}
+        _baseline_labels = bo.get("labels", {})
+        _baseline_styles = bo.get("styles", {})
+    else:
+        _baseline_dirs_fss = {}
+        _baseline_labels = {}
+        _baseline_styles = {}
+
     # -- 3a) individual panels --
     for i, thr in enumerate(thr_list):
         row = i // ncols
@@ -691,6 +759,45 @@ def plot_fss_curves(scale_root: Path) -> None:
             y_lr = [p[1] for p in lr_pairs]
             ax.plot(x_lr, y_lr, marker="x", linestyle="--", linewidth=1.0,
                     color="0.25", label=f"LR (≥ {float(thr):.0f} mm)")
+
+        # ---- Baseline overlays: per-threshold panel only ----
+        if _baseline_dirs_fss:
+            for t, d in _baseline_dirs_fss.items():
+                sp_b = d / "scale_fss_summary.csv"
+                if not sp_b.exists():
+                    continue
+                try:
+                    with open(sp_b, "r") as fb:
+                        lines_b = [l.strip() for l in fb.readlines() if l.strip()]
+                    if not lines_b:
+                        continue
+                    header_b = lines_b[0].split(",")
+                    rows_b = [l.split(",") for l in lines_b[1:]]
+                    fss_cols_b = [(idx, col) for idx, col in enumerate(header_b) if col.lower().startswith("fss_")]
+                    # collect points for the current threshold only
+                    pts = []
+                    for r in rows_b:
+                        base_thr_b = r[0].strip()
+                        if base_thr_b != thr:
+                            continue
+                        for idx, col in fss_cols_b:
+                            try:
+                                scale_km = float(col.split("_")[1].replace("km", ""))
+                            except Exception:
+                                continue
+                            v = r[idx].strip()
+                            if v == "":
+                                continue
+                            pts.append((scale_km, float(v)))
+                    if not pts:
+                        continue
+                    pts = sorted(pts, key=lambda p: p[0])
+                    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+                    label = _baseline_labels.get(t, t)
+                    style = dict(_baseline_styles.get(t, {}))
+                    ax.plot(xs, ys, label=label, **style)
+                except Exception as e:
+                    logger.warning(f"[plot_fss_curves] Failed to overlay FSS baseline '{t}': {e}")
 
         # Only set labels on leftmost and bottom plots
         if col == 0:
@@ -720,14 +827,6 @@ def plot_fss_curves(scale_root: Path) -> None:
         ax_all.text(x_gen[-1] * 1.01, y_gen[-1], f"≥ {float(thr):.0f} mm",
                     color=colr, fontsize=7, va="center")
 
-        # if LR exists for this thr, plot as faint grey
-        lr_pairs = sorted(data["lr"], key=lambda t: t[0]) if data["lr"] else []
-        if lr_pairs:
-            x_lr = [p[0] for p in lr_pairs]
-            y_lr = [p[1] for p in lr_pairs]
-            ax_all.plot(x_lr, y_lr, marker="x", linestyle="--", linewidth=0.8,
-                        color="0.5", alpha=0.7)
-
     ax_all.set_xlabel("Neighborhood scale (km)")
     ax_all.set_ylabel("FSS")
     ax_all.set_ylim(0.0, 1.0)
@@ -749,7 +848,7 @@ def plot_fss_curves(scale_root: Path) -> None:
 # 4. ISS at scales
 # ================================================================================
 
-def plot_iss_curves(scale_root: Path) -> None:
+def plot_iss_curves(scale_root: Path, eval_cfg: Any | None = None) -> None:
     """
     ISS vs scale, same layout as FSS:
       - 1 panel per threshold (GEN + LR if present)
@@ -839,6 +938,27 @@ def plot_iss_curves(scale_root: Path) -> None:
     axs = np.atleast_2d(axs)
     colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3", "C4", "C5"])
 
+    # Baseline overlay config (optional)
+    bo = getattr(eval_cfg, "baselines_overlay", None) if eval_cfg is not None else None
+    if bo and bo.get("enabled", False):
+        try:
+            from sbgm.evaluate.evaluate_prcp.overlay_utils import resolve_baseline_dirs
+            _baseline_dirs_iss = resolve_baseline_dirs(
+                sample_root=bo["sample_root"],
+                types=tuple(bo.get("types", ())),
+                split=str(bo.get("split", "test")),
+                eval_type="scale",
+            )
+        except Exception as e:
+            logger.warning(f"[plot_iss_curves] resolve_baseline_dirs failed: {e}")
+            _baseline_dirs_iss = {}
+        _baseline_labels = bo.get("labels", {})
+        _baseline_styles = bo.get("styles", {})
+    else:
+        _baseline_dirs_iss = {}
+        _baseline_labels = {}
+        _baseline_styles = {}
+
     for i, thr in enumerate(thrs_sorted):
         row = i // ncols
         col = i % ncols
@@ -855,6 +975,44 @@ def plot_iss_curves(scale_root: Path) -> None:
             ax.plot([p[0] for p in lr_pts], [p[1] for p in lr_pts],
                     linestyle="--", marker="x", linewidth=1.0, color="0.35",
                     label=f"LR (≥ {float(thr):.2f} mm)")
+
+        # ---- Baseline overlays: per-threshold panel only ----
+        if _baseline_dirs_iss:
+            for t, d in _baseline_dirs_iss.items():
+                sp_b = d / "scale_iss_summary.csv"
+                if not sp_b.exists():
+                    continue
+                try:
+                    with open(sp_b, "r") as fb:
+                        lines_b = [l.strip() for l in fb.readlines() if l.strip()]
+                    if not lines_b:
+                        continue
+                    header_b = lines_b[0].split(",")
+                    rows_b = [l.split(",") for l in lines_b[1:]]
+                    iss_cols_b = [(idx, col) for idx, col in enumerate(header_b) if col.lower().startswith("iss_")]
+                    pts = []
+                    for r in rows_b:
+                        thr_b = r[0].strip()
+                        if thr_b != thr:
+                            continue
+                        for idx, col in iss_cols_b:
+                            try:
+                                scale_km = float(col.split("_")[1].replace("km", ""))
+                            except Exception:
+                                continue
+                            v = r[idx].strip()
+                            if v == "":
+                                continue
+                            pts.append((scale_km, float(v)))
+                    if not pts:
+                        continue
+                    pts = sorted(pts, key=lambda p: p[0])
+                    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+                    label = _baseline_labels.get(t, t)
+                    style = dict(_baseline_styles.get(t, {}))
+                    ax.plot(xs, ys, label=label, **style)
+                except Exception as e:
+                    logger.warning(f"[plot_iss_curves] Failed to overlay ISS baseline '{t}': {e}")
 
         ax.set_ylim(0.0, 1.05)
         
@@ -882,10 +1040,10 @@ def plot_iss_curves(scale_root: Path) -> None:
         ax_all.plot(x, y, marker=".", linewidth=1.2, color=colr)
         ax_all.text(x[-1] * 1.01, y[-1], f"≥ {float(thr):.0f} mm", color=colr, fontsize=4, va="center")
 
-        lr_pts = sorted(by_thr[thr]["lr"], key=lambda p: p[0]) if by_thr[thr]["lr"] else []
-        if lr_pts:
-            ax_all.plot([p[0] for p in lr_pts], [p[1] for p in lr_pts],
-                        linestyle="--", linewidth=0.8, color="0.5", alpha=0.7)
+        # lr_pts = sorted(by_thr[thr]["lr"], key=lambda p: p[0]) if by_thr[thr]["lr"] else []
+        # if lr_pts:
+        #     ax_all.plot([p[0] for p in lr_pts], [p[1] for p in lr_pts],
+        #                 linestyle="--", linewidth=0.8, color="0.5", alpha=0.7)
 
     ax_all.set_ylim(0.0, 1.05)
     ax_all.set_xlabel("Neighborhood scale (km)")
@@ -908,7 +1066,7 @@ def plot_iss_curves(scale_root: Path) -> None:
 # Master entry point
 # ================================================================================
 
-def plot_scale(eval_root: str | Path, baseline_eval_dirs: Optional[Dict[str, str]] = None) -> None:
+def plot_scale(eval_root: str | Path, eval_cfg: Any | None = None) -> None:
     """
     Master entry point – call this from evaluate_scale.py
 
@@ -920,8 +1078,8 @@ def plot_scale(eval_root: str | Path, baseline_eval_dirs: Optional[Dict[str, str
         logger.warning(f"[plot_scale] {scale_root} does not exist.")
         return
 
-    plot_scale_psd(scale_root)
-    plot_fss_curves(scale_root)
-    plot_iss_curves(scale_root)
-    plot_psd_lowhigh_diag(scale_root)
+    plot_scale_psd(scale_root, eval_cfg=eval_cfg)
+    plot_fss_curves(scale_root, eval_cfg=eval_cfg)
+    plot_iss_curves(scale_root, eval_cfg=eval_cfg)
+    plot_psd_lowhigh_diag(scale_root, eval_cfg=eval_cfg)
     logger.info(f"[plot_scale] Plots written to {scale_root / 'figures'}")

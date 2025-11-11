@@ -351,16 +351,31 @@ full_gen_eval:
   dist_ensemble_pool_mode: pool # pool | member_mean
   
   # Which tasks to perform.
-  do_prob: true # Whether to do probabilistic generation evaluation
+  do_prob: false # Whether to do probabilistic generation evaluation
   do_scale: false
-  do_dist: false
-  do_ext: false # Whether to do extreme generation evaluation
+  do_dist: true
+  do_ext: true # Whether to do extreme generation evaluation
   do_spat: false # Whether to do spatial statistics evaluation
-  do_temp: true # Whether to do temporal statistics evaluation
+  do_temp: false # Whether to do temporal statistics evaluation
   do_feat: false # Whether to do feature-based evaluation
   do_dates: false
   plot_only: false # Whether to only plot results without computing metrics (loads saved metrics)
   
+  # Benchmark overlay settings
+  baselines_overlay:
+    enabled: true
+    types: [bilinear, qm, unet_sr] # any subset. Order is plot order
+    split: test # train | valid | test
+    labels:
+      bilinear: "LR bilinear"
+      qm: "QM (per-pixel)"
+      unet_sr: "UNet-SR"
+    # optional styling overrides
+    styles:
+      bilinear: {color: '#c47a02', ls: "--", lw: 0.8}
+      qm:       {color: '#008b8b', ls: "-.", lw: 0.8}
+      unet_sr:  {color: '#7a68a6', ls: ":", lw: 0.8}
+
   gen_dir: null # Directory for generation outputs (if null, use default)
   eval_dir: null # Directory for evaluation outputs (if null, use default)
 
