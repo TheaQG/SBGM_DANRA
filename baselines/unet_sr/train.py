@@ -10,6 +10,21 @@ from torch.cuda.amp import GradScaler, autocast
 
 from baselines.unet_sr.model import TinyUNet
 from baselines.plotting import plotting_enabled, plotting_params, resolve_samples_dir, plot_triplet
+from torch.nn.utils import clip_grad_norm_
+def _masked_mean_safe(t: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """
+    Compute mean over t where mask==True. If mask has no True, fall back to unmasked mean.
+    Returns a scalar tensor (preserves autograd).
+    """
+    if mask.dtype != torch.bool:
+        mask = mask.bool()
+    # broadcast mask to t
+    while mask.dim() < t.dim():
+        mask = mask.unsqueeze(1)
+    denom = mask.sum()
+    if denom == 0:
+        return t.mean()
+    return (t * mask).sum() / denom
 
 from sbgm.special_transforms import build_back_transforms_from_stats
 
@@ -137,7 +152,8 @@ def evaluate(model, loader, loss_fn, device):
             x_in, y, lsm = batch.x_in.to(device), batch.y.to(device), batch.lsm.to(device).bool()
             yhat = model(x_in)
             perpx = loss_fn(yhat, y)  # [B,1,H,W]
-            loss  = (perpx[lsm]).mean().item()
+            loss_t = _masked_mean_safe(perpx, lsm)  # scalar tensor
+            loss = loss_t.item()
             tot += loss; cnt += 1
     model.train()
     return tot / max(cnt,1)
@@ -202,7 +218,7 @@ def save_split_outputs(model, loader, out_root: Path, device: torch.device, cfg)
     model.eval()
     with torch.no_grad():
         for b_idx, batch in enumerate(loader):
-            x_in, y, lsm = batch.x_in.to(device), batch.y, batch.lsm
+            x_in, y, lsm = batch.x_in.to(device), batch.y, batch.lsm.bool()
             dates = batch.date
             yhat = model(x_in).cpu().numpy()
             y_np = y.cpu().numpy()
@@ -391,15 +407,32 @@ def run_unet_sr(cfg, adapter_train, adapter_val, adapter_test, out_root: Path):
     while step < steps:
         for batch in tr_loader:
             x_in, y, lsm = batch.x_in.to(device), batch.y.to(device), batch.lsm.to(device).bool()
+            # Skip batches with no valid land pixels
+            if not lsm.any():
+                logger.debug("[UNetSR][train] Skipping batch with zero valid mask.")
+                continue
             # simple on-the-fly flips/rotations (keeps geophysical coherence)
-            x_in, y, lsm = _random_geo_augs(x_in, y, lsm)            
+            x_in, y, lsm = _random_geo_augs(x_in, y, lsm)
             opt.zero_grad(set_to_none=True)
             with autocast(enabled=amp):
                 yhat = model(x_in)
-                loss = (loss_fn(yhat, y)[lsm]).mean()
+                perpx = loss_fn(yhat, y)  # [B,1,H,W]
+                loss = _masked_mean_safe(perpx, lsm)
+
+            # Guard against NaN/Inf losses (e.g., empty mask batches)
+            if not torch.isfinite(loss):
+                logger.warning("[UNetSR][train] Non-finite loss detected (loss=%s). Skipping step.", loss.item() if loss.numel() == 1 else str(loss))
+                continue
+
             scaler.scale(loss).backward()
+
+            # Optional: clip to prevent rare exploding gradients with AMP
+            if any(p.requires_grad for p in model.parameters()):
+                scaler.unscale_(opt)
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             scaler.step(opt); scaler.update()
-            sched.step()            
+            sched.step()
             step += 1
             if step % 100 == 0:
                 logger.info(f"[UNetSR] Progress: step {step}/{steps}")

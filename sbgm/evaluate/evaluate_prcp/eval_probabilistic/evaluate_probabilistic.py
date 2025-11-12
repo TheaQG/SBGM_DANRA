@@ -12,6 +12,42 @@ import numpy as np
 import torch
 import logging
 
+# --- Local mask normalization utility for shape-safe accumulation ---
+def _normalize_mask_local(mask, target_shape, device):
+    """
+    Normalize `mask` to shape == target_shape (broadcast-style).
+    Accepts mask of shapes [H,W], [1,H,W], or [B,H,W] with B==1.
+    Returns a boolean tensor on `device` with shape == target_shape.
+    """
+    if mask is None:
+        return None
+    m = mask
+    if not torch.is_tensor(m):
+        m = torch.as_tensor(m)
+    m = m.to(device)
+    if m.dtype != torch.bool:
+        m = m > 0.5
+    # Squeeze leading singleton batch/channel dims
+    while m.dim() > 2 and m.shape[0] == 1:
+        m = m.squeeze(0)
+    # Now try to match [H,W]
+    if m.shape == target_shape:
+        return m
+    if m.dim() == 2 and len(target_shape) == 2:
+        return m
+    if m.dim() == 2 and len(target_shape) == 3:
+        # [H,W] -> [B,H,W]; expand across batch dimension
+        B = target_shape[0]
+        return m.unsqueeze(0).expand(B, -1, -1)
+    if m.dim() == 3 and len(target_shape) == 2 and m.shape[0] == 1:
+        # [1,H,W] -> [H,W]
+        return m.squeeze(0)
+    # Last resort: broadcast if possible
+    try:
+        return m.expand(target_shape)
+    except Exception as e:
+        raise ValueError(f"[prob_eval] Cannot normalize mask of shape {tuple(mask.shape)} to target {tuple(target_shape)}: {e}")
+
 logger = logging.getLogger(__name__)
 
 from sbgm.evaluate.evaluate_prcp.eval_probabilistic.metrics_probabilistic import (
@@ -194,7 +230,11 @@ def run_probabilistic(
     all_pit: List[np.ndarray] = []
     rank_acc: Optional[torch.Tensor] = None
     rel_acc: Dict[float, List[Dict[str, torch.Tensor]]] = {float(t): [] for t in thresholds}
-    ss_lines: List[str] = ["date,spread_mean,skill_mean"]    
+    ss_lines: List[str] = ["date,spread_mean,skill_mean"]
+
+    # --- Accumulator shape holders ---
+    H_acc: Optional[int] = None
+    W_acc: Optional[int] = None
 
     # ================================================================================
     # 2) per-date loop
@@ -212,6 +252,9 @@ def run_probabilistic(
             continue
 
         mask = resolver.load_mask(d)   # [H,W] or None
+        # Debug: log raw mask shape if available
+        if mask is not None and hasattr(mask, 'shape'):
+            logger.debug(f"[eval_probabilistic] date={d} raw mask shape={getattr(mask, 'shape', None)}")
         pmm  = None
         # optional PMM (prefer phys)
         try:
@@ -224,6 +267,9 @@ def run_probabilistic(
             obs = torch.from_numpy(obs)
         if not torch.is_tensor(ens):
             ens = torch.from_numpy(ens)
+
+        # Debug: log tensor shapes after conversion
+        logger.debug(f"[eval_probabilistic] date={d} shapes: obs={tuple(obs.shape)}, ens={tuple(ens.shape)}, mask={getattr(mask, 'shape', None)}")
 
         # 2.1 CRPS (domain average, masked)
         crps_val = crps_ensemble(obs, ens, mask=mask, reduction="mean")
@@ -242,23 +288,55 @@ def run_probabilistic(
             max_pairs=vs_max_pairs,
             seed=0,
         )
-        vs_lines.append(f"{d},{float(vs_val):.6f}")        
+        vs_lines.append(f"{d},{float(vs_val):.6f}")
 
-        # 2.1b CRPS map (for spatial mean later)
-        crps_map = crps_ensemble(obs, ens, mask=mask, reduction="none")  # [H,W]
-        
-        if _crps_sum is None:
-            _crps_sum = crps_map.clone().float()
-            if mask is not None:
-                _crps_cnt = mask.to(crps_map.dtype)
+        # 2.1b CRPS map (for spatial mean later): get FULL field; apply mask only during accumulation
+        crps_map = crps_ensemble(obs, ens, mask=None, reduction="none")  # [H,W], never flattened by mask
+        # Ensure 2D [H,W]
+        if crps_map.dim() == 1:
+            N = int(crps_map.numel())
+            if obs.dim() == 2 and obs.numel() == N:
+                crps_map = crps_map.view(obs.shape[0], obs.shape[1])
             else:
-                _crps_cnt = torch.ones_like(crps_map, dtype=torch.float32)
+                s = int(round(N ** 0.5))
+                if s * s == N:
+                    crps_map = crps_map.view(s, s)
+                else:
+                    raise RuntimeError(f"[eval_probabilistic] crps_map is 1D (len={N}) and cannot infer [H,W].")
+        # Normalize mask to crps_map shape for accumulation
+        m_acc = None
+        try:
+            m_acc = _normalize_mask_local(mask, crps_map.shape, device=crps_map.device) if mask is not None else None
+        except Exception as e:
+            logger.warning(f"[eval_probabilistic] Mask normalization failed on date {d}: {e}. Falling back to no mask for accumulation.")
+            m_acc = None
+
+        # === Masked accumulation (land-only) ===
+        # Prepare weights for accumulation: 1 on valid (land), 0 on invalid (ocean)
+        if m_acc is not None:
+            w = m_acc.to(dtype=torch.float32)
         else:
-            _crps_sum = _crps_sum + crps_map
-            if mask is not None:
-                _crps_cnt = _crps_cnt + mask.to(crps_map.dtype)
-            else:
-                _crps_cnt = _crps_cnt + torch.ones_like(crps_map, dtype=torch.float32)
+            w = torch.ones_like(crps_map, dtype=torch.float32)
+
+        if _crps_sum is None:
+            # Initialize masked sum and counts
+            _crps_sum = (crps_map * w).clone().float()
+            _crps_cnt = w.clone().float()
+            # Record accumulator spatial shape
+            H_acc, W_acc = int(crps_map.shape[0]), int(crps_map.shape[1])
+        else:
+            # Ensure shapes match (broadcast if needed)
+            if w.shape != _crps_sum.shape:
+                logger.warning(f"[eval_probabilistic] Accumulator shape mismatch: sum={_crps_sum.shape}, w={w.shape}. Attempting to broadcast.")
+                try:
+                    w = w.expand_as(_crps_sum)
+                except Exception:
+                    logger.error(f"[eval_probabilistic] Failed to broadcast weights to {_crps_sum.shape}; falling back to all-ones for this date {d}.")
+                    w = torch.ones_like(_crps_sum, dtype=torch.float32)
+
+            # Masked accumulation (land-only)
+            _crps_sum = _crps_sum + crps_map * w
+            _crps_cnt = _crps_cnt + w
 
         # 2.2 PIT
         # metrics expect B>1, so wrap a batch dimension
@@ -326,7 +404,41 @@ def run_probabilistic(
     # 3.1 CRPS
     # 3.1b temporally averaged CRPS map
     if _crps_sum is not None and _crps_cnt is not None:
-        mean_map = (_crps_sum / _crps_cnt.clamp(min=1.0)).cpu().numpy()
+        logger.debug(f"[eval_probabilistic] Final accumulators: sum={getattr(_crps_sum, 'shape', None)}, cnt={getattr(_crps_cnt, 'shape', None)}")
+        if _crps_sum.shape != _crps_cnt.shape:
+            logger.warning(f"[eval_probabilistic] Final shapes differ before mean: sum={_crps_sum.shape}, cnt={_crps_cnt.shape}. Trying to broadcast cnt.")
+            try:
+                _crps_cnt = _crps_cnt.expand_as(_crps_sum)
+            except Exception as e:
+                raise RuntimeError(f"[eval_probabilistic] Cannot align CRPS accumulators for mean: sum={_crps_sum.shape}, cnt={_crps_cnt.shape}: {e}")
+        # === Land-only mean (avoid dividing over ocean) ===
+        cnt = _crps_cnt
+        if _crps_sum.shape != cnt.shape:
+            logger.warning(f"[eval_probabilistic] Final shapes differ before mean: sum={_crps_sum.shape}, cnt={cnt.shape}. Trying to broadcast cnt.")
+            try:
+                cnt = cnt.expand_as(_crps_sum)
+            except Exception as e:
+                raise RuntimeError(f"[eval_probabilistic] Cannot align CRPS accumulators for mean: sum={_crps_sum.shape}, cnt={cnt.shape}: {e}")
+
+        # Compute land-only mean; set ocean (cnt==0) to NaN so plots blank it out
+        ocean = cnt <= 0.0
+        safe_cnt = torch.where(ocean, torch.ones_like(cnt), cnt)  # dummy 1 to avoid divide-by-zero
+        mean_map_t = (_crps_sum / safe_cnt).cpu()
+        mean_map_t[ocean.cpu()] = float('nan')
+
+        # Ensure [H,W] for plotting; prefer recorded H_acc,W_acc
+        if mean_map_t.dim() == 1:
+            N = int(mean_map_t.numel())
+            if H_acc is not None and W_acc is not None and H_acc * W_acc == N:
+                mean_map_t = mean_map_t.view(H_acc, W_acc)
+            else:
+                s = int(round(N ** 0.5))
+                if s * s == N:
+                    mean_map_t = mean_map_t.view(s, s)
+                else:
+                    logger.warning(f"[eval_probabilistic] mean_map is 1D of length {N}; saving as 1D (plot may fail).")
+
+        mean_map = mean_map_t.numpy()
         np.savez_compressed(
             tables_dir / "prob_crps_mean_map.npz",
             crps_mean_map=mean_map,     # <-- correct key name
