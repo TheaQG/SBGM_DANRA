@@ -104,6 +104,7 @@ def _build_and_save_crps_examples_members(
 ) -> None:
     crps_csv = tables_dir / "prob_crps_daily.csv"
     if not crps_csv.exists():
+        logger.info(f"CRPS timeseries file not found: {crps_csv}")
         return
     selected = _select_crps_example_dates(crps_csv, n_examples=6)
     if not selected:
@@ -231,6 +232,8 @@ def run_probabilistic(
     rank_acc: Optional[torch.Tensor] = None
     rel_acc: Dict[float, List[Dict[str, torch.Tensor]]] = {float(t): [] for t in thresholds}
     ss_lines: List[str] = ["date,spread_mean,skill_mean"]
+    # PMM (deterministic) CRPS equivalent (MAE)
+    pmm_mae_lines: List[str] = ["date,pmm_mae"]
 
     # --- Accumulator shape holders ---
     H_acc: Optional[int] = None
@@ -270,6 +273,24 @@ def run_probabilistic(
 
         # Debug: log tensor shapes after conversion
         logger.debug(f"[eval_probabilistic] date={d} shapes: obs={tuple(obs.shape)}, ens={tuple(ens.shape)}, mask={getattr(mask, 'shape', None)}")
+
+        # 2.0a PMM "CRPS" (equals MAE for deterministic forecast)
+        if pmm is not None:
+            if not torch.is_tensor(pmm):
+                pmm_t = torch.from_numpy(np.asarray(pmm))
+            else:
+                pmm_t = pmm
+            pmm_t = pmm_t.to(obs.device, obs.dtype)
+            diff = (pmm_t - obs).abs()
+            if mask is not None:
+                try:
+                    m_mae = _normalize_mask_local(mask, obs.shape, device=obs.device)
+                    val = float(diff[m_mae].mean().item()) if m_mae is not None and m_mae.any() else float(diff.mean().item())
+                except Exception:
+                    val = float(diff.mean().item())
+            else:
+                val = float(diff.mean().item())
+            pmm_mae_lines.append(f"{d},{val:.6f}")
 
         # 2.1 CRPS (domain average, masked)
         crps_val = crps_ensemble(obs, ens, mask=mask, reduction="mean")
@@ -401,7 +422,9 @@ def run_probabilistic(
     # 3) write output tables
     # ================================================================================
 
-    # 3.1 CRPS
+    # 3.1 CRPS (daily domain-mean values)
+    (tables_dir / "prob_crps_daily.csv").write_text("\n".join(crps_lines))
+
     # 3.1b temporally averaged CRPS map
     if _crps_sum is not None and _crps_cnt is not None:
         logger.debug(f"[eval_probabilistic] Final accumulators: sum={getattr(_crps_sum, 'shape', None)}, cnt={getattr(_crps_cnt, 'shape', None)}")
@@ -476,6 +499,175 @@ def run_probabilistic(
 
     # 3.5 Spread–skill (per-date summary)
     (tables_dir / "prob_spread_skill.csv").write_text("\n".join(ss_lines))
+
+    # PMM MAE (per day) — only written if we collected any
+    if len(pmm_mae_lines) > 1:
+        (tables_dir / "prob_pmm_mae_daily.csv").write_text("\n".join(pmm_mae_lines))
+
+    # ------------------------------------------------------------------------------
+    # 3.x Summary table (means / std over days) + spatial CRPS mean over land
+    # ------------------------------------------------------------------------------
+    def _vals_from_lines(lines: List[str]) -> np.ndarray:
+        if len(lines) <= 1:
+            return np.array([], dtype=float)
+        out = []
+        for ln in lines[1:]:
+            parts = ln.split(",")
+            if len(parts) >= 2:
+                try:
+                    out.append(float(parts[1]))
+                except Exception:
+                    pass
+        return np.asarray(out, dtype=float)
+
+    crps_daily = _vals_from_lines(crps_lines)
+    es_daily   = _vals_from_lines(es_lines)
+    vs_daily   = _vals_from_lines(vs_lines)
+    pmm_daily  = _vals_from_lines(pmm_mae_lines)
+
+    # overall spatial CRPS (nanmean over land-only map); may not exist if no dates processed
+    overall_spatial_crps_mean = np.nan
+    try:
+        # if mean_map is in scope (saved above), reuse; otherwise try to load what we just wrote
+        mean_map_npz = tables_dir / "prob_crps_mean_map.npz"
+        if mean_map_npz.exists():
+            mm = np.load(mean_map_npz)["crps_mean_map"]
+            overall_spatial_crps_mean = float(np.nanmean(mm))
+    except Exception:
+        pass
+
+    def _mm(arr: np.ndarray) -> float:
+        return float(np.nanmean(arr)) if arr.size else float("nan")
+
+    def _ss(arr: np.ndarray) -> float:
+        return float(np.nanstd(arr, ddof=0)) if arr.size else float("nan")
+
+    N_dates = int(crps_daily.size)
+
+    # Build per-season CRPS stats (from the daily, domain-mean CRPS file)
+    def _dates_vals_from_lines(lines: List[str]) -> tuple[List[str], np.ndarray]:
+        if len(lines) <= 1:
+            return [], np.array([], dtype=float)
+        dates_, vals_ = [], []
+        for ln in lines[1:]:
+            parts = ln.split(",")
+            if len(parts) >= 2:
+                d = parts[0].strip()
+                try:
+                    v = float(parts[1])
+                except Exception:
+                    continue
+                dates_.append(d)
+                vals_.append(v)
+        return dates_, np.asarray(vals_, dtype=float)
+
+    def _season_of(yyyymmdd: str) -> str:
+        try:
+            m = int(yyyymmdd[4:6])
+        except Exception:
+            return "ALL"
+        if m in (12, 1, 2):  return "DJF"
+        if m in (3, 4, 5):   return "MAM"
+        if m in (6, 7, 8):   return "JJA"
+        return "SON"
+
+    # Seasonal CRPS stats
+    dates_list, vals_list = _dates_vals_from_lines(crps_lines)
+    season_bins = {"DJF": [], "MAM": [], "JJA": [], "SON": []}
+    for d, v in zip(dates_list, vals_list):
+        season_bins[_season_of(d)].append(v)
+    def _mmss(x):
+        x = np.asarray(x, dtype=float)
+        return (float(np.nanmean(x)) if x.size else float("nan"),
+                float(np.nanstd(x, ddof=0)) if x.size else float("nan"))
+    djf_m, djf_s = _mmss(season_bins["DJF"])
+    mam_m, mam_s = _mmss(season_bins["MAM"])
+    jja_m, jja_s = _mmss(season_bins["JJA"])
+    son_m, son_s = _mmss(season_bins["SON"])
+
+    # PIT KS statistic D vs Uniform(0,1)
+    pit_KS_D = float("nan")
+    try:
+        if all_pit:
+            x = np.sort(np.concatenate(all_pit).ravel())
+            n = x.size
+            if n > 0:
+                y = np.arange(1, n + 1) / n
+                y_prev = np.arange(0, n) / n
+                D_plus = np.max(y - x)
+                D_minus = np.max(x - y_prev)
+                pit_KS_D = float(max(D_plus, D_minus))
+    except Exception:
+        pass
+
+    # Rank histogram max |z|
+    rank_max_abs_z = float("nan")
+    try:
+        if rank_acc is not None:
+            counts = rank_acc.numpy().astype(float)
+            N_rank = counts.sum()
+            if N_rank > 0:
+                K = counts.size
+                p = 1.0 / K
+                exp = N_rank * p
+                sd = np.sqrt(N_rank * p * (1.0 - p))
+                z = (counts - exp) / (sd if sd > 0 else 1.0)
+                rank_max_abs_z = float(np.max(np.abs(z)))
+    except Exception:
+        pass
+
+    # Spread–skill slope and Pearson r (from per-date means)
+    ss_arr = np.genfromtxt(str(tables_dir / "prob_spread_skill.csv"), delimiter=",", names=True, dtype=None, encoding="utf-8")
+    ss_slope, ss_r = float("nan"), float("nan")
+    try:
+        if ss_arr.size:
+            x_sp = np.asarray(ss_arr["spread_mean"], dtype=float)
+            y_sk = np.asarray(ss_arr["skill_mean"], dtype=float)
+            m = np.isfinite(x_sp) & np.isfinite(y_sk)
+            x_fit = x_sp[m]; y_fit = y_sk[m]
+            if x_fit.size >= 2:
+                denom = np.sum(x_fit * x_fit)
+                ss_slope = float(np.sum(x_fit * y_fit) / denom) if denom != 0 else 0.0
+                ss_r = float(np.corrcoef(x_fit, y_fit)[0, 1])
+    except Exception:
+        pass
+
+    summary_rows = [
+        ["metric","mean","std","N"],
+        ["CRPS_ensemble", f"{_mm(crps_daily):.6f}", f"{_ss(crps_daily):.6f}", f"{N_dates}"],
+        ["EnergyScore",    f"{_mm(es_daily):.6f}",   f"{_ss(es_daily):.6f}",   f"{es_daily.size}"],
+        ["VariogramScore", f"{_mm(vs_daily):.6f}",   f"{_ss(vs_daily):.6f}",   f"{vs_daily.size}"],
+    ]
+    if pmm_daily.size:
+        summary_rows.append(["PMM_MAE", f"{_mm(pmm_daily):.6f}", f"{_ss(pmm_daily):.6f}", f"{pmm_daily.size}"])
+    summary_rows.append(["SpatialCRPS_land_mean", f"{overall_spatial_crps_mean:.6f}", "", ""])
+    summary_rows.extend([
+        ["CRPS_DJF", f"{djf_m:.6f}", f"{djf_s:.6f}", f"{len(season_bins['DJF'])}"],
+        ["CRPS_MAM", f"{mam_m:.6f}", f"{mam_s:.6f}", f"{len(season_bins['MAM'])}"],
+        ["CRPS_JJA", f"{jja_m:.6f}", f"{jja_s:.6f}", f"{len(season_bins['JJA'])}"],
+        ["CRPS_SON", f"{son_m:.6f}", f"{son_s:.6f}", f"{len(season_bins['SON'])}"],
+        ["PIT_KS_D", f"{pit_KS_D:.6f}", "", ""],
+        ["RankHist_max_abs_z", f"{rank_max_abs_z:.6f}", "", ""],
+        ["SpreadSkill_slope", f"{ss_slope:.6f}", "", ""],
+        ["SpreadSkill_pearson_r", f"{ss_r:.6f}", "", ""],
+    ])
+    # Write CSV and a human-readable TXT
+    (tables_dir / "prob_summary.csv").write_text("\n".join([",".join(r) for r in summary_rows]))
+    (tables_dir / "prob_summary.txt").write_text(
+        "Probabilistic evaluation summary\n"
+        f"N_dates: {N_dates}\n"
+        f"CRPS (ensemble): mean={_mm(crps_daily):.6f}, std={_ss(crps_daily):.6f}\n"
+        + (f"PMM MAE: mean={_mm(pmm_daily):.6f}, std={_ss(pmm_daily):.6f}\n" if pmm_daily.size else "")
+        + f"Energy score: mean={_mm(es_daily):.6f}, std={_ss(es_daily):.6f}\n"
+        + f"Variogram score: mean={_mm(vs_daily):.6f}, std={_ss(vs_daily):.6f}\n"
+        + f"Spatial CRPS (land mean): {overall_spatial_crps_mean:.6f}\n"
+        + f"Seasonal CRPS (mean±std): "
+        + f"DJF {djf_m:.3f}±{djf_s:.3f}, MAM {mam_m:.3f}±{mam_s:.3f}, "
+        + f"JJA {jja_m:.3f}±{jja_s:.3f}, SON {son_m:.3f}±{son_s:.3f}\n"
+        + f"PIT KS D: {pit_KS_D:.3f}\n"
+        + f"Rank histogram max |z|: {rank_max_abs_z:.2f}\n"
+        + f"Spread–skill slope: {ss_slope:.3f}, Pearson r: {ss_r:.3f}\n"        
+    )
 
     # ================================================================================
     # 4) plots

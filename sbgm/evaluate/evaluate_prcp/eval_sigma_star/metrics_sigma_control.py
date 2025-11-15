@@ -427,6 +427,10 @@ def evaluate_sigma_control(
         psd_band = (float(band[0]), float(band[1]))
     else:
         psd_band = (5.0, 20.0)
+    # Read config for CRPS rainy threshold and high‑k robustness
+    crps_rain_thresh = _cfg_get(cfg, "full_gen_eval.sigma_control.crps_rain_thresh", None)
+    hk_min_hr_frac = float(_cfg_get(cfg, "full_gen_eval.sigma_control.hk_min_hr_frac", 1e-4))
+    hk_min_hr_abs = float(_cfg_get(cfg, "full_gen_eval.sigma_control.hk_min_hr_abs", 1e-12))
 
     results: List[Dict] = []
 
@@ -489,8 +493,13 @@ def evaluate_sigma_control(
                 hi = (k_arr > k_nyq)
                 if np.any(hi):
                     num = float(np.sum(P_gen_np[hi]))
-                    den = float(np.sum(P_hr_np[hi])) + 1e-20
-                    hk_gain = num / den
+                    den = float(np.sum(P_hr_np[hi]))
+                    total_hr = float(np.sum(P_hr_np))
+                    # Skip days where HR high‑k power is numerically negligible
+                    if den <= 0.0 or den < hk_min_hr_abs or den < hk_min_hr_frac * max(total_hr, hk_min_hr_abs):
+                        hk_gain = float("nan")
+                    else:
+                        hk_gain = num / den
                 else:
                     hk_gain = float("nan")
 
@@ -547,7 +556,15 @@ def evaluate_sigma_control(
             slope_err = slope_gen - slope_hr if (np.isfinite(slope_gen)  and np.isfinite(slope_hr)) else np.nan
             
             # 3) CRPS over land (if available)
-            crps = crps_ensemble_local(hr, ens, mask=mask, reduction="mean").item()
+            crps_mask = mask
+            if crps_rain_thresh is not None:
+                try:
+                    thr = float(crps_rain_thresh)
+                    rain_mask = hr > thr
+                    crps_mask = rain_mask if crps_mask is None else (crps_mask & rain_mask)
+                except Exception:
+                    pass
+            crps = crps_ensemble_local(hr, ens, mask=crps_mask, reduction="mean").item()
 
             results.append({
                 "date": date,

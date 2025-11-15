@@ -674,6 +674,7 @@ def plot_crps_timeseries(
 
     crps_path = tables_dir / "prob_crps_daily.csv"
     if not crps_path.exists():
+        logger.info(f"CRPS timeseries file not found: {crps_path}")
         return
 
     lines = crps_path.read_text().strip().splitlines()
@@ -777,7 +778,7 @@ def plot_crps_spatial(eval_root: str | Path):
         return
     data = np.load(fpath)
     crps_map = data["crps_mean_map"]
-    mean_crps = np.mean(crps_map)
+    mean_crps = float(np.nanmean(crps_map))
 
     _nice()
     cmap = get_cmap_for_variable("prcp")
@@ -786,8 +787,31 @@ def plot_crps_spatial(eval_root: str | Path):
     dk_mask = get_dk_lsm_outline()
     if dk_mask is not None:
         dk_mask = np.flipud(dk_mask)
-    overlay_outline(ax, dk_mask, color="black", linewidth=0.6)    
-    ax.set_title(f"Mean CRPS (per pixel, over time)\nOverall mean: {mean_crps:.2f}")
+    overlay_outline(ax, dk_mask, color="black", linewidth=0.6)
+
+    # Try to compute overall std from the *daily* domain-mean CRPS values
+    crps_daily_csv = tables_dir / "prob_crps_daily.csv"
+    overall_std = np.nan
+    try:
+        if crps_daily_csv.exists():
+            lines = crps_daily_csv.read_text().strip().splitlines()
+            vals = []
+            for ln in lines[1:]:
+                parts = ln.split(",")
+                if len(parts) >= 2:
+                    try:
+                        vals.append(float(parts[1]))
+                    except Exception:
+                        pass
+            if len(vals) > 0:
+                overall_std = float(np.nanstd(np.asarray(vals, dtype=float), ddof=0))
+    except Exception:
+        pass
+
+    title = f"Mean CRPS (per pixel, over time)\nOverall mean: {mean_crps:.2f}"
+    if np.isfinite(overall_std):
+        title = f"Mean CRPS (per pixel, over time)\nOverall mean ± std: {mean_crps:.2f} ± {overall_std:.2f}"
+    ax.set_title(title)
     ax.set_xticks([]); ax.set_yticks([])
     fig.colorbar(im, ax=ax, label="CRPS")
     _savefig(fig, figs_dir / "prob_crps_mean_map.png", dpi=SET_DPI)

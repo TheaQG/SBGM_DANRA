@@ -108,7 +108,8 @@ def plot_spell_pmf(figdir: Path, group: str, metrics: Dict[str, dict], pair_metr
         if np.isfinite(p):
             ax.plot(bins, (p * (1 - p) ** (bins - 1)), linestyle="--", linewidth=1.2, label="GEN (ens) geom", color=col_gen_ens)
     ax.set_title(f"{group}: wet-spell length PMF")
-    ax.set_xlim(1, max_wet); ax.set_ylim(-0.005, None)
+    # ax.set_xlim(1, max_wet); ax.set_ylim(-0.005, None)
+    ax.set_xlim(1, 21); ax.set_ylim(-0.005, None)
     leg = ax.legend(ncol=2, frameon=True)
     leg.get_frame().set_edgecolor("black"); leg.get_frame().set_linewidth(0.8)
     txt = []
@@ -144,7 +145,8 @@ def plot_spell_pmf(figdir: Path, group: str, metrics: Dict[str, dict], pair_metr
             ax.plot(bins, (p * (1 - p) ** (bins - 1)), linestyle="--", linewidth=1.2, label="GEN (ens) geom", color=col_gen_ens)
     ax.set_title(f"{group}: dry-spell length PMF")
     ax.set_xlabel("length (days)"); ax.set_ylabel("probability")
-    ax.set_xlim(1, max_dry); ax.set_ylim(-0.005, None)
+    ax.set_xlim(1, 21); ax.set_ylim(-0.005, None)
+    # ax.set_xlim(1, max_dry); ax.set_ylim(-0.005, None)
     leg = ax.legend(ncol=2, frameon=True)
     leg.get_frame().set_edgecolor("black"); leg.get_frame().set_linewidth(0.8)
     txt = []

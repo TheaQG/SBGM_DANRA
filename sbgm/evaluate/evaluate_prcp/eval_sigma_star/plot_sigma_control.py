@@ -90,7 +90,7 @@ def plot_sigma_control(summary_csv, figures_dir, combined: bool = False):
         ax.set_xlabel(r"$\sigma^*$")
         ax.set_ylabel("LR-GEN correlation\n(LP ≤ LR Nyquist)")
         ax.set_xlim(*_xpad(sigma))
-        ax.set_ylim(0.0, min(1.0, max(0.02, float(np.nanmax(r_lp_mean + r_lp_std)) + 0.02)))
+        ax.set_ylim(0.4, min(1.0, max(0.02, float(np.nanmax(r_lp_mean + r_lp_std)) + 0.02)))
         ax.set_title("Scale-aware correlation")
         # 2) PSD slope
         ax = axes[1]
@@ -227,6 +227,7 @@ def plot_sigma_control_examples_grid(
     gen_base_dir,
     out_dir,
     *,
+    sigma_star_subset=None,
     n_members=3,
     date: str | None = None,
     land_only: bool = True,
@@ -236,6 +237,23 @@ def plot_sigma_control_examples_grid(
     gen_base_dir = Path(gen_base_dir)
     figs_root = Path(out_dir) / "figures" / "examples"
     _ensure_dir(figs_root)
+
+    # If a subset of sigma* values is provided, intersect with the available grid
+    if sigma_star_subset is not None:
+        try:
+            sigma_star_subset = [float(s) for s in sigma_star_subset]
+        except TypeError:
+            sigma_star_subset = [float(sigma_star_subset)]
+        # retain only values that are in the provided grid (within a small tolerance)
+        grid_vals = [float(s) for s in sigma_star_grid]
+        subset_filtered = []
+        for s in sigma_star_subset:
+            for g in grid_vals:
+                if abs(s - g) < 1e-6:
+                    subset_filtered.append(g)
+                    break
+        if subset_filtered:
+            sigma_star_grid = subset_filtered
 
     cmap = get_cmap_for_variable("prcp")
     dk_outline = get_dk_lsm_outline()
@@ -292,7 +310,24 @@ def plot_sigma_control_examples_grid(
         rows.append({"sigma": sstar, "hr": hr, "lr": lr, "pmm": pmm, "members": members})
 
     Rn = len(rows)
-    Cn = 2 + max_members + 1        
+    Cn = 2 + max_members + 1
+
+    # Global color scale across all σ* rows
+    all_vals = []
+    for row in rows:
+        for arr in [row["hr"], row["lr"], row["pmm"], *row["members"]]:
+            if arr is not None:
+                vals = np.asarray(arr)
+                vals = vals[np.isfinite(vals)]
+                if vals.size > 0:
+                    all_vals.append(vals)
+    if all_vals:
+        flat_all = np.concatenate(all_vals)
+        vmin_global = 0.0
+        vmax_global = float(np.nanpercentile(flat_all, percentile)) if flat_all.size > 0 else 1.0
+        vmax_global = max(vmin_global + 1e-6, vmax_global)
+    else:
+        vmin_global, vmax_global = 0.0, 1.0
 
     _nice()
     fig_w = 3.2 * Cn
@@ -306,25 +341,17 @@ def plot_sigma_control_examples_grid(
 
     for r, row in enumerate(rows):
         hr = row["hr"]; lr = row["lr"]; pmm = row["pmm"]; members = row["members"]
-        pool = [x for x in [hr, lr, pmm, *members] if x is not None]
-        if pool:
-            flat = np.concatenate([v[np.isfinite(v)] for v in pool]) if all([v is not None for v in pool]) else np.array([0.0])
-            vmin = 0.0
-            vmax = float(np.nanpercentile(flat, percentile)) if flat.size > 0 else 1.0
-            vmax = max(vmin + 1e-6, vmax)
-        else:
-            vmin, vmax = 0.0, 1.0
 
         c = 0
         def draw(ax, img, title):
             if img is None:
                 ax.axis("off"); return
-            im = ax.imshow(img, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
+            im = ax.imshow(img, origin="lower", vmin=vmin_global, vmax=vmax_global, cmap=cmap)
             overlay_outline(ax, dk_outline)
             ax.set_xticks([]); ax.set_yticks([])
             if r == 0:
-                ax.set_title(title, fontsize=10)
-            _add_colorbar_and_boxplot(fig, ax, im, img, boxplot=True, ylim=(vmin, vmax))
+                ax.set_title(title, fontsize=14)
+            _add_colorbar_and_boxplot(fig, ax, im, img, boxplot=True, ylim=(vmin_global, vmax_global))
 
         draw(axs[r, c], hr, titles[c]); c += 1
         draw(axs[r, c], lr, titles[c]); c += 1
@@ -336,15 +363,15 @@ def plot_sigma_control_examples_grid(
                 ax.axis("off")
         c += max_members
         draw(axs[r, c], pmm, titles[-1])
-        axs[r, 0].set_ylabel(f"σ*={row['sigma']:.2f}\n{date}", fontsize=9)
+        axs[r, 0].set_ylabel(f"σ*={row['sigma']:.2f}\n{date}", fontsize=14)
 
-    fig.text(0.5, 0.02, "Precipitation [mm/day]", ha="center", fontsize=9)
+    fig.text(0.5, 0.02, "Precipitation [mm/day]", ha="center", fontsize=16)
     fig.tight_layout(rect=(0, 0.03, 1, 0.98))
     out_path = figs_root / fname
     _savefig(fig, out_path, dpi=300)
     return [str(out_path)]
 
-def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
+def plot_sigma_control_psd_curves(out_dir: str | Path, sigma_subset=None) -> str | None:
     """
     Read <out_dir>/tables/sigma_psd_curves.npz and make a PSD vs wavelength plot
     showing HR, LR, and one curve per sigma* (mean +/- std shading), with:
@@ -378,6 +405,21 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
         psd_lr_logstd = d["psd_lr_logstd"] if "psd_lr_logstd" in d.files else None
         psd_gen_logmu  = d["psd_gen_logmu"]  if "psd_gen_logmu"  in d.files else None
         psd_gen_logstd = d["psd_gen_logstd"] if "psd_gen_logstd" in d.files else None
+
+    # Optionally restrict to a subset of sigma* values (e.g. for clearer PSD plots)
+    if sigma_subset is not None:
+        try:
+            sigma_subset = np.array([float(s) for s in sigma_subset], dtype=float)
+        except TypeError:
+            sigma_subset = np.array([float(sigma_subset)], dtype=float)
+        mask = np.isin(sigma_vals, sigma_subset)
+        if mask.any():
+            sigma_vals = sigma_vals[mask]
+            psd_gen_mean = psd_gen_mean[mask]
+            psd_gen_std = psd_gen_std[mask]
+            if psd_gen_logmu is not None and psd_gen_logstd is not None:
+                psd_gen_logmu = psd_gen_logmu[mask]
+                psd_gen_logstd = psd_gen_logstd[mask]
 
     # brief sanity
     if k.ndim != 1 or psd_gen_mean.ndim != 2:
@@ -413,12 +455,12 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
     ax.plot(lam, lr_lin, color=get_color_for_model("lr"), lw=1.6, ls="--", label="LR (ERA5↑)")
     z = 1.0
     # Only fill bands if both log-mean and log-std are available
-    if (psd_hr_logmu is not None) and (psd_hr_logstd is not None):
-        mu = psd_hr_logmu[mpos][order]; sd = psd_hr_logstd[mpos][order]
-        ax.fill_between(lam, 10**(mu - z*sd), 10**(mu + z*sd), color=get_color_for_model("hr"), alpha=0.15)
-    if (psd_lr_logmu is not None) and (psd_lr_logstd is not None):
-        mu = psd_lr_logmu[mpos][order]; sd = psd_lr_logstd[mpos][order]
-        ax.fill_between(lam, 10**(mu - z*sd), 10**(mu + z*sd), color=get_color_for_model("lr"), alpha=0.12)
+    # if (psd_hr_logmu is not None) and (psd_hr_logstd is not None):
+    #     mu = psd_hr_logmu[mpos][order]; sd = psd_hr_logstd[mpos][order]
+    #     ax.fill_between(lam, 10**(mu - z*sd), 10**(mu + z*sd), color=get_color_for_model("hr"), alpha=0.15)
+    # if (psd_lr_logmu is not None) and (psd_lr_logstd is not None):
+    #     mu = psd_lr_logmu[mpos][order]; sd = psd_lr_logstd[mpos][order]
+    #     ax.fill_between(lam, 10**(mu - z*sd), 10**(mu + z*sd), color=get_color_for_model("lr"), alpha=0.12)
 
     # Shaded slope band (in λ)
     lam_lo, lam_hi = float(psd_band[0]), float(psd_band[1])  # e.g., 5–20 km
@@ -436,19 +478,19 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
     for i, s in enumerate(sigma_vals):
         c = cmap(0.15 + 0.75 * (1 - i / max(1, S-1)))  # darkest for smallest σ*
         mean_i = np.maximum(psd_gen_mean[i][mpos][order], 1e-12)
-        ax.plot(lam, mean_i, lw=1.8, color=c, label=fr"GEN (σ*={s:.2f})")
+        ax.plot(lam, mean_i, lw=1.8, color=c, label=fr"Gen (σ*={s:.2f})")
         z = 1.0
-        # Use log-mean/log-std band if both are available, otherwise fall back to linear std
-        if (psd_gen_logmu is not None) and (psd_gen_logstd is not None):
-            mu = psd_gen_logmu[i][mpos][order]
-            sd = psd_gen_logstd[i][mpos][order]
-            lower = 10**(mu - z*sd)
-            upper = 10**(mu + z*sd)
-        else:
-            std_i = np.maximum(psd_gen_std[i][mpos][order], 0.0)
-            lower = np.clip(mean_i - std_i, 1e-14, None)
-            upper = mean_i + std_i
-        ax.fill_between(lam, lower, upper, color=c, alpha=0.22)
+        # # Use log-mean/log-std band if both are available, otherwise fall back to linear std
+        # if (psd_gen_logmu is not None) and (psd_gen_logstd is not None):
+        #     mu = psd_gen_logmu[i][mpos][order]
+        #     sd = psd_gen_logstd[i][mpos][order]
+        #     lower = 10**(mu - z*sd)
+        #     upper = 10**(mu + z*sd)
+        # else:
+        #     std_i = np.maximum(psd_gen_std[i][mpos][order], 0.0)
+        #     lower = np.clip(mean_i - std_i, 1e-14, None)
+        #     upper = mean_i + std_i
+        # ax.fill_between(lam, lower, upper, color=c, alpha=0.22)
 
         # Compute slope in the band using log10 fit on k (unsorted k_pos domain)
         eps = 1e-20
@@ -485,7 +527,10 @@ def plot_sigma_control_psd_curves(out_dir: str | Path) -> str | None:
 
     ax.set_xscale("log")
     ax.set_yscale("log")
+    ax.set_ylim(1e-8, 1e5)
+    # Cut off above LR Nyquist
     ax.invert_xaxis()
+    ax.set_xlim(lam.max()*1.02, min(lam.min()*0.98, 1.0 / lr_nyq if lr_nyq > 0.0 else lam.min()*0.98)) 
     ax.set_xlabel("Wavelength λ (km)")
     ax.set_ylabel("Spectral power")
     ax.set_title(r"Mean ensemble PSDs vs wavelength across $\sigma^*$")

@@ -43,38 +43,50 @@ def _to_tensor(x):
     return x if isinstance(x, torch.Tensor) else torch.tensor(x)
 
 @torch.no_grad()
-def compute_fss_at_scales(gen_bt: torch.Tensor, hr_bt: torch.Tensor, *, mask:torch.Tensor|None,
-                  grid_km_per_px: float, fss_km: list[float], thr_mm: float, eps: float=1e-8) -> dict[str, float]:
+def compute_fss_at_scales(
+    gen_bt: torch.Tensor, hr_bt: torch.Tensor, *, mask: torch.Tensor | None,
+    grid_km_per_px: float, fss_km: list[float], thr_mm: float, eps: float = 1e-8
+) -> dict[str, float]:
     """
-        Fractions Skill Score (FSS) for exceedance over threshold thr_mm at different spatial scales (km).
-        gen_bt, hr_bt: [B,1,H,W] back-transformed precipitation tensors in mm/day.
-        mask: [B,1,H,W] land mask (1=land, 0=sea) or None
+    Fractions Skill Score (FSS) for exceedance over thr_mm at different scales.
+    Uses MASKED pooling so ocean/invalid pixels do not dilute coastal boxes.
+    gen_bt, hr_bt: [B,1,H,W] (mm/day), mask: [B,1,H,W] (1=valid, 0=invalid) or None.
     """
     gen_bt = _to_tensor(gen_bt).float()
-    hr_bt = _to_tensor(hr_bt).float()
+    hr_bt  = _to_tensor(hr_bt).float()
+
+    X = (gen_bt > thr_mm).float()   # binary exceedance
+    Y = (hr_bt  > thr_mm).float()
+
     if mask is not None:
-        mask = mask.bool().expand_as(gen_bt)
+        M = _to_tensor(mask).float().clamp(0, 1)
+    else:
+        # treat whole domain as valid
+        M = torch.ones_like(X)
 
-    X = (gen_bt > thr_mm).float() # Binary exceedance for generated
-    Y = (hr_bt > thr_mm).float() # Binary exceedance for HR
+    out: dict[str, float] = {}
 
-    out = {}
     for km in fss_km:
-        rad_px = int(max(1, round(float(km) / float(grid_km_per_px)))) # Radius in pixels (int)
-        k = 2 * rad_px + 1 # Odd kernel size (int)
-        # Box filter via average pooling
-        Xs = F.avg_pool2d(X, kernel_size=k, stride=1, padding=rad_px)
-        Ys = F.avg_pool2d(Y, kernel_size=k, stride=1, padding=rad_px)
-        if mask is not None:
-            m = mask.float()
-            num = ((Xs - Ys) ** 2 * m).sum() / (m.sum() + eps) # Mean squared error over land
-            den = (((Xs ** 2 + Ys ** 2) * m).sum() / (m.sum() + eps)) + eps
-        else:
-            num = ((Xs - Ys) ** 2).mean() # Mean squared error over all pixels
-            den = (Xs ** 2 + Ys ** 2).mean() + eps
-        fss = 1.0 - num / den # Fractions Skill Score
-        out[f'{int(km)}km'] = float(fss)#float(fss.clamp(0.0, 1.0)) # Clamp to [0,1]
-    
+        rad_px = int(max(1, round(float(km) / float(grid_km_per_px))))
+        ksize  = 2 * rad_px + 1
+        area   = float(ksize * ksize)
+
+        # masked sums in the box
+        Xm = F.avg_pool2d(X * M, kernel_size=ksize, stride=1, padding=rad_px) * area
+        Ym = F.avg_pool2d(Y * M, kernel_size=ksize, stride=1, padding=rad_px) * area
+        Mm = F.avg_pool2d(M,      kernel_size=ksize, stride=1, padding=rad_px) * area
+
+        # masked box-averages
+        Xs = Xm / (Mm + eps)
+        Ys = Ym / (Mm + eps)
+
+        # global (masked) means for MSE and normalization
+        msum = M.sum().clamp_min(1.0)
+        num  = (((Xs - Ys) ** 2) * M).sum() / msum                      # ⟨(Xs−Ys)^2⟩_mask
+        den  = (((Xs ** 2 + Ys ** 2) * M).sum() / msum) + eps           # ⟨Xs^2 + Ys^2⟩_mask + ε
+
+        fss = 1.0 - num / den
+        out[f"{int(km)}km"] = float(torch.clamp(fss, 0.0, 1.0))
     return out
 
 @torch.no_grad()
@@ -117,31 +129,32 @@ def compute_iss_at_scales(
     for km in iss_scales_km:
         rad_px = int(max(1, round(float(km) / float(grid_km_per_px))))
         k = 2 * rad_px + 1
+        area = float(k * k)
 
-        Xs = F.avg_pool2d(X, kernel_size=k, stride=1, padding=rad_px)
-        Ys = F.avg_pool2d(Y, kernel_size=k, stride=1, padding=rad_px)
-
+        # --- masked box sums, then masked averages (identical idea as FSS) ---
         if mask is not None:
             m = mask.float()
-            msum = m.sum().clamp_min(1.0)
-            mse_mod = (((Xs - Ys) ** 2) * m).sum() / msum
-            p_f = (Xs * m).sum() / msum
-            p_o = (Ys * m).sum() / msum
         else:
-            mse_mod = ((Xs - Ys) ** 2).mean()
-            p_f = Xs.mean()
-            p_o = Ys.mean()
+            m = torch.ones_like(X)
 
-        # random/climatological MSE for this base rate
-        mse_rand = p_f + p_o - 2.0 * p_f * p_o  # always >= 0
-        # Guard against vanishing bare rate (i.e. almost no rain anywhere)
-        mse_rand = torch.clamp(mse_rand, min=0.02)
+        Xm = F.avg_pool2d(X * m, kernel_size=k, stride=1, padding=rad_px) * area
+        Ym = F.avg_pool2d(Y * m, kernel_size=k, stride=1, padding=rad_px) * area
+        Mm = F.avg_pool2d(m,     kernel_size=k, stride=1, padding=rad_px) * area
+
+        Xs = Xm / (Mm + eps)   # masked box-average exceedance “fractions”
+        Ys = Ym / (Mm + eps)
+
+        # Global masked means for MSE_mod and base rates
+        msum   = m.sum().clamp_min(1.0)
+        mse_mod = (((Xs - Ys) ** 2) * m).sum() / msum
+        p_f     = (Xs * m).sum() / msum
+        p_o     = (Ys * m).sum() / msum
+
+        mse_rand = p_f + p_o - 2.0 * p_f * p_o          # ≥ 0
+        mse_rand = torch.clamp(mse_rand, min=0.02)      # guard very dry days
 
         iss = 1.0 - mse_mod / (mse_rand + eps)
-        # Hard clamp to [0,1]
-        iss = torch.clamp(iss, min=0.0, max=1.0)
-
-        out[f"{int(km)}km"] = float(iss.item())
+        out[f"{int(km)}km"] = float(torch.clamp(iss, 0.0, 1.0))
 
     return out
 

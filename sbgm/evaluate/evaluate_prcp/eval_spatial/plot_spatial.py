@@ -31,22 +31,53 @@ def _load_npz(tables_dir: Path, tag: str):
         return None
     return np.load(p, allow_pickle=True)
 
-def _draw_single(ax, data, title: str, cmap="viridis", vmin=None, vmax=None, cbar_label="", *, dk_mask=None, add_stats: bool=False):
-    im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax, origin="upper")
+def _draw_single(
+    ax,
+    data,
+    title: str,
+    cmap="viridis",
+    vmin=None,
+    vmax=None,
+    cbar_label="",
+    *,
+    dk_mask=None,
+    add_stats: bool = False,
+):
+    if data is None:
+        ax.axis("off")
+        return None
+
+    arr = np.asarray(data)
+
+    if dk_mask is not None and dk_mask.shape == arr.shape:
+        arr_plot = np.flipud(arr)
+    else:
+        arr_plot = arr
+
+    im = ax.imshow(arr_plot, cmap=cmap, vmin=vmin, vmax=vmax, origin="upper")
+
+    # Keep this so all spatial plots have the same orientation as elsewhere
+    # ax.invert_yaxis()
+
     if dk_mask is not None:
         overlay_outline(ax, dk_mask)
-    if add_stats and data is not None:
-        flat = np.asarray(data).ravel()
+
+    if add_stats:
+        flat = arr.ravel()  # stats on original data (orientation doesn’t matter)
         flat = flat[np.isfinite(flat)]
         if flat.size > 0:
             mu = float(np.nanmean(flat))
             sd = float(np.nanstd(flat))
             title = f"{title}  |  {mu:.2f} ± {sd:.2f}"
+
     ax.set_title(title)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
+
     cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
     if cbar_label:
         cb.set_label(cbar_label)
+
     return im
 
 def plot_spatial_maps(eval_root: str | Path) -> None:

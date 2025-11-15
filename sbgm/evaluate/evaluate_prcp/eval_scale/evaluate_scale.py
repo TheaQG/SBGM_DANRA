@@ -604,6 +604,42 @@ def run_scale(
         iss_summ_lines.append(",".join(row))
     (tables_dir / "scale_iss_summary.csv").write_text("\n".join(iss_summ_lines))
 
+    # --- Compact overview table across metrics ---
+    try:
+        import statistics as _st
+        overview = ["metric,detail,value"]
+        # FSS (PMM) mean across all (thr,scale)
+        fss_vals = []
+        for _, vals in fss_store.items():
+            fss_vals.extend(vals)
+        if fss_vals:
+            overview.append(f"FSS,gen_mean,{_st.mean(fss_vals):.6f}")
+        # ISS (PMM) mean across all (thr,scale)
+        iss_vals = []
+        for _, vals in iss_store.items():
+            iss_vals.extend(vals)
+        if iss_vals:
+            overview.append(f"ISS,gen_mean,{_st.mean(iss_vals):.6f}")
+        # Ensemble means if available
+        if fss_ens_store:
+            all_ens = []
+            for _, vals in fss_ens_store.items():
+                all_ens.extend(vals)
+            if all_ens:
+                overview.append(f"FSS_ens,mean,{_st.mean(all_ens):.6f}")
+        if iss_ens_store:
+            all_ens = []
+            for _, vals in iss_ens_store.items():
+                all_ens.extend(vals)
+            if all_ens:
+                overview.append(f"ISS_ens,mean,{_st.mean(all_ens):.6f}")
+        # pointers to PSD summaries (written by plotter)
+        overview.append("PSD,band_ratio_csv,scale_psd_band_ratios_avg.csv")
+        overview.append("PSD,slopes_csv,scale_psd_slopes_avg.csv")
+        (tables_dir / "scale_overview.csv").write_text("\n".join(overview))
+    except Exception as e:
+        logger.warning(f"[eval_scale] Failed to write overview CSV: {e}")
+
     if use_ensemble:
         logger.info(
             f"[eval_scale] Ensemble availability: ok={ens_dates_ok}, badshape={ens_dates_badshape}, missing={ens_dates_missing} (out of {len(dates)} dates)")

@@ -1,8 +1,9 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Dict, Tuple, List
+from typing import Iterable, Optional, Sequence, Dict, Tuple, List, Any
 import numpy as np
 import torch
+import csv
 
 # ---------- helpers ----------
 
@@ -189,3 +190,138 @@ def save_maps_npz(path: Path, **maps: torch.Tensor) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {k: v.detach().cpu().numpy() for k, v in maps.items()}
     np.savez_compressed(path, **payload)
+
+# ---------- summary helpers (domain-aggregated CSV) ----------
+def _np(a):
+    if a is None:
+        return None
+    if isinstance(a, torch.Tensor):
+        return a.detach().cpu().numpy()
+    return np.asarray(a)
+
+def _nanmean(a):
+    a = _np(a)
+    return float(np.nanmean(a)) if a is not None and np.isfinite(a).any() else float("nan")
+
+def _nanstd(a):
+    a = _np(a)
+    return float(np.nanstd(a)) if a is not None and np.isfinite(a).any() else float("nan")
+
+def _nansum(a):
+    a = _np(a)
+    return float(np.nansum(a)) if a is not None and np.isfinite(a).any() else float("nan")
+
+def _valid_frac(a):
+    a = _np(a)
+    if a is None:
+        return float("nan")
+    m = np.isfinite(a)
+    return float(m.mean())
+
+def _nanrmse(a, b):
+    a = _np(a); b = _np(b)
+    if a is None or b is None:
+        return float("nan")
+    m = np.isfinite(a) & np.isfinite(b)
+    if not m.any():
+        return float("nan")
+    return float(np.sqrt(np.nanmean((a[m] - b[m])**2)))
+
+def _nanbias(a, b):
+    a = _np(a); b = _np(b)
+    if a is None or b is None:
+        return float("nan")
+    m = np.isfinite(a) & np.isfinite(b)
+    if not m.any():
+        return float("nan")
+    return float(np.nanmean(a[m] - b[m]))
+
+def _nanratio(a, b, eps=1e-12):
+    a = _np(a); b = _np(b)
+    if a is None or b is None:
+        return float("nan")
+    m = np.isfinite(a) & np.isfinite(b) & (np.abs(b) > eps)
+    if not m.any():
+        return float("nan")
+    r = a[m] / b[m]
+    return float(np.nanmean(r))
+
+def _nancorr(a, b):
+    a = _np(a); b = _np(b)
+    if a is None or b is None:
+        return float("nan")
+    m = np.isfinite(a) & np.isfinite(b)
+    if not m.any():
+        return float("nan")
+    if m.sum() < 2:
+        return float("nan")
+    aa = a[m] - np.nanmean(a[m])
+    bb = b[m] - np.nanmean(b[m])
+    denom = np.sqrt(np.nanmean(aa**2)) * np.sqrt(np.nanmean(bb**2))
+    if denom == 0 or not np.isfinite(denom):
+        return float("nan")
+    return float(np.nanmean(aa*bb) / denom)
+
+def summarize_group_spatial_maps(group_name: str, group_maps: Dict[str, Dict[str, torch.Tensor]]) -> List[Dict[str, Any]]:
+    """
+    Create rows of domain-aggregated stats for a group.
+    Expects `group_maps[label][var]` tensors for labels in {'hr','ensmean','ensstd','lr','pmm'} (optional).
+    Produces:
+      - Per-source rows with <var>_mean, <var>_std, sum_total, wetfreq_valid_frac
+      - Comparison rows {ensmean, lr, pmm}_vs_hr with <var>_bias, <var>_rmse, <var>_ratio, <var>_corr
+    """
+    rows: List[Dict[str, Any]] = []
+    var_order = ["mean","sum","wetfreq","rx1","rx5","p95","p99"]
+
+    def _emit_source_rows(label: str, maps: Dict[str, torch.Tensor]):
+        base: Dict[str, Any] = {"group": group_name, "source": label}
+        for v in var_order:
+            if v not in maps:
+                continue
+            arr = maps[v]
+            base[f"{v}_mean"] = _nanmean(arr)
+            base[f"{v}_std"]  = _nanstd(arr)
+            if v == "sum":
+                base["sum_total"] = _nansum(arr)
+            if v == "wetfreq":
+                base["wetfreq_valid_frac"] = _valid_frac(arr)
+        rows.append(base)
+
+    for label in ("hr","ensmean","ensstd","lr","pmm"):
+        if label in group_maps:
+            _emit_source_rows(label, group_maps[label])
+
+    if "hr" in group_maps:
+        hr_maps = group_maps["hr"]
+        for comp_label in ("ensmean","lr","pmm"):
+            if comp_label not in group_maps:
+                continue
+            cmaps = group_maps[comp_label]
+            row: Dict[str, Any] = {"group": group_name, "source": f"{comp_label}_vs_hr"}
+            for v in var_order:
+                a = cmaps.get(v, None)
+                b = hr_maps.get(v, None)
+                if a is None or b is None:
+                    continue
+                row[f"{v}_bias"]  = _nanbias(a, b)
+                row[f"{v}_rmse"]  = _nanrmse(a, b)
+                row[f"{v}_ratio"] = _nanratio(a, b)
+                row[f"{v}_corr"]  = _nancorr(a, b)
+            rows.append(row)
+
+    return rows
+
+def write_spatial_summary_csv(tables_dir: Path, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    header_keys = set()
+    for r in rows:
+        header_keys.update(r.keys())
+    header = ["group","source"] + sorted(k for k in header_keys if k not in ("group","source"))
+    out_csv = tables_dir / "spatial_summary.csv"
+    with open(out_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=header)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in header})

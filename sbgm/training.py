@@ -156,6 +156,31 @@ class TrainingPipeline_general:
         if self.with_ema:
             self._init_ema()
 
+        # RainGate configuration (auxiliary wet/dry head and optional pixel reweighting)
+        rg_cfg = self.cfg.get('rain_gate', {})
+        self.rain_gate_enabled = bool(rg_cfg.get('enabled', False))
+        self.rain_gate_reweight_enabled = bool(rg_cfg.get('reweight_enabled', False))
+
+        # Defaults chosen to be safe if section is missing
+        self.rain_gate_loss_weight = float(rg_cfg.get('loss_weight', 0.0))
+        self.rain_gate_threshold_mm = float(rg_cfg.get('threshold_mm', 1.0))
+
+        # Pixel weighting shape/strength hyperparameters
+        self.rg_alpha = float(rg_cfg.get('alpha', 1.0))   # strength of upweighting wet pixels
+        self.rg_gamma = float(rg_cfg.get('gamma', 1.0))   # curvature of weighting function
+
+        # Instantiate RainGate network and its loss, if enabled
+        self.rain_gate = None
+        self.rain_gate_criterion = None
+        if self.rain_gate_enabled:
+            logger.info("→ RainGate auxiliary head enabled")
+            # Input channels for RainGate: start with LR channels; geo channels can be added later in the training step
+            # We don't know the exact channel count here yet, so we create the module lazily on first use.
+            # For now we only store the configuration; the object will be built in the training loop when shapes are known.
+            self.rain_gate_lazy_init = True
+        else:
+            self.rain_gate_lazy_init = False
+
         # Classifier free guidance config
         self.cfg_guidance = self.cfg.get('classifier_free_guidance', {})
         if self.cfg_guidance.get('enabled', False):

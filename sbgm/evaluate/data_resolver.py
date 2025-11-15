@@ -187,23 +187,26 @@ class EvalDataResolver:
         except Exception as e:
             logger.warning(f"[EvalDataResolver] Failed to read {p}: {e}")
             return None
-        # Preferred order: requested key, then 'lr', then 'lr_lrspace', then 'lr_hrspace'
-        preferred = []
-        if isinstance(self.lr_phys_key, str) and len(self.lr_phys_key) > 0:
-            preferred.append(self.lr_phys_key)
-        preferred.extend(["lr", "lr_lrspace", "lr_hrspace"])
-        seen = set()
-        ordered = [k for k in preferred if not (k in seen or seen.add(k))]
+        # Strict: if lr_phys_key is set, only accept that exact key; do not fall back.
         x = None
         chosen = None
-        for k in ordered:
-            if k in d.files:
-                x = d[k]
-                if x is not None:
+        desired = (self.lr_phys_key if isinstance(self.lr_phys_key, str) and len(self.lr_phys_key) > 0 else None)
+
+        if desired is not None and desired in d.files:
+            x = d[desired]
+            chosen = desired
+        elif desired is not None:
+            logger.info(f"[EvalDataResolver] Requested LR key '{desired}' not found in {p}; returning None to avoid wrong channel.")
+            return None
+        else:
+            # no preference set → conservative fallback order (no HR-space unless explicitly asked)
+            for k in ("lr", "lr_lrspace"):
+                if k in d.files and d[k] is not None:
+                    x = d[k]
                     chosen = k
                     break
         if x is None:
-            logger.info(f"[EvalDataResolver] No LR arrays found in {p} for any of keys {ordered}")
+            logger.info(f"[EvalDataResolver] No LR arrays found in {p} for any of keys ['lr', 'lr_lrspace']; returning None to avoid wrong channel.")
             return None
         if chosen is not None and chosen != self.lr_phys_key:
             logger.info(f"[EvalDataResolver] Requested LR key '{self.lr_phys_key}' not found; using '{chosen}' instead for {date}")        

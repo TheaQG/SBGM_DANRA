@@ -110,7 +110,7 @@ def edm_sampler(score_model,
 
 
   # Build nulls for unconditional branch
-  null_img = _null_geo_like(cond_img) if (cfg_enabled and cond_img is not None) else None
+  null_img = _null_lr_like(cond_img) if (cfg_enabled and cond_img is not None) else None
   null_lsm = _null_geo_like(lsm_cond) if (cfg_enabled and lsm_cond is not None) else None
   null_topo = _null_geo_like(topo_cond) if (cfg_enabled and topo_cond is not None) else None
   null_y = _make_null_y(y) if (cfg_enabled and y is not None) else None

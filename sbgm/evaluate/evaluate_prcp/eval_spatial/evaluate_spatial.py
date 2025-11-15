@@ -5,11 +5,14 @@ import logging
 import numpy as np
 import torch
 
-from .metrics_spatial import (
+from sbgm.evaluate.evaluate_prcp.eval_spatial.metrics_spatial import (
     accumulate_daily_fields,
     compute_spatial_climatologies,
     save_maps_npz,
+    summarize_group_spatial_maps,
+    write_spatial_summary_csv
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +154,7 @@ def run_spatial(
     if not sources:
         sources = ["ens"]
 
+    summary_rows: List[Dict[str, Any]] = []
     # main loop
     for gname, gdates in groups.items():
         if not gdates:
@@ -159,7 +163,8 @@ def run_spatial(
 
         def mask_fn(d: str):
             return resolver.load_mask(d)
-
+        
+        group_maps: Dict[str, Dict[str, torch.Tensor]] = {}
         for src in sources:
             if src == "ens":
                 # ---- Ensemble path: compute per-member maps, then aggregate mean/std ----
@@ -229,6 +234,8 @@ def run_spatial(
                     f"source=ensstd\ngroup={gname}\nn_days={len(kept_dates)}\nM={M}\n"
                     f"wet_thr_mm={wet_thr}\nrxk_days={list(rxk_days)}\npercentiles={list(pct_list)}\n"
                 )
+                group_maps["ensmean"] = agg_mean
+                group_maps["ensstd"]  = agg_std
                 continue  # next source
 
             # ---- HR / LR path ----
@@ -257,7 +264,12 @@ def run_spatial(
                 f"rxk_days={list(rxk_days)}\n"
                 f"percentiles={list(pct_list)}\n"
             )
+            group_maps[src] = maps
 
+        # Summarize per-group maps into rows (metrics live in metrics_spatial)
+        summary_rows.extend(summarize_group_spatial_maps(gname, group_maps))
+
+    write_spatial_summary_csv(tables_dir, summary_rows)
     # Plotting
     if make_plots:
         try:

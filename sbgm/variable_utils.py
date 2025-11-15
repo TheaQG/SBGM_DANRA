@@ -15,11 +15,17 @@ from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 
 # --- 1) Sequential colormap: white → teal → slategray ---
 precip_colors = [
+    
     "#ffffff",  # white (0 mm baseline, not underflow)
-    "#c9f3eb",  # very light aqua
-    "#66c2a4",  # medium teal
-    "#2b8c85",  # dark teal
-    "#264653"   # slate gray-blue (muted)
+    "#c9f3df",  # 
+    "#66c29a",  # 
+    "#2b8c67",  # 
+    "#26534A"   # 
+    # "#ffffff",  # white (0 mm baseline, not underflow)
+    # "#c9f3eb",  # very light aqua
+    # "#66c2a4",  # medium teal
+    # "#2b8c85",  # dark teal
+    # "#264653"   # slate gray-blue (muted)
 ]
 precip_cmap = LinearSegmentedColormap.from_list("precip_white_tealgray", precip_colors, N=256)
 
@@ -266,14 +272,33 @@ def get_color_for_model(model_str: str):
     """
     model_str_norm = model_str.lower()
 
+    # if model_str_norm in ["hr", "danra"]:
+    #     return "#a559aa" # Purple
+    # elif model_str_norm in ["pmm"]:
+    #     return "#0c3d79" # Dark Blue
+    # elif model_str_norm in ["lr", "era5"]:
+    #     return "#f3bd51" # Gold
+    # elif model_str_norm in ["ens", "ensemble", "gen", "generated", "model"]:
+    #     return "#439f91" # Teal
+    # elif model_str_norm in ["qm", "pmm_qm", "lr_qm", "era5_qm"]:
+    #     return "#e76f51" # Coral
+    # elif model_str_norm in ["unet", "unet_sr", "unet_gen", "unet_pmm"]:
+    #     return "#0e9c26" # Greenish
+    # else:
+    #     # Default color
+    #     return "#7570b3"
     if model_str_norm in ["hr", "danra"]:
-        return "#4C4949"
+        return "#4b4b4b" # Purple
     elif model_str_norm in ["pmm"]:
-        return "#124737"
+        return "#288C7D" # Dark Blue
     elif model_str_norm in ["lr", "era5"]:
-        return "#bb692a"
+        return "#997938" # Gold
     elif model_str_norm in ["ens", "ensemble", "gen", "generated", "model"]:
-        return "#1b9e77"
+        return "#35B19F" # Teal
+    elif model_str_norm in ["qm", "pmm_qm", "lr_qm", "era5_qm"]:
+        return "#ab513b" # Coral
+    elif model_str_norm in ["unet", "unet_sr", "unet_gen", "unet_pmm"]:
+        return "#0a4714" # Greenish
     else:
         # Default color
         return "#7570b3"

@@ -167,8 +167,8 @@ def imshow_variable(
     add_dk_outline: bool = True,
     outline_color: str = "darkgrey",
     outline_linewidth: float = 0.8,
-    under_color: str | None = None,
-    under_threshold: float | None = None,
+    under_color: str | None = "#c2c2c2",
+    under_threshold: float | None = 1e-6,
 ):
     """
     Centralized imshow for spatial maps that:

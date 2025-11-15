@@ -17,6 +17,10 @@ def run(cfg, make_plots=True):
     out_dir = Path(cfg.paths.sample_dir) / "evaluation" / model_name / "prcp" / "sigma_control"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Read sigma_control config for possible subset of sigma* for examples/PSD
+    scfg = getattr(getattr(cfg, "full_gen_eval", {}), "sigma_control", {}) if hasattr(cfg, "full_gen_eval") else {}
+    example_sigma_subset = getattr(scfg, "example_sigma_subset", None)
+
     logger.info(f"[SigmaControl] Evaluating σ* grid {sigma_grid} for {model_name}")
 
     metrics_paths = evaluate_sigma_control(cfg, sigma_grid, base_gen, out_dir)
@@ -24,7 +28,6 @@ def run(cfg, make_plots=True):
 
     # Write sigma-control metadata for plotting/context
     try:
-        scfg = getattr(getattr(cfg, "full_gen_eval", {}), "sigma_control", {}) if hasattr(cfg, "full_gen_eval") else {}
         meta = {
             "sigma_star_grid": [float(s) for s in sigma_grid],
             "ramp": {
@@ -54,13 +57,14 @@ def run(cfg, make_plots=True):
             sigma_star_grid=sigma_grid,
             gen_base_dir=base_gen,
             out_dir=out_dir,
+            sigma_star_subset=example_sigma_subset,            
             n_members=int(getattr(getattr(cfg, "full_gen_eval", {}), "example_n_members", 3)),
             date=getattr(getattr(cfg, "full_gen_eval", {}), "example_date", None),
             land_only=bool(getattr(getattr(cfg, "full_gen_eval", {}), "eval_land_only", True)),
             fname="examples_sigma_grid.png",
         )
         # PSD curves per sigma_star (ensemble-average across dates)
-        plot_sigma_control_psd_curves(out_dir)
+        plot_sigma_control_psd_curves(out_dir, sigma_subset=example_sigma_subset)
 
     logger.info(f"[SigmaControl] Done. Results in {out_dir}")
     logger.info("[SigmaControl] Figures in: %s", str(Path(out_dir) / "figures"))
