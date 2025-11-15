@@ -135,6 +135,48 @@ This directory contains scripts for data preparation, including creating smaller
 
 - **data_stats.py**: This script computes and visualizes statistics of the datasets, such as mean, standard deviation, and distribution of variables. This is useful for understanding the data and identifying any potential issues or anomalies before training the model.
 
+.
+└── Data_DiffMod/
+    ├── data_DANRA/
+    │   └── size_589x789/
+    │       └── prcp_589x789/
+    │           ├── all/
+    │           │   ├── tp_tot_19910101.npz
+    │           │   ├── ...
+    │           │   └── tp_tot_20201231.npz
+    │           └── zarr_files/
+    │               ├── train.zarr/
+    │               │   ├── tp_tot_19910101
+    │               │   ├── ...
+    │               │   └── tp_tot_20151231
+    │               ├── valid.zarr/
+    │               │   ├── tp_tot_20160101
+    │               │   ├── ...
+    │               │   └── tp_tot_20181231
+    │               └── test.zarr/
+    │                   ├── tp_tot_20190101
+    │                   ├── ...
+    │                   └── tp_tot_20201231
+    └── data_ERA5/
+        └── size_589x789/
+            └── prcp_589x789/
+                ├── all/
+                │   ├── tp_589x789_19910101.npz
+                │   ├── ...
+                │   └── tp_589x789_20201231.npz
+                └── zarr_files/
+                    ├── train.zarr/
+                    │   ├── tp_tot_19910101
+                    │   ├── ...
+                    │   └── tp_tot_20151231            
+                    ├── valid.zarr/
+                    │   ├── tp_tot_20160101
+                    │   ├── ...
+                    │   └── tp_tot_20181231            
+                    └── test.zarr/
+                        ├── tp_589x789_20190101
+                        ├── ...
+                        └── tp_589x789_20201231            
 
 <!-- 
 ### evaluation
