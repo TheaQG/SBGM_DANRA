@@ -72,6 +72,10 @@ def edm_sampler(score_model,
     logger.info(f"[sampler] CFG enabled: base_scale={base_scale}, sigma_weighted={bool(cfg_guidance.get('sigma_weighted', True))}, "
                 f"drop_lr_ups_in_uncond={bool(cfg_guidance.get('drop_lr_ups_in_uncond', False))}")
   
+  # New grid-sampler logging
+  logger.info(f"[sampler] EDM sampler settings: sigma_min={sigma_min}, sigma_max={sigma_max}, rho={rho}, "
+              f"S_churn={S_churn}, S_min={S_min}, S_max={S_max}, S_noise={S_noise}")
+
   logger.info(f"[sampler] sigma*: {sigma_star:.3f}, mode={sigma_star_mode}, "
               f"ramp_frac=({ramp_start_frac:.2f},{ramp_end_frac:.2f}), "
               f"ramp_sigma=({ramp_start_sigma},{ramp_end_sigma})")

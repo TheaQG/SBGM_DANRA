@@ -88,21 +88,39 @@ def generation_sigma_grid_main(cfg):
     model.eval()
     logger.info(f"[generation_sigma_grid_main] Loaded checkpoint: {ckpt_path}")
 
-    # ----------------------- Data (deterministic) -----------------------
+    # ----------------------- Data (deterministic, split-aware) -----------------------
+    # Decide which temporal split to generate for: train / val / test
     if isinstance(cfg, dict):
-        cfg.setdefault('data_handling', {})
-        cfg['data_handling']['split'] = 'test'
-        cfg['data_handling']['batch_size'] = 1
-        cfg['data_handling']['shuffle'] = False
-        cfg['data_handling']['drop_last'] = False
+        full_gen_eval = cfg.get("full_gen_eval", {})
+        split_cfg = str(full_gen_eval.get("split", "test")).lower()
     else:
-        if not hasattr(cfg, 'data_handling'):
-            cfg.data_handling = type('DataHandling', (), {})()
-        cfg.data_handling.split = 'test' # type: ignore
-        cfg.data_handling.batch_size = 1 # type: ignore
-        cfg.data_handling.shuffle = False # type: ignore
-        cfg.data_handling.drop_last = False # type: ignore
-    gen_dataloader = get_final_gen_dataloader(cfg)
+        full_gen_eval = getattr(cfg, "full_gen_eval", {})
+        split_cfg = str(getattr(full_gen_eval, "split", "test")).lower()
+
+    if split_cfg in ("val", "valid", "validation"):
+        split_for_dataset = "valid"
+    elif split_cfg == "train":
+        split_for_dataset = "train"
+    else:
+        split_for_dataset = "test"
+
+    # Make sure data_handling exists
+    if isinstance(cfg, dict):
+        cfg.setdefault("data_handling", {})
+        dh = cfg["data_handling"]
+        dh["split"] = split_for_dataset
+        dh["shuffle"] = False
+        dh["drop_last"] = False
+    else:
+        if not hasattr(cfg, "data_handling") or cfg.data_handling is None:
+            cfg.data_handling = {}
+        cfg.data_handling["split"] = split_for_dataset
+        cfg.data_handling["shuffle"] = False
+        cfg.data_handling["drop_last"] = False
+
+    logger.info(f"[generation_sigma_grid_main] Using data split='{split_for_dataset}' for sigma* grid generation")
+
+    gen_dataloader = get_final_gen_dataloader(cfg, split=split_for_dataset)
 
     # ----------------------- Sigma* values -----------------------
     full_gen_eval = cfg.get('full_gen_eval', {}) if isinstance(cfg, dict) else getattr(cfg, "full_gen_eval", {})

@@ -67,7 +67,7 @@ def _wet_day_freq_stack(stack: List[torch.Tensor], wet_thr_mm: float) -> torch.T
 def _rxk_map_from_stack(stack: List[torch.Tensor], k: int) -> torch.Tensor:
     """
     Pixelwise RxK on daily stack: compute rolling k-day sum per pixel and take max across time.
-    If T < k for a pixel (i.e., all-NaN or very short), fall back to max daily.
+    If T < k for a pixel (or globally), fall back to max daily.
     """
     x = torch.stack(stack, dim=0)  # [T,H,W]
     T, H, W = x.shape
@@ -75,35 +75,35 @@ def _rxk_map_from_stack(stack: List[torch.Tensor], k: int) -> torch.Tensor:
     valid = torch.isfinite(x)
     x2 = torch.nan_to_num(x, nan=0.0)
 
-    if k <= 1 or T < 2:
+    # If the time series is too short for a k-day window, just use max daily
+    if k <= 1 or T < k:
         # emulate nanmax: compute max with NaNs treated as -inf, then restore NaN where no valid data
-        daily_max = torch.max(torch.nan_to_num(x, nan=float('-inf')), dim=0)[0]
+        daily_max = torch.max(torch.nan_to_num(x, nan=float("-inf")), dim=0)[0]
         daily_valid = valid.any(dim=0)
-        daily_max[~daily_valid] = float('nan')
-        m = daily_max
-        return m
+        daily_max[~daily_valid] = float("nan")
+        return daily_max
 
     # rolling sum via cumulative sum (along time)
-    # pad a zero in front
     c = torch.cumsum(x2, dim=0)
-    pad = torch.zeros((1,H,W), dtype=x2.dtype, device=x2.device)
+    pad = torch.zeros((1, H, W), dtype=x2.dtype, device=x2.device)
     cpad = torch.cat([pad, c], dim=0)       # [T+1,H,W]
     rs = cpad[k:] - cpad[:-k]               # [T-k+1,H,W]
 
-    # For pixels with too many NaNs, rolling sums could overcount; build a validity count per window
+    # window validity
     vfloat = valid.to(torch.float32)
     cv = torch.cumsum(vfloat, dim=0)
-    cvpad = torch.cat([torch.zeros((1,H,W), dtype=vfloat.dtype, device=vfloat.device), cv], dim=0)
+    cvpad = torch.cat([torch.zeros((1, H, W), dtype=vfloat.dtype, device=vfloat.device), cv], dim=0)
     vc = cvpad[k:] - cvpad[:-k]             # [T-k+1,H,W]
-    rs[vc == 0] = float('nan')
+    rs[vc == 0] = float("nan")
+
     # Max over windows; where all windows invalid -> fall back to max daily
     any_valid_window = torch.isfinite(rs).any(dim=0)
-    mx_vals = torch.max(torch.nan_to_num(rs, nan=float('-inf')), dim=0)[0]
-    mx_vals[~any_valid_window] = float('nan')
+    mx_vals = torch.max(torch.nan_to_num(rs, nan=float("-inf")), dim=0)[0]
+    mx_vals[~any_valid_window] = float("nan")
 
     any_valid_daily = valid.any(dim=0)
-    fallback = torch.max(torch.nan_to_num(x, nan=float('-inf')), dim=0)[0]
-    fallback[~any_valid_daily] = float('nan')
+    fallback = torch.max(torch.nan_to_num(x, nan=float("-inf")), dim=0)[0]
+    fallback[~any_valid_daily] = float("nan")
 
     mx = torch.where(torch.isfinite(mx_vals), mx_vals, fallback)
     return mx

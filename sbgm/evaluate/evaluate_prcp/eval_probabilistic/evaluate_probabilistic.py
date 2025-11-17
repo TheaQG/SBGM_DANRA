@@ -296,20 +296,20 @@ def run_probabilistic(
         crps_val = crps_ensemble(obs, ens, mask=mask, reduction="mean")
         crps_lines.append(f"{d},{float(crps_val):.6f}")
 
-        # Energy score (field-wise, multivariate generalization of CRPS)
-        es_val = energy_score(obs, ens, mask=mask)
-        es_lines.append(f"{d},{float(es_val):.6f}")
+        # # Energy score (field-wise, multivariate generalization of CRPS)
+        # es_val = energy_score(obs, ens, mask=mask)
+        # es_lines.append(f"{d},{float(es_val):.6f}")
         
-        # Variogram score (spatial dependence)
-        vs_val = variogram_score(
-            obs,
-            ens,
-            mask=mask,
-            p=vs_p,
-            max_pairs=vs_max_pairs,
-            seed=0,
-        )
-        vs_lines.append(f"{d},{float(vs_val):.6f}")
+        # # Variogram score (spatial dependence)
+        # vs_val = variogram_score(
+        #     obs,
+        #     ens,
+        #     mask=mask,
+        #     p=vs_p,
+        #     max_pairs=vs_max_pairs,
+        #     seed=0,
+        # )
+        # vs_lines.append(f"{d},{float(vs_val):.6f}")
 
         # 2.1b CRPS map (for spatial mean later): get FULL field; apply mask only during accumulation
         crps_map = crps_ensemble(obs, ens, mask=None, reduction="none")  # [H,W], never flattened by mask

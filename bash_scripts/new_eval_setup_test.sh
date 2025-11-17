@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=ab_basic
-#SBATCH --output=logs/slurm_ab_basic_%x_%j.log
-#SBATCH --error=logs/slurm_ab_basic_%x_%j.err
+#SBATCH --job-name=new_setup_test
+#SBATCH --output=logs/slurm_new_setup_test_%x_%j.log
+#SBATCH --error=logs/slurm_new_setup_test_%x_%j.err
 #SBATCH --account=project_465001695
 #SBATCH --partition=standard-g
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=56 # 7 * 8 cores per GPU
 #SBATCH --mem-per-gpu=60G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 
 
 # Fail fast, but set -u only after we’ve safely handled env defaults
@@ -26,10 +26,17 @@ module load lumi-tools || true
 CONTAINER=/scratch/project_465001695/containers/images/my_torch_container_with_plotting.sif
 
 # --- Paths ---
+
+# NOTE: For parallel sampler grid generation, this script can be converted into a job array, e.g.:
+# #SBATCH --array=0-59
+# and inside the srun command export:
+#   export SAMPLER_COMBO_INDEX_START=${SLURM_ARRAY_TASK_ID}
+#   export SAMPLER_COMBO_INDEX_END=${SLURM_ARRAY_TASK_ID}
+# so each array task handles a single (rho, S_churn, sigma_scale) combo.
 SCRATCH="/scratch/${SLURM_JOB_ACCOUNT}"
 USER_DIR="$SCRATCH/$USER"
 ROOT_DIR="$USER_DIR/Code/SBGM_SD"
-CONFIG_DIR="$ROOT_DIR/sbgm/config/ablations"
+CONFIG_DIR="$ROOT_DIR/sbgm/config"
 DATA_DIR="$USER_DIR/Data/Data_DiffMod"
 SAMPLE_DIR="$ROOT_DIR/models_and_samples/generated_samples"
 CKPT_DIR="$ROOT_DIR/models_and_samples/trained_models"
@@ -59,17 +66,24 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-echo "[INFO] Launching generation → quicklook → evaluation (inside container)"
+echo "[INFO] Launching generation → evaluation → sampler grid (inside container)"
 srun singularity exec "$CONTAINER" bash -lc "
   set -euo pipefail
   export PYTHONPATH='${PYTHONPATH}'
-  python -m sbgm.cli.main_app --mode generate --config_path $CONFIG_DIR/ablation_basic.yaml --make_plots &&
-  python -m sbgm.cli.main_app --mode evaluate --config_path $CONFIG_DIR/ablation_basic.yaml --make_plots 
+
+
+  # Sampler grid generation/evaluation on validation split
+  # python -m sbgm.cli.main_app --mode sampler_grid_generation  --config_path $CONFIG_DIR/new_eval_setup_test.yaml &&
+  python -m sbgm.cli.main_app --mode sampler_grid_evaluation  --config_path $CONFIG_DIR/new_eval_setup_test.yaml --make_plots
 "
 
-  # python -m sbgm.cli.main_app --mode sigma_star_generation --config_path $CONFIG_DIR/ablation_basic.yaml --make_plots &&
+  # # Plain generation/evaluation for the base sampler
+  # python -m sbgm.cli.main_app --mode generate  --config_path $CONFIG_DIR/new_eval_setup_test.yaml --make_plots &&
+  # python -m sbgm.cli.main_app --mode evaluate  --config_path $CONFIG_DIR/new_eval_setup_test.yaml --make_plots &&
+#   python -m sbgm.cli.main_app --mode sigma_star_generation --config_path $CONFIG_DIR/new_eval_setup_test.yaml --make_plots &&
+#   python -m sbgm.cli.main_app --mode sigma_star_evaluation --config_path $CONFIG_DIR/new_eval_setup_test.yaml --make_plots
+  # python -m sbgm.cli.main_app --mode full_pipeline --config_path $CONFIG_DIR/paper1_final_config.yaml --make_plots
   # python -m sbgm.cli.main_app --mode quicklook --config_path '$CONFIG_DIR/ablation_basic.yaml' --make_plots &&
-  # python -m sbgm.cli.main_app --mode full_pipeline --config_path $CONFIG_DIR/ablation_basic.yaml --make_plots
 
 
 

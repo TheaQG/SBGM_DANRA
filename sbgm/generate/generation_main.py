@@ -70,16 +70,30 @@ def generation_main(cfg):
     model.eval()
     logger.info(f"[generation_main] Loaded checkpoint: {ckpt_path}")
 
-    # ----------------------- Data (ensure deterministic test loop) -----------------------
-    # If your get_gen_dataloader reads these from cfg, set them explicitly:
-    cfg.setdefault('data_handling', {})
-    cfg.data_handling['split'] = 'test'             # or 'evaluation' if that's your naming
-    cfg.data_handling['batch_size'] = 1             # 1 date per iteration
-    cfg.data_handling['shuffle'] = False            # preserve chronological/file order
-    cfg.data_handling['drop_last'] = False          # keep last sample even if incomplete
+    # ----------------------- Data (ensure deterministic loop over chosen split) -----------------------
+    # Decide which temporal split to generate for: train / val / test
+    split_cfg = str(cfg.full_gen_eval.get('split', 'test')).lower()
 
-    gen_dataloader = get_final_gen_dataloader(cfg)
+    if split_cfg in ("val", "valid", "validation"):
+        split_for_dataset = "valid"
+    elif split_cfg == "train":
+        split_for_dataset = "train"
+    else:
+        split_for_dataset = "test"
 
+    # Make sure data_handling exists on cfg
+    if not hasattr(cfg, "data_handling") or cfg.data_handling is None:
+        cfg.data_handling = {}
+
+    cfg.data_handling["split"] = split_for_dataset      # which zarr split to read
+    cfg.data_handling["batch_size"] = 1                 # 1 date per iteration
+    cfg.data_handling["shuffle"] = False                # preserve chronological/file order
+    cfg.data_handling["drop_last"] = False              # keep last sample even if incomplete
+
+    logger.info(f"[generation_main] Using data split='{split_for_dataset}' for generation")
+
+    # Build deterministic dataloader for this split
+    gen_dataloader = get_final_gen_dataloader(cfg, split=split_for_dataset)
     # ----------------------- Output root -----------------------
     out_root = _resolve_out_dir(cfg)
 

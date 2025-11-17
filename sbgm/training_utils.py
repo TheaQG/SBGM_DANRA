@@ -662,220 +662,93 @@ def get_gen_dataloader(cfg, verbose=True):
 
 
 
-def get_final_gen_dataloader(cfg, verbose=True):
-    '''
-        Get the dataloader for final generation and evaluation based on the configuration.
-        Main NOTE: Batch size is 1 
-        Args:
-            cfg (dict): Configuration dictionary containing data settings.
-            verbose (bool): If True, print detailed information about the data types and sizes.
-        Returns:
-            gen_loader (DataLoader): DataLoader for the generation dataset.
-    '''
-    # Print information about data types
-    hr_unit, lr_units = get_units(cfg)
-    logger.info(f"\nUsing HR data type: {cfg['highres']['model']} {cfg['highres']['variable']} [{hr_unit}]")
+from torch.utils.data import DataLoader  # make sure this import exists at the top
 
-    for i, cond in enumerate(cfg['lowres']['condition_variables']):
-        logger.info(f"Using LR data type {i+1}: {cfg['lowres']['model']} {cond} [{lr_units[i]}]")
 
-    # Set image dimensions based on config (if None, use default values)
-    hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else None
-    if hr_data_size is None:
-        hr_data_size = (128, 128)
+def get_final_gen_dataloader(cfg, split: str | None = None):
+    """
+    Return a deterministic DataLoader for generation/evaluation.
 
-    lr_data_size = tuple(cfg['lowres']['data_size']) if cfg['lowres']['data_size'] is not None else None    
-    if lr_data_size is None:
-        lr_data_size_use = hr_data_size
+    This creates a fresh DataLoader with batch_size=1, shuffle=False, drop_last=False
+    on top of the underlying dataset for the requested split, so we are
+    independent of whatever batch_size/drop_last were used during training.
+
+    Parameters
+    ----------
+    cfg : dict-like or OmegaConf DictConfig
+        Full configuration object. Passed to `get_dataloader` to build datasets.
+    split : {"train", "val", "valid", "validation", "test"}, optional
+        Logical split to use for generation.
+        If None, falls back to cfg.data_handling['split'] if present, else 'test'.
+
+    Returns
+    -------
+    torch.utils.data.DataLoader
+        DataLoader over the requested split, with batch_size=1 and no shuffling.
+    """
+    # --- Resolve requested split ---
+    if split is None:
+        if 'data_handling' in cfg and cfg['data_handling'] is not None:
+            dh = cfg['data_handling']
+            split = dh.get('split', 'test')
+        else:
+            split = 'test'
+
+    split_norm = str(split).lower()
+    if split_norm in ("val", "valid", "validation"):
+        split_key = "valid"
+    elif split_norm == "train":
+        split_key = "train"
     else:
-        lr_data_size_use = lr_data_size
+        split_key = "test"
 
-    # Check if resize factor is set and print sizes (if verbose)
-    if cfg['lowres']['resize_factor'] > 1:
-        hr_data_size_use = (hr_data_size[0] // cfg['lowres']['resize_factor'], hr_data_size[1] // cfg['lowres']['resize_factor'])
-        lr_data_size_use = (lr_data_size_use[0] // cfg['lowres']['resize_factor'], lr_data_size_use[1] // cfg['lowres']['resize_factor'])
+    # --- Force stationary cutouts for "final" generation ---
+    try:
+        eval_sc = cfg.get('evaluation', {}).get('stationary_cutout', {})
+        hr_bounds_eval = eval_sc.get('hr_bounds', None)
+        lr_bounds_eval = eval_sc.get('lr_bounds', None)
+
+        hr_sc = cfg.setdefault('highres', {}).setdefault('stationary_cutout', {})
+        lr_sc = cfg.setdefault('lowres', {}).setdefault('stationary_cutout', {})
+
+        # Always use fixed cutouts when building the datasets used for final generation/eval
+        hr_sc['enabled'] = True
+        lr_sc['enabled'] = True
+
+        # Prefer evaluation bounds if they are set
+        if hr_bounds_eval is not None:
+            hr_sc['hr_bounds'] = hr_bounds_eval
+        if lr_bounds_eval is not None:
+            lr_sc['lr_bounds'] = lr_bounds_eval
+    except Exception as e:
+        logger.warning(f"[get_final_gen_dataloader] Failed to force stationary cutouts: {e}")
+
+    # --- Build base loaders once (to construct datasets) ---
+    train_loader, val_loader, gen_loader = get_dataloader(cfg, verbose=False)
+
+    if split_key == "train":
+        base_loader = train_loader
+    elif split_key == "valid":
+        base_loader = val_loader
     else:
-        hr_data_size_use = hr_data_size
-        lr_data_size_use = lr_data_size_use
-    if verbose:
-        logger.info(f"\n\nHigh-resolution data size: {hr_data_size_use}")
-        if cfg['lowres']['resize_factor'] > 1:
-            logger.info(f"\tHigh-resolution data size after resize: {hr_data_size_use}")
-        logger.info(f"Low-resolution data size: {lr_data_size_use}")
-        if cfg['lowres']['resize_factor'] > 1:
-            logger.info(f"\tLow-resolution data size after resize: {lr_data_size_use}")
+        base_loader = gen_loader
 
-    # Set full domain size 
-    full_domain_dims = tuple(cfg['highres']['full_domain_dims']) if cfg['highres']['full_domain_dims'] is not None else None
+    dataset = base_loader.dataset
 
+    # --- Read loader settings from cfg.data_handling (if present) ---
+    dh = cfg.get('data_handling', {})
+    num_workers = int(dh.get('num_workers', 0)) if dh is not None else 0
+    pin_memory = bool(dh.get('pin_memory', False)) if dh is not None else False
 
-    # Use helper functions to create the path for the zarr files
-    hr_data_dir_train = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'train')
-    hr_data_dir_valid = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'valid')
-    hr_data_dir_gen = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'], cfg['highres']['variable'], full_domain_dims, 'test')
-    
-    # Loop over lr_vars and create paths for low-resolution data
-    lr_cond_dirs_train = {}
-    lr_cond_dirs_valid = {}
-    lr_cond_dirs_gen = {}
-
-    for i, cond in enumerate(cfg['lowres']['condition_variables']):
-        lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'train')
-        lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'valid')
-        lr_cond_dirs_gen[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], cond, full_domain_dims, 'test')
-
-    # Set scaling and matching
-    full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
-    full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
-    crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
-    crop_region_hr_str = '_'.join(map(str, crop_region_hr)) #if isinstance(crop_region_hr, (list, tuple)) else crop_region_hr
-    crop_region_lr = cfg['lowres']['cutout_domains'] if cfg['lowres']['cutout_domains'] is not None else "full_region"
-    crop_region_lr_str = '_'.join(map(str, crop_region_lr)) #if isinstance(crop_region_lr, (list, tuple)) else crop_region_lr
-
-    # NOTE: Maybe remove? Should be handled in dataset class
-    back_transforms = build_back_transforms_from_stats(
-                        hr_var              = cfg['highres']['variable'],
-                        hr_model            = cfg['highres']['model'],
-                        domain_str_hr       = full_domain_dims_str_hr,
-                        crop_region_str_hr  = crop_region_hr_str,
-                        hr_scaling_method   = cfg['highres']['scaling_method'],
-                        hr_buffer_frac      = cfg['highres']['buffer_frac'] if 'buffer_frac' in cfg['highres'] else 0.0,
-                        lr_vars             = cfg['lowres']['condition_variables'],
-                        lr_model            = cfg['lowres']['model'],
-                        domain_str_lr       = full_domain_dims_str_lr,
-                        crop_region_str_lr  = crop_region_lr_str,
-                        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
-                        lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                        split               = cfg['transforms']['scaling_split'] if 'scaling_split' in cfg['transforms'] else 'train',
-                        stats_dir_root      = cfg['paths']['stats_load_dir'],
-                        eps                 = cfg['transforms'].get('prcp_eps', 0.01)
-                        )
-
-    if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
-        logger.info('SDF weighted loss enabled. Setting lsm and topo to true.\n')
-        sample_w_geo = True
-    else:
-        sample_w_geo = cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']
-
-    if sample_w_geo:
-        logger.info('Using geographical features for sampling.\n')
-        
-        geo_variables = cfg['stationary_conditions']['geographic_conditions']['geo_variables']
-        data_dir_lsm = cfg['paths']['lsm_path']
-        data_dir_topo = cfg['paths']['topo_path']
-
-        data_lsm = np.flipud(np.load(data_dir_lsm)['data'])
-        data_topo = np.flipud(np.load(data_dir_topo)['data'])
-
-        if cfg['transforms']['scaling']:
-            if cfg['stationary_conditions']['geographic_conditions']['topo_min'] is None or cfg['stationary_conditions']['geographic_conditions']['topo_max'] is None:
-                topo_min, topo_max = np.min(data_topo), np.max(data_topo)
-            else:
-                topo_min = cfg['stationary_conditions']['geographic_conditions']['topo_min']
-                topo_max = cfg['stationary_conditions']['geographic_conditions']['topo_max']
-            if cfg['stationary_conditions']['geographic_conditions']['norm_min'] is None or cfg['stationary_conditions']['geographic_conditions']['norm_max'] is None:
-                norm_min, norm_max = np.min(data_lsm), np.max(data_lsm)
-            else:
-                norm_min = cfg['stationary_conditions']['geographic_conditions']['norm_min']
-                norm_max = cfg['stationary_conditions']['geographic_conditions']['norm_max']
-            OldRange = (topo_max - topo_min)
-            NewRange = (norm_max - norm_min)
-            data_topo = ((data_topo - topo_min) * NewRange / OldRange) + norm_min
-    else: 
-        geo_variables = None
-        data_lsm = None
-        data_topo = None
-
-    # Setup cutouts. If cutout domains None, use default (170, 350, 340, 520) (DK area with room for shuffle)
-    cutout_domains = tuple(cfg['highres']['cutout_domains']) if cfg['highres']['cutout_domains'] is not None else (170, 350, 340, 520)
-    lr_cutout_domains = tuple(cfg['lowres']['cutout_domains']) if cfg['lowres']['cutout_domains'] is not None else (170, 350, 340, 520)
-
-    stationary_cutout_gen_hr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('hr_enabled', False))
-    hr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('hr_bounds', None)
-    stationary_cutout_gen_lr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('lr_enabled', False))
-    lr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('lr_bounds', None)
-
-    # Setup conditional seasons (classification)
-    if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season']:
-        n_seasons = cfg['stationary_conditions']['seasonal_conditions']['n_seasons']
-    else:
-        n_seasons = None
-
-
-    # Make zarr groups
-    data_gen_zarr = zarr.open_group(hr_data_dir_gen, mode='r')
-
-    n_samples_gen = len(list(data_gen_zarr.keys()))
-
-    # Setup dataset
-    gen_dataset = DANRA_Dataset_cutouts_ERA5_Zarr(
-                            hr_variable_dir_zarr=hr_data_dir_gen,
-                            hr_data_size=hr_data_size_use,
-                            n_samples=n_samples_gen,
-                            cache_size=cfg['data_handling']['cache_size'],
-                            hr_variable=cfg['highres']['variable'],
-                            hr_model=cfg['highres']['model'],
-                            hr_scaling_method=cfg['highres']['scaling_method'],
-                            # hr_scaling_params=cfg['highres']['scaling_params'],
-                            lr_conditions=cfg['lowres']['condition_variables'],
-                            lr_model=cfg['lowres']['model'],
-                            lr_scaling_methods=cfg['lowres']['scaling_methods'],
-                            # lr_scaling_params=cfg['lowres']['scaling_params'],
-                            lr_cond_dirs_zarr=lr_cond_dirs_gen,
-                            geo_variables=geo_variables,
-                            lsm_full_domain=data_lsm,
-                            topo_full_domain=data_topo,
-                            conditional_seasons=cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'],
-                            use_sin_cos_embedding=cfg['stationary_conditions']['seasonal_conditions'].get('use_sin_cos_embedding', False),
-                            use_leap_years=cfg['stationary_conditions']['seasonal_conditions'].get('use_leap_years', True),                            
-                            cfg = cfg,
-                            split = "gen",
-                            shuffle=False,
-                            cutouts=cfg['transforms']['sample_w_cutouts'],
-                            cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
-                            n_samples_w_cutouts=n_samples_gen,
-                            sdf_weighted_loss=cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf'],
-                            scale=cfg['transforms']['scaling'],
-                            save_original=cfg['visualization']['show_both_orig_scaled'],
-                            n_classes=n_seasons,
-                            lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
-                            lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
-                            resize_factor=cfg['lowres']['resize_factor'],
-                            fixed_cutout_hr=stationary_cutout_gen_hr,
-                            fixed_hr_bounds=hr_bounds_gen,
-                            fixed_cutout_lr=stationary_cutout_gen_lr,
-                            fixed_lr_bounds=lr_bounds_gen,
-                            )
-    # Setup dataloaders
-    gen_bs = 1 # One date per iteration
-    N = int(cfg.get('full_gen_eval', {}).get('max_dates', 0)) or None # None means all samples
-
-    if N is None:
-        dataset_for_loader = gen_dataset
-    else:
-        fixed_ids = list(range(min(N, len(gen_dataset))))
-        dataset_for_loader = Subset(gen_dataset, fixed_ids)
-
-    base_seed = int(cfg['full_gen_eval'].get('seed', _def_base_seed))
-    g = torch.Generator().manual_seed(base_seed)
-
-    gen_loader = DataLoader(
-        dataset_for_loader,
-        batch_size              = gen_bs,
-        shuffle                 = False,
-        sampler                 = SequentialSampler(dataset_for_loader),
-        num_workers             = 0, 
-        worker_init_fn          = _worker_init_fn,
-        generator               = g,
-        drop_last               = False,
+    # Fresh deterministic DataLoader for generation
+    return DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        drop_last=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
-
-    # Print dataset information
-    # if verbose:
-    logger.info(f"Generation dataset: {len(gen_dataset)} samples; iterating: {len(dataset_for_loader)}\n")
-    
-    # Return the dataloaders
-    return gen_loader
 
 
 

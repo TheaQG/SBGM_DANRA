@@ -53,10 +53,11 @@ def main():
         choices=[
             "train", "generate", "evaluate", "full_pipeline",
             "data_splits", "quicklook", "baseline", "baseline_eval",
-            "sigma_star_generation", "sigma_star_evaluation"
-            ],
-            default="full_pipeline"
-            )
+            "sigma_star_generation", "sigma_star_evaluation",
+            "sampler_grid_generation", "sampler_grid_evaluation",  # <-- add these
+        ],
+        default="full_pipeline"
+    )
     
     parser.add_argument("--baseline_type", choices=["bilinear", "qm", "unet_sr"], default="bilinear", help="If mode is 'baseline', which baseline to run.")
     parser.add_argument("--baseline_split", choices=["train", "valid", "test"], default="test", help="If mode is 'baseline', which split to use.")
@@ -128,7 +129,9 @@ def main():
         launch_quicklook,
         launch_generation_sigma_star,
         launch_evaluation_sigma_star,
-        )
+        launch_generation_sampler_grid,       # <-- add
+        launch_evaluation_sampler_grid,       # <-- add
+    )
     from data_analysis_pipeline.cli import launch_split_creation
 
     # === Dispatch with banners ===
@@ -213,6 +216,17 @@ def main():
         # use args.make_plots to also toggle making qualitative example montages
         launch_evaluation_sigma_star.run(cfg, make_plots=make_plots, make_examples=args.make_plots)
         log_banner("SIGMA_STAR EVALUATION DONE")
+
+    elif args.mode == "sampler_grid_generation":
+        log_banner("SAMPLER GRID GENERATION START")
+        launch_generation_sampler_grid.run(cfg)
+        log_banner("SAMPLER GRID GENERATION DONE")
+
+    elif args.mode == "sampler_grid_evaluation":
+        log_banner("SAMPLER GRID EVALUATION START")
+        # make_plots can control whether the evaluation makes plots or only tables
+        launch_evaluation_sampler_grid.run(cfg, make_plots=make_plots)
+        log_banner("SAMPLER GRID EVALUATION DONE")
 
     logger.info("=== SBGM_SD MAIN APP DONE ===")
 
