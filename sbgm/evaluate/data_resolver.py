@@ -219,45 +219,78 @@ class EvalDataResolver:
     
     def load_mask(self, date: str) -> Optional[torch.Tensor]:
         """
-        Prefer global land-sea mask over per-date masks under /lsm over None.
-        Intersect with ROI mask if provided.
-        Always normalize to [H,W].
+        Prefer per-date land-sea masks under /lsm/<date>.npz (which are on the
+        same cutout grid as HR/ensembles), then fall back to a global mask
+        under meta/land_mask.npz. Intersect with ROI mask if provided.
+
+        Always normalize to [H,W] for use in evaluation.
         """
         if not self.eval_land_only:
             return None
-        if self.mask_global is not None:
-            m = self.mask_global.clone()
-        else:
-            p = self.dir_lsm / f"{date}.npz"
-            if not p.exists():
-                return None
+
+        m: Optional[torch.Tensor] = None
+
+        # 1) Prefer per-date mask in /lsm (already on the HR cutout grid)
+        p_date = self.dir_lsm / f"{date}.npz"
+        if p_date.exists():
             try:
-                arr = np.load(p, allow_pickle=True).get("lsm_hr", None)
-                if arr is None:
-                    return None
-                m = torch.from_numpy(np.asarray(arr)).to(torch.bool)
+                arr = np.load(p_date, allow_pickle=True)
+                if isinstance(arr, np.lib.npyio.NpzFile):  # type: ignore
+                    a = None
+                    # Prefer typical land/ROI keys without relying on Python "or" for arrays
+                    for k in ("lsm_hr", "lsm", "mask"):
+                        if k in arr.files:
+                            a = arr[k]
+                            break
+                else:
+                    a = arr
+                if a is not None:
+                    m = torch.from_numpy(np.asarray(a)).to(torch.bool)
+                    logger.info(
+                        f"[EvalDataResolver] Loaded per-date land-sea mask from {p_date} "
+                        f"with shape {tuple(m.shape)}"
+                    )
             except Exception as e:
-                logger.warning(f"[EvalDataResolver] Failed to load land-sea mask from {p}: {e}")
-                return None
-        
-        # normalize to [H,W]
-        if m.dim() == 4 and m.shape[:2] == (1,1):
+                logger.warning(f"[EvalDataResolver] Failed to load per-date land-sea mask from {p_date}: {e}")
+
+        # 2) Fall back to global mask if no per-date mask was usable
+        if m is None:
+            if self.mask_global is not None:
+                m = self.mask_global.clone()
+            else:
+                p = self.dir_lsm / f"{date}.npz"
+                if not p.exists():
+                    return None
+                try:
+                    arr = np.load(p, allow_pickle=True).get("lsm_hr", None)
+                    if arr is None:
+                        return None
+                    m = torch.from_numpy(np.asarray(arr)).to(torch.bool)
+                except Exception as e:
+                    logger.warning(f"[EvalDataResolver] Failed to load land-sea mask from {p}: {e}")
+                    return None
+
+        # 3) Normalize to [H,W]
+        if m.dim() == 4 and m.shape[:2] == (1, 1):
             m = m.squeeze(0).squeeze(0)
         elif m.dim() == 3 and m.shape[0] == 1:
             m = m.squeeze(0)
 
-        # intersect with ROI mask if provided
+        # 4) Intersect with ROI mask if provided (only if shapes match)
         if self.roi_mask is not None:
             rm = self.roi_mask
             if rm.shape != m.shape:
-                if rm.dim() == 4 and rm.shape[:2] == (1,1):
+                if rm.dim() == 4 and rm.shape[:2] == (1, 1):
                     rm = rm.squeeze(0).squeeze(0)
                 elif rm.dim() == 3 and rm.shape[0] == 1:
                     rm = rm.squeeze(0)
             if rm.shape == m.shape:
                 m = m & rm
-            else:
-                logger.warning(f"[EvalDataResolver] ROI mask shape {rm.shape} does not match LSM shape {m.shape}, skipping intersection.")
+                logger.warning(
+                    f"[EvalDataResolver] ROI mask shape {tuple(rm.shape)} does not match "
+                    f"LSM shape {tuple(m.shape)}, skipping intersection."
+                )
+
         return m
 
     def fetch(self, date: str, want_ensemble: bool = True, n_members: Optional[int] = None, seed: int = 1234) -> EvalSample:

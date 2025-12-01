@@ -217,16 +217,37 @@ def get_dataloader(cfg, verbose=True):
     cutout_domains = tuple(cfg['highres']['cutout_domains']) if cfg['highres']['cutout_domains'] is not None else (170, 350, 340, 520)
     lr_cutout_domains = tuple(cfg['lowres']['cutout_domains']) if cfg['lowres']['cutout_domains'] is not None else (170, 350, 340, 520)
 
-    # Check if cutouts stationary for training or generation
-    stationary_cutout_hr = bool(cfg['highres'].get('stationary_cutout', {}).get('enabled', False))
-    hr_bounds = cfg['highres'].get('stationary_cutout', {}).get('hr_bounds', None)
-    stationary_cutout_lr = bool(cfg['lowres'].get('stationary_cutout', {}).get('enabled', False))
-    lr_bounds = cfg['lowres'].get('stationary_cutout', {}).get('lr_bounds', None)
-    
-    stationary_cutout_gen_hr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('hr_enabled', False))
-    hr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('hr_bounds', None)
-    stationary_cutout_gen_lr = bool(cfg['evaluation'].get('stationary_cutout', {}).get('lr_enabled', False))
-    lr_bounds_gen = cfg['evaluation'].get('stationary_cutout', {}).get('lr_bounds', None)
+    # --- Stationary cutout geometry for TRAIN/VAL ---
+    # Match YAML: highres.stationary_cutout / lowres.stationary_cutout use "enabled" + "bounds"
+    highres_stationary_cfg = cfg['highres'].get('stationary_cutout', {}) or {}
+    stationary_cutout_hr = bool(highres_stationary_cfg.get('enabled', False))
+    hr_bounds = highres_stationary_cfg.get('bounds', None)
+
+    lowres_stationary_cfg = cfg['lowres'].get('stationary_cutout', {}) or {}
+    stationary_cutout_lr = bool(lowres_stationary_cfg.get('enabled', False))
+    lr_bounds = lowres_stationary_cfg.get('bounds', None)
+
+    # --- Stationary cutout geometry for GENERATION/EVALUATION ---
+    # 1) Prefer evaluation.stationary_cutout
+    eval_stationary_cfg = cfg.get('evaluation', {}).get('stationary_cutout', {}) or {}
+    stationary_cutout_gen_hr = bool(eval_stationary_cfg.get('hr_enabled', stationary_cutout_hr))
+    stationary_cutout_gen_lr = bool(eval_stationary_cfg.get('lr_enabled', stationary_cutout_lr))
+    hr_bounds_gen = eval_stationary_cfg.get('hr_bounds', None)
+    lr_bounds_gen = eval_stationary_cfg.get('lr_bounds', None)
+
+    # 2) If not set there, fall back to full_gen_eval.stationary_cutout (for new full evaluation driver)
+    fg_cfg = cfg.get('full_gen_eval', {}) or {}
+    fg_stationary = fg_cfg.get('stationary_cutout', {}) or {}
+    if hr_bounds_gen is None:
+        hr_bounds_gen = fg_stationary.get('hr_bounds', None)
+    if lr_bounds_gen is None:
+        lr_bounds_gen = fg_stationary.get('lr_bounds', None)
+
+    # 3) Finally, fall back to training geometry if still None
+    if hr_bounds_gen is None:
+        hr_bounds_gen = hr_bounds
+    if lr_bounds_gen is None:
+        lr_bounds_gen = lr_bounds
 
     # Setup conditional seasons (classification)
     if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season']:
@@ -377,7 +398,7 @@ def get_dataloader(cfg, verbose=True):
                             fixed_hr_bounds=hr_bounds_gen,
                             fixed_cutout_lr=stationary_cutout_gen_lr,
                             fixed_lr_bounds=lr_bounds_gen,
-                            )
+    )
 
     logger.info(
         "[seasonal] conditional=%s, sin/cos=%s, leap_years=%s\n",
@@ -662,93 +683,273 @@ def get_gen_dataloader(cfg, verbose=True):
 
 
 
-from torch.utils.data import DataLoader  # make sure this import exists at the top
-
-
-def get_final_gen_dataloader(cfg, split: str | None = None):
+def get_final_gen_dataloader(cfg, split: str = "test", verbose: bool = True):
     """
-    Return a deterministic DataLoader for generation/evaluation.
+    Deterministic dataloader over the full temporal split (train/valid/test) for
+    *final* generation/evaluation.
 
-    This creates a fresh DataLoader with batch_size=1, shuffle=False, drop_last=False
-    on top of the underlying dataset for the requested split, so we are
-    independent of whatever batch_size/drop_last were used during training.
-
-    Parameters
-    ----------
-    cfg : dict-like or OmegaConf DictConfig
-        Full configuration object. Passed to `get_dataloader` to build datasets.
-    split : {"train", "val", "valid", "validation", "test"}, optional
-        Logical split to use for generation.
-        If None, falls back to cfg.data_handling['split'] if present, else 'test'.
-
-    Returns
-    -------
-    torch.utils.data.DataLoader
-        DataLoader over the requested split, with batch_size=1 and no shuffling.
+    - Uses the same dataset class as training/validation.
+    - Respects stationary cutout geometry for generation/evaluation.
+    - Respects the dataset's internal common-date intersection (gen_dataset.n_samples)
+      instead of the raw HR count.
+    - Optionally truncates via full_gen_eval.max_dates.
     """
-    # --- Resolve requested split ---
-    if split is None:
-        if 'data_handling' in cfg and cfg['data_handling'] is not None:
-            dh = cfg['data_handling']
-            split = dh.get('split', 'test')
-        else:
-            split = 'test'
+    # --- Basic geometry (mirror get_dataloader / get_gen_dataloader) ---
+    hr_unit, lr_units = get_units(cfg)
+    logger.info(
+        f"\n[get_final_gen_dataloader] Using HR data type: "
+        f"{cfg['highres']['model']} {cfg['highres']['variable']} [{hr_unit}]"
+    )
+    for i, cond in enumerate(cfg['lowres']['condition_variables']):
+        logger.info(
+            f"[get_final_gen_dataloader] Using LR data type {i+1}: "
+            f"{cfg['lowres']['model']} {cond} [{lr_units[i]}]"
+        )
 
+    # HR / LR sizes
+    hr_data_size = tuple(cfg['highres']['data_size']) if cfg['highres']['data_size'] is not None else (128, 128)
+    lr_data_size = tuple(cfg['lowres']['data_size']) if cfg['lowres']['data_size'] is not None else None
+    lr_data_size_use = lr_data_size if lr_data_size is not None else hr_data_size
+
+    if cfg['lowres']['resize_factor'] > 1:
+        rf = cfg['lowres']['resize_factor']
+        hr_data_size_use = (hr_data_size[0] // rf, hr_data_size[1] // rf)
+        lr_data_size_use = (lr_data_size_use[0] // rf, lr_data_size_use[1] // rf)
+    else:
+        hr_data_size_use = hr_data_size
+
+    if verbose:
+        logger.info(f"[get_final_gen_dataloader] High-resolution data size: {hr_data_size_use}")
+        logger.info(f"[get_final_gen_dataloader] Low-resolution data size: {lr_data_size_use}")
+
+    # Full domain dims
+    full_domain_dims = tuple(cfg['highres']['full_domain_dims']) if cfg['highres']['full_domain_dims'] is not None else None
+
+    # Paths for each split
+    hr_data_dir_train = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'],
+                                        cfg['highres']['variable'], full_domain_dims, 'train')
+    hr_data_dir_valid = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'],
+                                        cfg['highres']['variable'], full_domain_dims, 'valid')
+    hr_data_dir_gen   = build_data_path(cfg['paths']['data_dir'], cfg['highres']['model'],
+                                        cfg['highres']['variable'], full_domain_dims, 'test')
+
+    lr_cond_dirs_train = {}
+    lr_cond_dirs_valid = {}
+    lr_cond_dirs_gen   = {}
+    for cond in cfg['lowres']['condition_variables']:
+        lr_cond_dirs_train[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'],
+                                                   cond, full_domain_dims, 'train')
+        lr_cond_dirs_valid[cond] = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'],
+                                                   cond, full_domain_dims, 'valid')
+        lr_cond_dirs_gen[cond]   = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'],
+                                                   cond, full_domain_dims, 'test')
+
+    # Strings for stats / back-transforms (mainly needed by dataset)
+    full_domain_dims_str_hr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
+    full_domain_dims_str_lr = f"{full_domain_dims[0]}x{full_domain_dims[1]}" if full_domain_dims is not None else "full_domain"
+    crop_region_hr = cfg['highres']['cutout_domains'] if cfg['highres']['cutout_domains'] is not None else "full_region"
+    crop_region_lr = cfg['lowres']['cutout_domains'] if cfg['lowres']['cutout_domains'] is not None else "full_region"
+    crop_region_hr_str = '_'.join(map(str, crop_region_hr))
+    crop_region_lr_str = '_'.join(map(str, crop_region_lr))
+
+    # Back transforms (kept for completeness; dataset may use them)
+    _ = build_back_transforms_from_stats(
+        hr_var              = cfg['highres']['variable'],
+        hr_model            = cfg['highres']['model'],
+        domain_str_hr       = full_domain_dims_str_hr,
+        crop_region_str_hr  = crop_region_hr_str,
+        hr_scaling_method   = cfg['highres']['scaling_method'],
+        hr_buffer_frac      = cfg['highres'].get('buffer_frac', 0.0),
+        lr_vars             = cfg['lowres']['condition_variables'],
+        lr_model            = cfg['lowres']['model'],
+        domain_str_lr       = full_domain_dims_str_lr,
+        crop_region_str_lr  = crop_region_lr_str,
+        lr_scaling_methods  = cfg['lowres']['scaling_methods'],
+        lr_buffer_frac      = cfg['lowres'].get('buffer_frac', 0.0),
+        split               = cfg['transforms'].get('scaling_split', 'train'),
+        stats_dir_root      = cfg['paths']['stats_load_dir'],
+        eps                 = cfg['transforms'].get('prcp_eps', 0.01),
+    )
+
+    # Geo/static fields
+    if cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf']:
+        logger.info('[get_final_gen_dataloader] SDF weighted loss enabled → forcing geo sampling.')
+        sample_w_geo = True
+    else:
+        sample_w_geo = cfg['stationary_conditions']['geographic_conditions']['sample_w_geo']
+
+    if sample_w_geo:
+        logger.info('[get_final_gen_dataloader] Using geographical features for sampling.')
+        geo_variables = cfg['stationary_conditions']['geographic_conditions']['geo_variables']
+        data_dir_lsm = cfg['paths']['lsm_path']
+        data_dir_topo = cfg['paths']['topo_path']
+
+        data_lsm = np.flipud(np.load(data_dir_lsm)['data'])
+        data_topo = np.flipud(np.load(data_dir_topo)['data'])
+
+        if cfg['transforms']['scaling']:
+            if (cfg['stationary_conditions']['geographic_conditions']['topo_min'] is None or
+                cfg['stationary_conditions']['geographic_conditions']['topo_max'] is None):
+                topo_min, topo_max = np.min(data_topo), np.max(data_topo)
+            else:
+                topo_min = cfg['stationary_conditions']['geographic_conditions']['topo_min']
+                topo_max = cfg['stationary_conditions']['geographic_conditions']['topo_max']
+
+            if (cfg['stationary_conditions']['geographic_conditions']['norm_min'] is None or
+                cfg['stationary_conditions']['geographic_conditions']['norm_max'] is None):
+                norm_min, norm_max = np.min(data_lsm), np.max(data_lsm)
+            else:
+                norm_min = cfg['stationary_conditions']['geographic_conditions']['norm_min']
+                norm_max = cfg['stationary_conditions']['geographic_conditions']['norm_max']
+
+            OldRange = (topo_max - topo_min)
+            NewRange = (norm_max - norm_min)
+            data_topo = ((data_topo - topo_min) * NewRange / OldRange) + norm_min
+    else:
+        geo_variables = None
+        data_lsm = None
+        data_topo = None
+
+    # Cutouts
+    cutout_domains    = tuple(cfg['highres']['cutout_domains']) if cfg['highres']['cutout_domains'] is not None else (170, 350, 340, 520)
+    lr_cutout_domains = tuple(cfg['lowres']['cutout_domains']) if cfg['lowres']['cutout_domains'] is not None else (170, 350, 340, 520)
+
+    # --- Stationary cutout geometry (same logic as in get_dataloader) ---
+    highres_stationary_cfg = cfg['highres'].get('stationary_cutout', {}) or {}
+    stationary_cutout_hr = bool(highres_stationary_cfg.get('enabled', False))
+    hr_bounds = highres_stationary_cfg.get('bounds', None)
+
+    lowres_stationary_cfg = cfg['lowres'].get('stationary_cutout', {}) or {}
+    stationary_cutout_lr = bool(lowres_stationary_cfg.get('enabled', False))
+    lr_bounds = lowres_stationary_cfg.get('bounds', None)
+
+    eval_stationary_cfg = cfg.get('evaluation', {}).get('stationary_cutout', {}) or {}
+    stationary_cutout_gen_hr = bool(eval_stationary_cfg.get('hr_enabled', stationary_cutout_hr))
+    stationary_cutout_gen_lr = bool(eval_stationary_cfg.get('lr_enabled', stationary_cutout_lr))
+    hr_bounds_gen = eval_stationary_cfg.get('hr_bounds', None)
+    lr_bounds_gen = eval_stationary_cfg.get('lr_bounds', None)
+
+    fg_cfg = cfg.get('full_gen_eval', {}) or {}
+    fg_stationary = fg_cfg.get('stationary_cutout', {}) or {}
+    if hr_bounds_gen is None:
+        hr_bounds_gen = fg_stationary.get('hr_bounds', None)
+    if lr_bounds_gen is None:
+        lr_bounds_gen = fg_stationary.get('lr_bounds', None)
+
+    if hr_bounds_gen is None:
+        hr_bounds_gen = hr_bounds
+    if lr_bounds_gen is None:
+        lr_bounds_gen = lr_bounds
+
+    # Seasonal conditioning
+    if cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season']:
+        n_seasons = cfg['stationary_conditions']['seasonal_conditions']['n_seasons']
+    else:
+        n_seasons = None
+
+    # --- Choose split-specific dirs ---
     split_norm = str(split).lower()
-    if split_norm in ("val", "valid", "validation"):
-        split_key = "valid"
-    elif split_norm == "train":
-        split_key = "train"
+    if split_norm in ("train", "training"):
+        hr_dir = hr_data_dir_train
+        lr_cond_dirs = lr_cond_dirs_train
+        ds_split = "train"
+    elif split_norm in ("val", "valid", "validation"):
+        hr_dir = hr_data_dir_valid
+        lr_cond_dirs = lr_cond_dirs_valid
+        ds_split = "valid"
     else:
-        split_key = "test"
+        # default: test → dataset split name "gen"
+        hr_dir = hr_data_dir_gen
+        lr_cond_dirs = lr_cond_dirs_gen
+        ds_split = "gen"
 
-    # --- Force stationary cutouts for "final" generation ---
-    try:
-        eval_sc = cfg.get('evaluation', {}).get('stationary_cutout', {})
-        hr_bounds_eval = eval_sc.get('hr_bounds', None)
-        lr_bounds_eval = eval_sc.get('lr_bounds', None)
+    data_zarr = zarr.open_group(hr_dir, mode='r')
+    n_samples_full = len(list(data_zarr.keys()))
 
-        hr_sc = cfg.setdefault('highres', {}).setdefault('stationary_cutout', {})
-        lr_sc = cfg.setdefault('lowres', {}).setdefault('stationary_cutout', {})
+    # Cache size for final generation: prefer cache_size_gen, else cache_size, else 0
+    cache_size_gen = cfg['data_handling'].get('cache_size_gen', None)
+    if cache_size_gen is None:
+        cache_size_gen = cfg['data_handling'].get('cache_size', 0)
+    cache_size_gen = int(cache_size_gen)
 
-        # Always use fixed cutouts when building the datasets used for final generation/eval
-        hr_sc['enabled'] = True
-        lr_sc['enabled'] = True
+    if verbose:
+        logger.info(
+            f"[get_final_gen_dataloader] Split='{split_norm}', raw HR samples={n_samples_full}, "
+            f"cache_size_gen={cache_size_gen}"
+        )
 
-        # Prefer evaluation bounds if they are set
-        if hr_bounds_eval is not None:
-            hr_sc['hr_bounds'] = hr_bounds_eval
-        if lr_bounds_eval is not None:
-            lr_sc['lr_bounds'] = lr_bounds_eval
-    except Exception as e:
-        logger.warning(f"[get_final_gen_dataloader] Failed to force stationary cutouts: {e}")
+    # --- Build dataset for this split ---
+    gen_dataset = DANRA_Dataset_cutouts_ERA5_Zarr(
+        hr_variable_dir_zarr=hr_dir,
+        hr_data_size=hr_data_size_use,
+        n_samples=n_samples_full,
+        cache_size=cache_size_gen,
+        hr_variable=cfg['highres']['variable'],
+        hr_model=cfg['highres']['model'],
+        hr_scaling_method=cfg['highres']['scaling_method'],
+        lr_conditions=cfg['lowres']['condition_variables'],
+        lr_model=cfg['lowres']['model'],
+        lr_scaling_methods=cfg['lowres']['scaling_methods'],
+        lr_cond_dirs_zarr=lr_cond_dirs,
+        geo_variables=geo_variables,
+        lsm_full_domain=data_lsm,
+        topo_full_domain=data_topo,
+        conditional_seasons=cfg['stationary_conditions']['seasonal_conditions']['sample_w_cond_season'],
+        use_sin_cos_embedding=cfg['stationary_conditions']['seasonal_conditions'].get('use_sin_cos_embedding', False),
+        use_leap_years=cfg['stationary_conditions']['seasonal_conditions'].get('use_leap_years', True),
+        cfg=cfg,
+        split=ds_split,
+        shuffle=False,
+        cutouts=cfg['transforms']['sample_w_cutouts'],
+        cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
+        n_samples_w_cutouts=n_samples_full,
+        sdf_weighted_loss=cfg['stationary_conditions']['geographic_conditions']['sample_w_sdf'],
+        scale=cfg['transforms']['scaling'],
+        save_original=cfg['visualization']['show_both_orig_scaled'],
+        n_classes=n_seasons,
+        lr_data_size=tuple(lr_data_size_use) if lr_data_size_use is not None else None,
+        lr_cutout_domains=list(lr_cutout_domains) if lr_cutout_domains is not None else None,
+        resize_factor=cfg['lowres']['resize_factor'],
+        fixed_cutout_hr=stationary_cutout_gen_hr,
+        fixed_hr_bounds=hr_bounds_gen,
+        fixed_cutout_lr=stationary_cutout_gen_lr,
+        fixed_lr_bounds=lr_bounds_gen,
+    )
 
-    # --- Build base loaders once (to construct datasets) ---
-    train_loader, val_loader, gen_loader = get_dataloader(cfg, verbose=False)
+    # --- Respect common-date intersection + full_gen_eval.max_dates ---
+    n_samples_total = len(gen_dataset)  # raw length (e.g. 1062)
+    n_samples_internal = getattr(gen_dataset, "n_samples", None)  # dataset's intersection (e.g. 644)
 
-    if split_key == "train":
-        base_loader = train_loader
-    elif split_key == "valid":
-        base_loader = val_loader
+    if isinstance(n_samples_internal, int) and 0 < n_samples_internal <= n_samples_total:
+        n_base = n_samples_internal
     else:
-        base_loader = gen_loader
+        n_base = n_samples_total
 
-    dataset = base_loader.dataset
+    max_dates = int(_get(cfg, "full_gen_eval.max_dates", -1) or -1)
+    if max_dates > 0:
+        n_use = min(n_base, max_dates)
+    else:
+        n_use = n_base
 
-    # --- Read loader settings from cfg.data_handling (if present) ---
-    dh = cfg.get('data_handling', {})
-    num_workers = int(dh.get('num_workers', 0)) if dh is not None else 0
-    pin_memory = bool(dh.get('pin_memory', False)) if dh is not None else False
+    logger.info(
+        "[get_final_gen_dataloader] Split='%s', n_samples_total=%d, n_base=%d, using n_use=%d",
+        split_norm, n_samples_total, n_base, n_use,
+    )
 
-    # Fresh deterministic DataLoader for generation
-    return DataLoader(
-        dataset,
+    # Deterministic sequential sampler over indices 0..n_use-1
+    sampler = SequentialSampler(range(n_use))
+
+    gen_loader = DataLoader(
+        gen_dataset,
         batch_size=1,
         shuffle=False,
+        sampler=sampler,
+        num_workers=0,          # keep generation single-threaded & deterministic
+        worker_init_fn=_worker_init_fn,
         drop_last=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
     )
+
+    return gen_loader
 
 
 

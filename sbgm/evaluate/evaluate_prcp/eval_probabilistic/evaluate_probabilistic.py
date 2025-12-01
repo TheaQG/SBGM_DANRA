@@ -27,26 +27,36 @@ def _normalize_mask_local(mask, target_shape, device):
     m = m.to(device)
     if m.dtype != torch.bool:
         m = m > 0.5
+
     # Squeeze leading singleton batch/channel dims
     while m.dim() > 2 and m.shape[0] == 1:
         m = m.squeeze(0)
-    # Now try to match [H,W]
-    if m.shape == target_shape:
+
+    # Normalize target_shape to a tuple (it may be torch.Size)
+    ts = tuple(target_shape)
+
+    # 1) Exact shape match
+    if m.shape == ts:
         return m
-    if m.dim() == 2 and len(target_shape) == 2:
-        return m
-    if m.dim() == 2 and len(target_shape) == 3:
-        # [H,W] -> [B,H,W]; expand across batch dimension
-        B = target_shape[0]
-        return m.unsqueeze(0).expand(B, -1, -1)
-    if m.dim() == 3 and len(target_shape) == 2 and m.shape[0] == 1:
-        # [1,H,W] -> [H,W]
+
+    # 2) [H,W] -> [B,H,W], but only if H,W actually match
+    if m.dim() == 2 and len(ts) == 3:
+        B, H, W = ts
+        if m.shape == (H, W):
+            return m.unsqueeze(0).expand(B, -1, -1)
+
+    # 3) [1,H,W] -> [H,W], only if H,W match
+    if m.dim() == 3 and len(ts) == 2 and m.shape[0] == 1 and m.shape[1:] == ts:
         return m.squeeze(0)
-    # Last resort: broadcast if possible
+
+    # 4) Last resort: attempt broadcast; on failure propagate the error
     try:
-        return m.expand(target_shape)
+        return m.expand(ts)
     except Exception as e:
-        raise ValueError(f"[prob_eval] Cannot normalize mask of shape {tuple(mask.shape)} to target {tuple(target_shape)}: {e}")
+        raise ValueError(
+            f"[prob_eval] Cannot normalize mask of shape {tuple(mask.shape)} "
+            f"to target {ts}: {e}"
+        )
 
 logger = logging.getLogger(__name__)
 

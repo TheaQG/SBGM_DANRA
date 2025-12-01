@@ -157,10 +157,76 @@ class GenerationRunner:
             logger.warning(f"HR target variable '{self.hr_var}' not found in LR condition variables {self.lr_vars}. Cannot determine LR scaling method for target - residuals may not be aligned.")
         
 
-        # cutout stationarity control
-        self.stationary_cutout = bool(cfg.get('evaluation', {}).get('stationary_cutout', True))
+        # cutout stationarity control + optional static LSM for evaluation
+        # Support both plain dict configs and OmegaConf-style DictConfig.
+        if isinstance(cfg, dict):
+            eval_cfg = cfg.get("evaluation", None)
+        else:
+            eval_cfg = getattr(cfg, "evaluation", None)
+
+        if isinstance(eval_cfg, dict):
+            eval_stationary_cfg = eval_cfg.get("stationary_cutout", None)
+        else:
+            eval_stationary_cfg = getattr(eval_cfg, "stationary_cutout", None) if eval_cfg is not None else None
+
+        if isinstance(eval_stationary_cfg, dict):
+            # mirror training_utils logic: 'hr_enabled' and 'hr_bounds'
+            self.stationary_cutout = bool(eval_stationary_cfg.get("hr_enabled", True))
+            self._hr_bounds_eval = eval_stationary_cfg.get("hr_bounds", None)
+        elif eval_stationary_cfg is not None:
+            # allow legacy boolean / object configs and try to read hr_bounds attribute if present
+            self.stationary_cutout = bool(eval_stationary_cfg)
+            self._hr_bounds_eval = getattr(eval_stationary_cfg, "hr_bounds", None)
+        else:
+            # no explicit evaluation cutout config
+            self.stationary_cutout = True            
+            self._hr_bounds_eval = None
+
+        # Fallbacks: allow geometry configured under full_gen_eval or highres if not set above
+        if self._hr_bounds_eval is None:
+            if isinstance(cfg, dict):
+                fg = cfg.get("full_gen_eval", None)
+            else:
+                fg = getattr(cfg, "full_gen_eval", None)
+
+            if isinstance(fg, dict):
+                sc = fg.get("stationary_cutout", None)
+            else:
+                sc = getattr(fg, "stationary_cutout", None) if fg is not None else None
+
+            hb = None
+            if isinstance(sc, dict):
+                hb = sc.get("hr_bounds", None)
+            elif sc is not None:
+                hb = getattr(sc, "hr_bounds", None)
+            if hb is not None:
+                self._hr_bounds_eval = hb
+
+        if self._hr_bounds_eval is None:
+            if isinstance(cfg, dict):
+                highres_cfg = cfg.get("highres", None)
+            else:
+                highres_cfg = getattr(cfg, "highres", None)
+
+            if isinstance(highres_cfg, dict):
+                sc = highres_cfg.get("stationary_cutout", None)
+            else:
+                sc = getattr(highres_cfg, "stationary_cutout", None) if highres_cfg is not None else None
+
+            hb = None
+            if isinstance(sc, dict):
+                hb = sc.get("bounds", None)
+            elif sc is not None:
+                hb = getattr(sc, "bounds", None)
+            if hb is not None:
+                self._hr_bounds_eval = hb
+
+
+        logger.info("[generation] Evaluation HR bounds for static LSM: %s", self._hr_bounds_eval)
+
         self._first_lsm: Optional[torch.Tensor] = None
         self._lsm_stationary_ok: bool = True
+        self._lsm_static: Optional[torch.Tensor] = None
 
         # dirs (if quicklook, don't create)
         if not quicklook:
@@ -215,9 +281,90 @@ class GenerationRunner:
             #     self._sampler_fn = ode_sampler
             # else:
             #     raise ValueError(f"Unknown sampler_type {st} in config")
+
+    def _get_static_lsm(self) -> Optional[torch.Tensor]:
+        """
+        Fallback land-sea mask used when the dataset does not yield an LSM tensor.
+
+        This loads the full-domain LSM from cfg['paths']['lsm_path'], flips it to match
+        the DANRA orientation (np.flipud), and then crops to the evaluation HR bounds
+        if they are set. The HR bounds are resolved in this order:
+          1) cfg['evaluation']['stationary_cutout']['hr_bounds']
+          2) cfg['full_gen_eval']['stationary_cutout']['hr_bounds']
+          3) cfg['highres']['stationary_cutout']['bounds']
+
+        The result is cached as a torch.bool tensor on CPU.
+        """
+        # Return cached static mask if already built
+        if self._lsm_static is not None:
+            return self._lsm_static
+
+        # Resolve LSM path
+        try:
+            lsm_path = self.cfg["paths"]["lsm_path"]
+        except Exception as e:
+            logger.warning("[generation] _get_static_lsm: could not resolve paths.lsm_path: %s", e)
+            return None
+
+        # Load LSM from npz or raw array
+        try:
+            arr = np.load(lsm_path, allow_pickle=True)
+            if isinstance(arr, np.lib.npyio.NpzFile):  # type: ignore
+                data = None
+                # Try typical keys in order of preference
+                for k in ("lsm_hr", "lsm", "data", "mask"):
+                    if k in arr.files:
+                        data = arr[k]
+                        break
+                if data is None:
+                    logger.warning(
+                        "[generation] _get_static_lsm: no suitable key in %s (tried lsm_hr, lsm, data, mask)",
+                        lsm_path,
+                    )
+                    return None
+            else:
+                data = arr
+        except Exception as e:
+            logger.warning("[generation] _get_static_lsm: failed to load LSM from %s: %s", lsm_path, e)
+            return None
+
+        data = np.asarray(data)
+        # Ensure 2D; squeeze singleton dimensions if necessary
+        if data.ndim != 2:
+            data = np.squeeze(data)
+            if data.ndim != 2:
+                logger.warning(
+                    "[generation] _get_static_lsm: expected 2D LSM array, got shape %s after squeeze", data.shape
+                )
+                return None
+
+        # Flip to match DANRA orientation (as in previous implementation)
+        data = np.flipud(data)
+
+        # Optional crop to stationary HR evaluation bounds [y0, y1, x0, x1]
+        hr_bounds = self._hr_bounds_eval
+        if hr_bounds is not None:
+            if len(hr_bounds) != 4:
+                logger.warning(
+                    "[generation] _get_static_lsm: hr_bounds must have length 4, got %s", hr_bounds
+                )
+            else:
+                y0, y1, x0, x1 = [int(v) for v in hr_bounds]
+                data = data[y0:y1, x0:x1]
+
+        # Convert to bool mask and cache
+        lsm_bool = (data > 0.5)
+        self._lsm_static = torch.from_numpy(lsm_bool.astype(np.bool_))
+        logger.info(
+            "[generation] Built static LSM from %s with shape %s (hr_bounds=%s)",
+            lsm_path,
+            tuple(self._lsm_static.shape),
+            hr_bounds,
+        )
+
+        return self._lsm_static
     
     @torch.no_grad()
-
     def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
         """
             Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
@@ -302,12 +449,22 @@ class GenerationRunner:
 
             # --- Save/check land-sea mask(s) ---
             try:
+                # Prefer LSM from dataset; if missing, fall back to static LSM from paths.lsm_path
+                lsm0 = None
+
                 # lsm_hr_gen is expected as [B,1,H,W] bool/0-1
                 lsm = lsm_hr_gen
                 if lsm is not None and torch.is_tensor(lsm):
                     lsm_cpu = (lsm.detach().cpu() > 0.5).to(torch.bool)
                     # assume B==1 in generation; take [0]
                     lsm0 = lsm_cpu[0, 0] if lsm_cpu.dim() == 4 else lsm_cpu.squeeze()
+                else:
+                    static_lsm = self._get_static_lsm()
+                    if static_lsm is not None:
+                        lsm0 = static_lsm
+                        logger.info("[generation] Using static LSM fallback for date %s", dates[0])
+
+                if lsm0 is not None:                    
                     # Always save per-date mask if saving is enabled
                     if save:
                         _save_npz(self.out_root / 'lsm' / f'{dates[0]}.npz', lsm_hr=lsm0.numpy())
@@ -315,11 +472,9 @@ class GenerationRunner:
                     # Set/compare canonical mask, and save canonical on first encounter if saving
                     if self._first_lsm is None:
                         self._first_lsm = lsm0.clone()
-                        if self.stationary_cutout:
-                            if save:
-                                # write a single canonical mask immediately
-                                _save_npz(self.out_root / 'meta' / 'land_mask.npz', lsm_hr=lsm0.numpy())
-                                logger.info("[generation] Saved canonical land mask → %s", self.out_root / 'meta' / 'land_mask.npz')
+                        if self.stationary_cutout and save:
+                            _save_npz(self.out_root / 'meta' / 'land_mask.npz', lsm_hr=lsm0.numpy())
+                            logger.info("[generation] Saved canonical land mask → %s", self.out_root / 'meta' / 'land_mask.npz')
                     else:
                         if not torch.equal(self._first_lsm, lsm0):
                             self._lsm_stationary_ok = False

@@ -21,7 +21,9 @@ from __future__ import annotations
 from typing import Optional, Sequence, Dict, List, Any
 
 import torch
+import logging 
 
+logger = logging.getLogger(__name__)
 # ================================================================================
 # Small internal helpers
 # ================================================================================
@@ -37,6 +39,10 @@ def _normalize_mask(
 ) -> Optional[torch.Tensor]:
     """
         Normalize mask to the final target shape (broadcasting style)
+
+        If normalization fails (e.g. full-domain mask [589,789] vs cutout [128,128]),
+        we log a warning and fall back to an all-True mask on the target shape
+        (i.e. effectively no spatial restriction for this metric call).
     """
     if mask is None:
         return None
@@ -47,24 +53,38 @@ def _normalize_mask(
     # Squeeze leading singleton dimensions
     while m.dim() > 2 and m.shape[0] == 1:
         m = m.squeeze(0)
-    
-    # Try to broaodcast to target shape
-    if m.shape == target_shape:
+
+    # Normalize target_shape to a tuple
+    ts = tuple(target_shape)
+
+    # Direct matches
+    if m.shape == ts:
         return m
-    if m.dim() == 2 and len(target_shape) == 3:
-        # [H,W] -> [B,H,W]
-        B = target_shape[0]
-        m = m.unsqueeze(0).expand(B, -1, -1)
-        return m
-    if m.dim() == 3 and len(target_shape) == 2 and m.shape[0] == 1:
-        # [1,H,W] -> [H,W]
+
+    # [H,W] -> [B,H,W], only if H,W match target
+    if m.dim() == 2 and len(ts) == 3:
+        B, H, W = ts
+        if m.shape == (H, W):
+            return m.unsqueeze(0).expand(B, -1, -1)
+
+    # [1,H,W] -> [H,W], only if H,W match target
+    if m.dim() == 3 and len(ts) == 2 and m.shape[0] == 1 and m.shape[1:] == ts:
         return m.squeeze(0)
     
-    # Last resort: try broadcast via expend_as
+    # Last resort: try broadcast via expand; on failure, fall back to all-True mask
     try:
         return m.expand(target_shape)
     except Exception as e:
-        raise ValueError(f"Cannot normalize mask of shape {mask.shape} to target shape {target_shape}: {e}")
+        logger.warning(
+            "[prob_metrics] Mask normalization failed: mask.shape=%s, "
+            "target_shape=%s. Falling back to full-domain mask "
+            "(no spatial restriction). Error: %s",
+            tuple(mask.shape),
+            tuple(target_shape),
+            e,
+        )
+        # Fallback: all-True mask on the target shape
+        return torch.ones(target_shape, dtype=torch.bool, device=device)
     
 
 

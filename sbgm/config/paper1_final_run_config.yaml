@@ -268,6 +268,7 @@ diagnostics:
   histogram_every: 500 # Frequency (in steps) to save histograms
   histogram_path: ${env:LOG_DIR}/histograms # Path to save histograms
 
+
 evaluation:
   # Legacy / low-level evaluation settings.
   # Full evaluation orchestration is handled by the `full_gen_eval` block below.
@@ -326,7 +327,7 @@ full_gen_eval:
                        "prcp_spatial"]
 
   ensemble_size: 32 # Number of ensemble members to generate for full evaluation
-  max_dates: 800 # Maximum number of dates to evaluate (set to -1 for all available dates)
+  max_dates: 1200 # Maximum number of dates to evaluate (set to -1 for all available dates)
   eval_land_only: true
   prefer_phys: true
   lr_key: lr # lr | lr_lrspace | lr_hrspace

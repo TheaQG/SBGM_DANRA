@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=ab_basic_geo
-#SBATCH --output=logs/slurm_ab_basic_geo_%x_%j.log
-#SBATCH --error=logs/slurm_ab_basic_geo_%x_%j.err
+#SBATCH --job-name=final_run
+#SBATCH --output=logs/slurm_final_run_%x_%j.log
+#SBATCH --error=logs/slurm_final_run_%x_%j.err
 #SBATCH --account=project_465001695
 #SBATCH --partition=standard-g
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=28 # 7 * 4 cores per GPU
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=56 # 7 * 8 cores per GPU
 #SBATCH --mem-per-gpu=60G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 
 
 # Fail fast, but set -u only after we’ve safely handled env defaults
@@ -29,7 +29,7 @@ CONTAINER=/scratch/project_465001695/containers/images/my_torch_container_with_p
 SCRATCH="/scratch/${SLURM_JOB_ACCOUNT}"
 USER_DIR="$SCRATCH/$USER"
 ROOT_DIR="$USER_DIR/Code/SBGM_SD"
-CONFIG_DIR="$ROOT_DIR/sbgm/config/ablations"
+CONFIG_DIR="$ROOT_DIR/sbgm/config"
 DATA_DIR="$USER_DIR/Data/Data_DiffMod"
 SAMPLE_DIR="$ROOT_DIR/models_and_samples/generated_samples"
 CKPT_DIR="$ROOT_DIR/models_and_samples/trained_models"
@@ -48,35 +48,36 @@ export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
 # === Optional: create logs directory if it doesn't exist ===
 mkdir -p logs
 
+echo "[INFO] Date of experiment = $EXP_DATE"
+echo "[INFO] ROOT_DIR   = $ROOT_DIR"
+echo "[INFO] DATA_DIR   = $DATA_DIR"
+echo "[INFO] SAMPLE_DIR = $SAMPLE_DIR"
+echo "[INFO] CKPT_DIR   = $CKPT_DIR"
+
 # Threading caps inside container
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-# --- MIOpen workaround: per-job DB ---
-MIOPEN_DB_DIR="$SCRATCH/$USER/miopen_db_${SLURM_JOB_ID}"
-mkdir -p "$MIOPEN_DB_DIR"
-export MIOPEN_USER_DB_PATH="$MIOPEN_DB_DIR/userdb.sql"
-export MIOPEN_SYSTEM_DB_PATH="$MIOPEN_DB_DIR/systemdb.sql"
-
-CFG="$CONFIG_DIR/ablation_basic.yaml"
-
-echo "[INFO] Running ablation basic with tuned sampler (single sampler combo)"
-
+echo "[INFO] Launching generation → quicklook → evaluation (inside container)"
 srun singularity exec "$CONTAINER" bash -lc "
   set -euo pipefail
   export PYTHONPATH='${PYTHONPATH}'
-
-  # Only one sampler combo (index 0)
-  export SAMPLER_COMBO_INDEX_START=0
-  export SAMPLER_COMBO_INDEX_END=0
-
-  python -m sbgm.cli.main_app \
-    --mode sampler_grid_generation \
-    --config_path '$CFG'
-
-  python -m sbgm.cli.main_app \
-    --mode sampler_grid_evaluation \
-    --config_path '$CFG' \
-    --make_plots
+  python -m sbgm.cli.main_app --mode generate --config_path $CONFIG_DIR/paper1_final_config.yaml --make_plots &&
+  python -m sbgm.cli.main_app --mode evaluate --config_path $CONFIG_DIR/paper1_final_config.yaml --make_plots &&
+  python -m sbgm.cli.main_app --mode sigma_star_generation --config_path $CONFIG_DIR/paper1_final_config.yaml --make_plots &&
+  python -m sbgm.cli.main_app --mode sigma_star_evaluation --config_path $CONFIG_DIR/paper1_final_config.yaml --make_plots
 "
+
+  # python -m sbgm.cli.main_app --mode full_pipeline --config_path $CONFIG_DIR/paper1_final_config.yaml --make_plots
+  # python -m sbgm.cli.main_app --mode quicklook --config_path '$CONFIG_DIR/ablation_basic.yaml' --make_plots &&
+
+
+
+
+
+
+# # === Launch the training ===
+# echo "[INFO] Launching the full training-generation-evaluation pipeline..."
+# srun singularity exec $CONTAINER \
+#     python -m sbgm.cli.main_app --mode full_pipeline --config_path $CONFIG_DIR/paper1_expA.yaml --make_plots

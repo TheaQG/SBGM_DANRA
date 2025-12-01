@@ -269,39 +269,16 @@ diagnostics:
   histogram_path: ${env:LOG_DIR}/histograms # Path to save histograms
 
 evaluation:
-  n_gen_samples: 1 # Number of samples to generate
-  n_steps: 56 # Number of generation steps
-  batch_size: 8 # Batch size for generation
-  device: cpu # Device to use for generation (e.g., 'cuda' or 'cpu')
-  seed: 504 # Random seed for generation
-  gen_type: ['multiple', 'single', 'repeated'] # Type of generation to perform, 
-  save_samples: true # Whether to save generated samples
-  save_path_generation: ${env:SAMPLE_DIR}/generated_samples.npz # Path to save generated samples
-  save_figs: true # Whether to save figures of generated samples
-  fig_name: generated_samples # Name for the generated sample figures
-  n_samples_threshold_plot: 4 # Maximum number of samples to show in plot
-  transform_back: true # Whether to transform back before saving samples
-  transform_lr_conditions: true # Whether to transform back LR conditions before saving samples
-  lr_dual_bt_target: HR # How to map dual channel 0; HR (default) or LR stats
-  n_repeats: 3 # Number of times to repeat generation for evaluation
-  plot_examples: true # Whether to plot examples of generated samples
-  show_plots: false # Whether to show plots of generated samples
-  show_figs: false 
-  show_ocean: false # Whether to show ocean in generated sample plots
-  generation_dir: ${env:SAMPLE_DIR}/evaluations # Directory for generation outputs
-  mask_plots: false # Whether to mask plots or not
-  save_stats: true # Whether to save evaluation stats or not
-  plot_w_cond: true # Whether to plot conditions or not
-  plot_w_lsm: false # Whether to plot with lsm
-  eval_gen_type: ['multiple']
-  eval_land_only: true # Whether to evaluate on land only (mask out ocean vals)
-  eval_stat_methods: ['pixel_stats', 'spatial_stats'] # Methods for evaluation statistics
+  # Legacy / low-level evaluation settings.
+  # Full evaluation orchestration is handled by the `full_gen_eval` block below.
+  # This block is kept only for geometry / stationarity used by data loading
+  # and GenerationRunner (e.g. static LSM cropping).
   stationary_cutout:
-    hr_enabled: true # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
-    lr_enabled: true # Whether to use a stationary cutout or random crop from cutout domain (i.e. shifting geographic domain slightly)
-    cutout_domains: [170, 350, 340, 520] # 
-    hr_bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for HR data (for stationary cutout)
-    lr_bounds: [200, 328, 380, 508] # [y0, y0+128, x0, x0+128] bounds in full domain for LR data (for stationary cutout)
+    hr_enabled: true   # Use stationary HR cutout during evaluation/generation
+    lr_enabled: true   # Use stationary LR cutout during evaluation/generation
+    cutout_domains: [170, 350, 340, 520]  # Full cutout domain in the original grid
+    hr_bounds: [200, 328, 380, 508]       # [y0, y1, x0, x1] for HR evaluation cutout
+    lr_bounds: [200, 328, 380, 508]       # [y0, y1, x0, x1] for LR evaluation cutout
 
 generation:
   fixed_dates: true # Whether to use same fixed dates every epoch for generation
@@ -325,11 +302,6 @@ full_gen_eval:
   use_new_eval: true
   seed: 504 # Random seed for full evaluation
   sampler_cleanup: true
-  
-  sampler_grid:
-    rho: [5.0, 7.0, 9.0]
-    S_churn: [0.0, 0.5, 1.0, 2.0]
-    sigma_scale: [0.90, 0.95, 1.00, 1.05, 1.10]
 
   sigma_star_grid: [0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20, 1.25]
 
@@ -341,9 +313,6 @@ full_gen_eval:
     crps_rain_thresh: 1.0
     hk_min_hr_frac: 1.0e-4
     hk_min_hr_abs: 1.0e-12
-
-  ensemble_size: 32
-  max_dates: 800
 
   sampler_grid:
     rho: [9.0]          # Best rho
