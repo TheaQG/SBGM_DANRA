@@ -1191,7 +1191,7 @@ def apply_cfg_dropout(
     dev_geo = lsm_cond.device if lsm_cond is not None else (topo_cond.device if topo_cond is not None else dev_available)
     dev_cls = y.device if isinstance(y, torch.Tensor) else dev_available
 
-    drop_lr_batch    = (torch.rand((), device=dev_lr) < p_lr).item()
+    drop_lr_batch    = (torch.rand((), device=dev_lr) < p_lr).item() 
     drop_geo_batch   = (torch.rand((), device=dev_geo) < p_geo).item()
     drop_class_batch = (torch.rand((), device=dev_cls) < p_class).item() if isinstance(y, torch.Tensor) else False
 

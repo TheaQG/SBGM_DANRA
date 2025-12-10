@@ -250,21 +250,39 @@ def plot_tails(tails_csv: Path, out_png: Path, bo: Optional[Dict[str, Any]] = No
     hdr, rows = _read_csv(tails_csv)
     if not rows:
         return
-    # which,P95,P99,wet_freq,wet_hit_rate,n_days
+    # header: which, Pxx..., wet_freq, wet_hit_rate, n_days
     tables = tails_csv.parent
     meta = _load_meta(tables)
     wet_thr = meta.get("wet_thr_mm", None)
     tails_basis = str(meta.get("tails_basis", "domain_series"))
     basis_desc = "Tails basis: pooled pixels" if tails_basis.lower().startswith("pooled") else "Tails basis: domain series"
 
-    data = {
-        r[0]: {
-            "P95": float(r[1]),
-            "P99": float(r[2]),
-            "wet": float(r[3]),
-            "hit": float(r[4]),
-        } for r in rows
-    }
+    try:
+        wet_idx = hdr.index("wet_freq")
+        hit_idx = hdr.index("wet_hit_rate")
+    except ValueError:
+        # Fallback to old fixed layout
+        wet_idx, hit_idx = 3, 4
+    pct_cols = hdr[1:wet_idx]
+
+    data = {}
+    for r in rows:
+        which = r[0]
+        d = {}
+        for i, col in enumerate(pct_cols, start=1):
+            try:
+                d[col] = float(r[i])
+            except (ValueError, IndexError):
+                d[col] = float("nan")
+        try:
+            d["wet"] = float(r[wet_idx])
+        except (ValueError, IndexError):
+            d["wet"] = float("nan")
+        try:
+            d["hit"] = float(r[hit_idx])
+        except (ValueError, IndexError):
+            d["hit"] = float("nan")
+        data[which] = d
     series = [s for s in SERIES_ORDER if s in data]
 
     # Try to load error bands for GEN_ENS if available
@@ -277,38 +295,52 @@ def plot_tails(tails_csv: Path, out_png: Path, bo: Optional[Dict[str, Any]] = No
             logger.warning(f"[plot_tails] Could not load ensemble bands: {e}")
 
     _nice()
-    fig, axs = plt.subplots(1, 3, figsize=(12.4, 3.8))
-    # --- left: P95/P99 grouped bars ---
-    ax = axs[0]
-    cats = ["P95", "P99"]
+    fig, axs = plt.subplots(2, 2, figsize=(10.8, 6.0))
+    ax_tails = axs[0, 0]
+    ax_wet = axs[1, 0]
+    ax_hit = axs[1, 1]
+    # hide top-right panel
+    axs[0, 1].axis("off")
+
+    # --- upper-left: percentile tails grouped bars ---
+    ax = ax_tails
+    cats = list(pct_cols)
     x = np.arange(len(cats))
     w = 0.22
     for i, which in enumerate(series):
         offs = (i - (len(series)-1)/2) * w
-        vals = [data[which]["P95"], data[which]["P99"]]
+        vals = [data[which].get(cat, np.nan) for cat in cats]
         yerr = None
         if which == "GEN_ENS" and bands is not None:
             try:
-                yerr = [bands.get("P95_std", None), bands.get("P99_std", None)]
-                yerr = np.array([float(yerr[0]) if yerr[0] is not None else 0.0,
-                                 float(yerr[1]) if yerr[1] is not None else 0.0])
+                errs = []
+                for cat in cats:
+                    std_arr = bands.get(f"{cat}_std", None)
+                    if std_arr is not None:
+                        std_val = float(np.asarray(std_arr))
+                    else:
+                        std_val = 0.0
+                    errs.append(std_val)
+                if any(np.isfinite(errs)):
+                    yerr = np.array(errs, dtype=float)
             except Exception:
-                yerr = None        
+                yerr = None
         ax.bar(x + offs, vals, width=w,
                label=SERIES_LABELS[which],
                color=SERIES_COLORS[which],
                edgecolor="black", linewidth=0.7, alpha=0.8,
                yerr=yerr if yerr is not None else None,
                capsize=2)
-    ax.set_xticks(x); ax.set_xticklabels(cats)
+    ax.set_xticks(x)
+    ax.set_xticklabels(cats)
     ax.set_title(f"Distribution tails ({basis_desc.split(':')[-1].strip()})")
     ax.set_ylabel("mm/day")
     ax.grid(True, ls=":")
     ax.legend(fontsize=8, loc="best")
 
-    # --- middle: wet-day frequency grouped bars ---
-    ax = axs[1]
-    x = np.arange(1)  # single category
+    # --- bottom-left: wet-day frequency grouped bars ---
+    ax = ax_wet
+    xw = np.arange(1)  # single category
     for i, which in enumerate(series):
         offs = (i - (len(series)-1)/2) * w
         yerr = None
@@ -317,21 +349,23 @@ def plot_tails(tails_csv: Path, out_png: Path, bo: Optional[Dict[str, Any]] = No
                 y = float(bands.get("wet_freq_std", 0.0))
                 yerr = np.array([y])
             except Exception:
-                yerr = None        
-        ax.bar(x + offs, [data[which]["wet"]], width=w,
+                yerr = None
+        ax.bar(xw + offs, [data[which]["wet"]], width=w,
                label=SERIES_LABELS[which],
                color=SERIES_COLORS[which],
                edgecolor="black", linewidth=0.7, alpha=0.8,
                yerr=yerr if yerr is not None else None,
                capsize=2)
-    ax.set_xticks([0]); ax.set_xticklabels(["≥ threshold"])
+    ax.set_xticks([0])
+    ax.set_xticklabels(["≥ threshold"])
     ax.set_ylim(0, 1)
     ax.set_title("Wet-day frequency")
     ax.set_ylabel("fraction")
     ax.grid(True, ls=":")
 
-    # --- right: wet-hit rate grouped bars ---
-    ax = axs[2]
+    # --- bottom-right: wet-hit rate grouped bars ---
+    ax = ax_hit
+    xr = np.arange(1)  # single category
     for i, which in enumerate(series):
         offs = (i - (len(series)-1)/2) * w
         yerr = None
@@ -340,14 +374,15 @@ def plot_tails(tails_csv: Path, out_png: Path, bo: Optional[Dict[str, Any]] = No
                 y = float(bands.get("hit_std", 0.0))
                 yerr = np.array([y])
             except Exception:
-                yerr = None        
+                yerr = None
         ax.bar([0 + offs], [data[which]["hit"]], width=w,
                label=SERIES_LABELS[which],
                color=SERIES_COLORS[which],
                edgecolor="black", linewidth=0.7, alpha=0.8,
                yerr=yerr if yerr is not None else None,
                capsize=2)
-    ax.set_xticks([0]); ax.set_xticklabels(["HR-wet days predicted wet"])
+    ax.set_xticks([0])
+    ax.set_xticklabels(["HR-wet days predicted wet"])
     ax.set_ylim(0, 1)
     ax.set_title("Wet-day hit rate")
     ax.set_ylabel("fraction")
@@ -393,11 +428,6 @@ def plot_tails(tails_csv: Path, out_png: Path, bo: Optional[Dict[str, Any]] = No
                 if not r:
                     continue
                 r = r[0]
-                try:
-                    p95 = float(r[1]); p99 = float(r[2])
-                    wet = float(r[3]); hit = float(r[4])
-                except Exception:
-                    continue
                 label = labels.get(t, t)
                 style = dict(styles.get(t, {}))
                 color = style.get("color", style.get("c", None))
@@ -406,13 +436,31 @@ def plot_tails(tails_csv: Path, out_png: Path, bo: Optional[Dict[str, Any]] = No
                 rel = (j - (nb-1)/2)
                 dx_j = rel * (w_b + gap)
                 # positions centered around the LR bar location
-                xl = [0 + off_lr + dx_j, 1 + off_lr + dx_j]
+                perc_vals = []
+                for col in cats:
+                    try:
+                        # percentile columns begin at index 1
+                        idx = b_hdr.index(col)
+                        perc_vals.append(float(r[idx]))
+                    except Exception:
+                        perc_vals.append(np.nan)
+                xl = [xi + off_lr + dx_j for xi in range(len(cats))]
+                # wet and hit
+                try:
+                    wet = float(r[b_hdr.index("wet_freq")])
+                except Exception:
+                    wet = np.nan
+                try:
+                    hit = float(r[b_hdr.index("wet_hit_rate")])
+                except Exception:
+                    hit = np.nan
                 xm = 0 + off_lr + dx_j
                 xr = 0 + off_lr + dx_j
-                axs[0].bar(xl, [p95, p99], width=w_b, fill=False, edgecolor=edgecolor, linewidth=1.3, hatch=hatch, label=label, zorder=6)
-                axs[1].bar([xm], [wet],    width=w_b, fill=False, edgecolor=edgecolor, linewidth=1.3, hatch=hatch, zorder=6)
-                axs[2].bar([xr], [hit],    width=w_b, fill=False, edgecolor=edgecolor, linewidth=1.3, hatch=hatch, zorder=6)
-        axs[0].legend(fontsize=8, loc="best")
+                ax_tails.bar(xl, perc_vals, width=w_b, fill=False, edgecolor=edgecolor,
+                             linewidth=1.3, hatch=hatch, label=label, zorder=6)
+                ax_wet.bar([xm], [wet],    width=w_b, fill=False, edgecolor=edgecolor, linewidth=1.3, hatch=hatch, zorder=6)
+                ax_hit.bar([xr], [hit],    width=w_b, fill=False, edgecolor=edgecolor, linewidth=1.3, hatch=hatch, zorder=6)
+        ax_tails.legend(fontsize=8, loc="best")
 
     fig.tight_layout()
     _savefig(fig, out_png, dpi=SET_DPI)

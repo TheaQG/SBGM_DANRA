@@ -277,17 +277,71 @@ def compute_global_stats(data_dict,
     global_min = np.min(stacked)
     global_max = np.max(stacked)
 
+    # Prepare containers for optional nonlinear-transform stats
+    asinh_mean = asinh_std = asinh_min = asinh_max = None
+    boxcox_mean = boxcox_std = boxcox_min = boxcox_max = None
+    asinh_scale = None
+    boxcox_lambda = None
+
+    # Hyperparameters for nonlinear transforms (used both in stats and training)
+    stats_cfg = cfg.get("statistics", {}) if isinstance(cfg, dict) else {}
+    # asinh_scale is the mm/day scale where asinh transitions from linear to log-like
+    asinh_scale_cfg = stats_cfg.get("asinh_scale", 1.0)
+    boxcox_lambda_cfg = stats_cfg.get("boxcox_lambda", 0.3)
+    boxcox_eps_cfg = stats_cfg.get("boxcox_eps", 0.01)
+
     # To avoid issues with log(0), we add a small constant
     # Instead of just global_min >= 0, only get log stats if asked for it
     if log_stats:
-        stacked = np.where(stacked <= 0, 1e-8, stacked)  # Replace non-positive values with a small constant
-        log_stack = np.log(stacked)
+        stacked_pos = np.where(stacked <= 0, 1e-8, stacked)  # Replace non-positive values with a small constant
+        log_stack = np.log(stacked_pos)
         log_mean = np.mean(log_stack)
         log_std = np.std(log_stack)
         log_min = np.min(log_stack)
         log_max = np.max(log_stack)
     else:
         log_mean = log_std = log_min = log_max = None
+
+    # === Optional: asinh and Box–Cox stats for precip-like variables ===
+    # These are used by PrcpAsinhZScoreTransform and PrcpBoxCoxZScoreTransform.
+    # We compute them by default for prcp/cape if log_stats is True.
+    if log_stats and variable in ["prcp", "cape"]:
+        # Ensure non-negative input for these nonlinear transforms
+        nonneg = np.where(stacked < 0, 0.0, stacked)
+
+        # Asinh stats
+        try:
+            asinh_scale = float(asinh_scale_cfg)
+        except Exception:
+            asinh_scale = 1.0
+        a = max(asinh_scale, 1e-8)
+        asinh_stack = np.arcsinh(nonneg / a)
+        asinh_mean = float(np.mean(asinh_stack))
+        asinh_std = float(np.std(asinh_stack))
+        asinh_min = float(np.min(asinh_stack))
+        asinh_max = float(np.max(asinh_stack))
+
+        # Box–Cox stats
+        try:
+            boxcox_lambda = float(boxcox_lambda_cfg)
+        except Exception:
+            boxcox_lambda = 0.3
+        try:
+            boxcox_eps = float(boxcox_eps_cfg)
+        except Exception:
+            boxcox_eps = 0.01
+
+        # Shift to positive (>= eps) for Box–Cox
+        x_pos = np.where(nonneg <= 0, boxcox_eps, nonneg + boxcox_eps)
+        if abs(boxcox_lambda) < 1e-6:
+            boxcox_stack = np.log(x_pos)
+        else:
+            boxcox_stack = (np.power(x_pos, boxcox_lambda) - 1.0) / boxcox_lambda
+
+        boxcox_mean = float(np.mean(boxcox_stack))
+        boxcox_std = float(np.std(boxcox_stack))
+        boxcox_min = float(np.min(boxcox_stack))
+        boxcox_max = float(np.max(boxcox_stack))
 
 
     stats = {
@@ -298,7 +352,19 @@ def compute_global_stats(data_dict,
         "log_mean": log_mean,
         "log_std": log_std,
         "log_min": log_min,
-        "log_max": log_max
+        "log_max": log_max,
+        # Asinh-based transform stats
+        "asinh_mean": asinh_mean,
+        "asinh_std": asinh_std,
+        "asinh_min": asinh_min,
+        "asinh_max": asinh_max,
+        "asinh_scale": asinh_scale,
+        # Box–Cox transform stats
+        "boxcox_mean": boxcox_mean,
+        "boxcox_std": boxcox_std,
+        "boxcox_min": boxcox_min,
+        "boxcox_max": boxcox_max,
+        "boxcox_lambda": boxcox_lambda,
     }
 
     split = cfg.get("data", {}).get("split", "unknown")

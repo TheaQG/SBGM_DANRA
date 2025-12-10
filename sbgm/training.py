@@ -276,7 +276,7 @@ class TrainingPipeline_general:
                 domain_str_lr=full_domain_dims_str_lr,
                 crop_region_str_lr=crop_region_lr_str,
                 lr_buffer_frac=cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                split="all", # For now "all", but NOTE: needs to be "train" in future
+                split=cfg['transforms'].get('scaling_split', 'train'),
                 stats_dir_root=cfg['paths']['stats_load_dir'],
                 eps=self.global_prcp_eps
             )
@@ -346,7 +346,8 @@ class TrainingPipeline_general:
                 c_in += 1
             if self.rg_include_topo:
                 c_in += 1  # NOTE: Later add slope
-            if self.rg_include_lr_baseline:
+            # Only include LR baseline channel when EDM residual prediction is active
+            if self.rg_include_lr_baseline and self.edm_enabled and self.edm_predict_residual:
                 c_in += 1
             self.rain_gate = RainGate(c_in=c_in, c_hidden=int(rg_cfg.get('c_hidden', 16)))
             self.rain_gate.to(self.device)

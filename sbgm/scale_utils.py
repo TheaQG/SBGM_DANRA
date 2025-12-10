@@ -36,7 +36,7 @@ def hann2d(h, w):
 def isotropic_psd(field_2d: np.ndarray,
                   pixel_km: float,
                   window: str = "hann",
-                  eps: float = 1e-12):
+                  eps: float = 1e-8):
     """
     Compute isotropic 2D power spectral density and collapse to radial bins.
     Returns (k_cpkm, Pk) where k in cycles per km.

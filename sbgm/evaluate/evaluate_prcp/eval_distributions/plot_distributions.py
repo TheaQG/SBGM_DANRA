@@ -318,14 +318,28 @@ def plot_distributional(dist_root: str | Path, eval_cfg: Any | None = None) -> N
     # ax.axvline(wet_thr, ls=":", lw=0.8, color="0.3", alpha=0.6)
 
     # HR percentiles from histogram
-    p95 = _percentile_from_hist(hr, bins, 0.95)
-    p99 = _percentile_from_hist(hr, bins, 0.99)
+    p95   = _percentile_from_hist(hr, bins, 0.95)
+    p99   = _percentile_from_hist(hr, bins, 0.99)
+    p999  = _percentile_from_hist(hr, bins, 0.999)
+    p9999 = _percentile_from_hist(hr, bins, 0.9999)
+    p99999 = _percentile_from_hist(hr, bins, 0.99999)
+    ylim_main = ax.get_ylim()
+    y_ann = ylim_main[1] * 0.6
     if p95 is not None:
         ax.axvline(p95, color="0.2", lw=0.8, ls="--", alpha=0.6)
-        ax.text(p95, ax.get_ylim()[1]*0.6, "P95", rotation=90, va="top", ha="right", fontsize=8, color="0.25")
+        ax.text(p95, y_ann, "P95", rotation=90, va="top", ha="right", fontsize=8, color="0.25")
     if p99 is not None:
         ax.axvline(p99, color="0.2", lw=0.8, ls="--", alpha=0.6)
-        ax.text(p99, ax.get_ylim()[1]*0.6, "P99", rotation=90, va="top", ha="right", fontsize=8, color="0.25")
+        ax.text(p99, y_ann, "P99", rotation=90, va="top", ha="right", fontsize=8, color="0.25")
+    if p999 is not None:
+        ax.axvline(p999, color="0.2", lw=0.8, ls="--", alpha=0.6)
+        ax.text(p999, y_ann, "P99.9", rotation=90, va="top", ha="right", fontsize=8, color="0.25")
+    if p9999 is not None:
+        ax.axvline(p9999, color="0.2", lw=0.8, ls="--", alpha=0.6)
+        ax.text(p9999, y_ann, "P99.99", rotation=90, va="top", ha="right", fontsize=8, color="0.25")
+    if p99999 is not None:
+        ax.axvline(p99999, color="0.2", lw=0.8, ls="--", alpha=0.6)
+        ax.text(p99999, y_ann, "P99.999", rotation=90, va="top", ha="right", fontsize=8, color="0.25")
 
     # Tail inset (fixed window 20–80 mm/day), optional and placed fully outside the axes
     try:
@@ -541,8 +555,11 @@ def plot_distributional(dist_root: str | Path, eval_cfg: Any | None = None) -> N
                     idx = int(np.clip(np.searchsorted(c, p), 0, len(bins_s) - 2))
                     return float(0.5 * (bins_s[idx] + bins_s[idx + 1]))
 
-                p95s = _p_from_C(C_hr, 0.95)
-                p99s = _p_from_C(C_hr, 0.99)
+                p95s   = _p_from_C(C_hr, 0.95)
+                p99s   = _p_from_C(C_hr, 0.99)
+                p999s  = _p_from_C(C_hr, 0.999)
+                p9999s = _p_from_C(C_hr, 0.9999)
+                p99999s = _p_from_C(C_hr, 0.99999)
 
                 axS.set_title(lab)
                 axS.set_yscale("log")
@@ -550,13 +567,14 @@ def plot_distributional(dist_root: str | Path, eval_cfg: Any | None = None) -> N
                 axS.set_xlabel("Precipitation (mm/day)")
                 axS.grid(True, ls=":", alpha=0.4)
 
-                # Add P95/P99 verticals and labels after y-limits are fixed
+                # Add percentile verticals and labels after y-limits are fixed
                 ylim_s = axS.get_ylim()
+                y_ann_s = ylim_s[1] * 0.6                
                 if p95s is not None:
                     axS.axvline(p95s, color="0.2", lw=0.6, ls="--", alpha=0.5)
                     axS.text(
                         p95s,
-                        ylim_s[1] * 0.6,
+                        y_ann_s,
                         "P95",
                         rotation=90,
                         va="top",
@@ -568,8 +586,44 @@ def plot_distributional(dist_root: str | Path, eval_cfg: Any | None = None) -> N
                     axS.axvline(p99s, color="0.2", lw=0.6, ls="--", alpha=0.5)
                     axS.text(
                         p99s,
-                        ylim_s[1] * 0.6,
+                        y_ann_s,
                         "P99",
+                        rotation=90,
+                        va="top",
+                        ha="right",
+                        fontsize=7,
+                        color="0.25",
+                    )
+                if p999s is not None:
+                    axS.axvline(p999s, color="0.2", lw=0.6, ls="--", alpha=0.5)
+                    axS.text(
+                        p999s,
+                        y_ann_s,
+                        "P99.9",
+                        rotation=90,
+                        va="top",
+                        ha="right",
+                        fontsize=7,
+                        color="0.25",
+                    )
+                if p9999s is not None:
+                    axS.axvline(p9999s, color="0.2", lw=0.6, ls="--", alpha=0.5)
+                    axS.text(
+                        p9999s,
+                        y_ann_s,
+                        "P99.99",
+                        rotation=90,
+                        va="top",
+                        ha="right",
+                        fontsize=7,
+                        color="0.25",
+                    )
+                if p99999s is not None:
+                    axS.axvline(p99999s, color="0.2", lw=0.6, ls="--", alpha=0.5)
+                    axS.text(
+                        p99999s,
+                        y_ann_s,
+                        "P99.999",
                         rotation=90,
                         va="top",
                         ha="right",

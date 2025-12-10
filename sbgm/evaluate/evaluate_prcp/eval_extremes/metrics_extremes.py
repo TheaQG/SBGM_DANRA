@@ -9,7 +9,13 @@ import logging
 from scipy.stats import genextreme as scipy_gev
 from scipy.stats import genpareto as scipy_gpd
 
+
 logger = logging.getLogger(__name__)
+
+# Helper for formatting percentile labels
+def _p_label(p: float) -> str:
+    """Format a percentile value like 95.0, 99.9 into a key 'P95', 'P99.9'."""
+    return "P" + ("%g" % float(p))
 
 # ------------------ small utilities ------------------
 def _ensure_float(t: torch.Tensor | np.ndarray) -> torch.Tensor:
@@ -178,7 +184,7 @@ def percentiles_and_wetfreq(y_daily: np.ndarray,
                             p_list: Sequence[float] = (95.0, 99.0)) -> Dict[str, Any]:
     y = np.asarray(y_daily, dtype=float)
     y = y[np.isfinite(y)]
-    out = {f"P{int(p)}": float(np.percentile(y, p)) for p in p_list}
+    out = {_p_label(p): float(np.percentile(y, p)) for p in p_list}
     out["wet_freq"] = float(np.mean(y > wet_thr))
     out["n_days"] = int(y.size)
     return out
@@ -352,7 +358,7 @@ def pooled_pixel_percentiles_and_wetfreq(
         x = np.concatenate(chunks).astype(float)
         x = x[np.isfinite(x)]
         out[key] = {
-            **{f"P{int(p)}": float(np.percentile(x, p)) for p in p_list},
+            **{_p_label(p): float(np.percentile(x, p)) for p in p_list},
             "wet_freq": float(np.mean(x > wet_thr)),
             "n_points": int(x.size),
         }
@@ -386,7 +392,7 @@ def pooled_pixel_percentiles_and_wetfreq_ens(resolver, dates, mask_hw=None, wet_
         return None
     x = np.concatenate(chunks).astype(float)
     x = x[np.isfinite(x)]
-    out = {**{f"P{int(p)}": float(np.percentile(x, p)) for p in p_list},
+    out = {**{_p_label(p): float(np.percentile(x, p)) for p in p_list},
            "wet_freq": float(np.mean(x > wet_thr)),
            "n_points": int(x.size)}
     return out
@@ -572,13 +578,13 @@ def pooled_wet_hit_rate_ens_member_stats(resolver, dates, mask_hw=None, wet_thr=
 # ------------------ Member-mean pooled tails (percentiles/wet freq and wet-hit rate) ------------------
 def percentiles_and_wetfreq_ens_member_mean(resolver, dates, mask_hw=None, wet_thr=1.0, p_list=(95.0,99.0), n_members=None, seed=1234):
     """Compute per-member pooled-pixel tails, then average across members.
-    Returns dict with mean P95/P99, mean wet_freq, and an approximate mean n_points."""
-    import torch
+    Returns dict with mean percentiles, mean wet_freq, and an approximate mean n_points.
+    """
     mask_hw = _mask_to_hw(mask_hw)
+    p_list = tuple(p_list)
+    p_labels = [_p_label(p) for p in p_list]
     # accumulate per member lists of pixel values across all dates
-    member_vals: list[list[np.ndarray]] = []
     M_eff = None
-    # probe M
     for d in dates:
         try:
             sample = resolver.fetch(d, want_ensemble=True, n_members=n_members, seed=seed)  # type: ignore[attr-defined]
@@ -611,7 +617,8 @@ def percentiles_and_wetfreq_ens_member_mean(resolver, dates, mask_hw=None, wet_t
             for i in range(min(M_eff, arr.shape[0])):
                 member_vals[i].append(arr[i].reshape(-1))
     # compute per-member statistics
-    p95s, p99s, wets, ns = [], [], [], []
+    per_member_perc = {label: [] for label in p_labels}
+    wets, ns = [], []
     for i in range(M_eff):
         if not member_vals[i]:
             continue
@@ -619,22 +626,22 @@ def percentiles_and_wetfreq_ens_member_mean(resolver, dates, mask_hw=None, wet_t
         x = x[np.isfinite(x)]
         if x.size == 0:
             continue
-        p95s.append(np.percentile(x, 95))
-        p99s.append(np.percentile(x, 99))
+        for p, label in zip(p_list, p_labels):
+            per_member_perc[label].append(np.percentile(x, p))
         wets.append(np.mean(x > wet_thr))
         ns.append(int(x.size))
-    if not p95s:
+    if not any(per_member_perc.values()):
         return None
-    out = {
-        "P95": float(np.mean(p95s)),
-        "P99": float(np.mean(p99s)),
-        "wet_freq": float(np.mean(wets)),
-        "n_points": int(np.mean(ns) if ns else 0),
-        # optional spread (not consumed by plots but useful for debugging)
-        "P95_std": float(np.std(p95s)),
-        "P99_std": float(np.std(p99s)),
-        "wet_freq_std": float(np.std(wets)),
-    }
+    out: Dict[str, Any] = {}
+    for label, vals in per_member_perc.items():
+        if not vals:
+            continue
+        vals_arr = np.asarray(vals, dtype=float)
+        out[label] = float(np.mean(vals_arr))
+        out[label + "_std"] = float(np.std(vals_arr))
+    out["wet_freq"] = float(np.mean(wets)) if wets else float("nan")
+    out["n_points"] = int(np.mean(ns) if ns else 0)
+    out["wet_freq_std"] = float(np.std(wets)) if wets else float("nan")
     return out
 
 def pooled_wet_hit_rate_ens_member_mean(resolver, dates, mask_hw=None, wet_thr=1.0, n_members=None, seed=1234):

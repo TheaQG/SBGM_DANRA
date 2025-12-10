@@ -17,6 +17,7 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+
 EPS = 1e-8 # Small epsilon to avoid division by zero in Z-score and Scale transforms
 
 # Make a function to compute transformations from stats dict
@@ -40,12 +41,28 @@ def transform_from_stats(data,
         data_transformed = transform(data)
     elif transform_type in ["log_zscore", "log_01", "log_minus1_1", "log"]:
         transform = PrcpLogTransform(scale_type=transform_type,
-                                    glob_mean_log=stats["log_mean"],
-                                    glob_std_log=stats["log_std"],
-                                    glob_min_log=stats["log_min"],
-                                    glob_max_log=stats["log_max"],
-                                    buffer_frac=cfg.get("data", {}).get("buffer_frac", 0.0),
-                                    eps=eps)
+                                     glob_mean_log=stats["log_mean"],
+                                     glob_std_log=stats["log_std"],
+                                     glob_min_log=stats["log_min"],
+                                     glob_max_log=stats["log_max"],
+                                     buffer_frac=cfg.get("data", {}).get("buffer_frac", 0.0),
+                                     eps=eps)
+        data_transformed = transform(data)
+    elif transform_type == "asinh_zscore":
+        transform = PrcpAsinhZScoreTransform(
+            glob_mean=stats["asinh_mean"],
+            glob_std=stats["asinh_std"],
+            asinh_scale=stats.get("asinh_scale", 1.0),
+            eps=eps,
+        )
+        data_transformed = transform(data)
+    elif transform_type == "boxcox_zscore":
+        transform = PrcpBoxCoxZScoreTransform(
+            glob_mean=stats["boxcox_mean"],
+            glob_std=stats["boxcox_std"],
+            boxcox_lambda=stats.get("boxcox_lambda", 0.3),
+            eps=eps,
+        )
         data_transformed = transform(data)
     else:
         raise ValueError(f"Unknown transform type: {transform_type}")
@@ -115,7 +132,6 @@ def load_global_stats(variable, model, domain_str, crop_region_str, split, dir_l
     """
     stats_load_dir = os.path.join(dir_load, model, variable, split)
     stats_load_path = os.path.join(stats_load_dir, f"global_stats__{model}__{domain_str}__crop__{crop_region_str}__{variable}__{split}.json")
-    
     if not os.path.exists(stats_load_path):
         logger.warning(f"Stats file not found: {stats_load_path}")
         return None
@@ -175,6 +191,20 @@ def get_transforms_from_stats(variable: str,
                                 buffer_frac=buffer_frac,
                                 eps=eps
                                 )
+    elif transform_type == "asinh_zscore":
+        return PrcpAsinhZScoreTransform(
+            glob_mean=stats["asinh_mean"],
+            glob_std=stats["asinh_std"],
+            asinh_scale=stats.get("asinh_scale", 1.0),
+            eps=eps,
+        )
+    elif transform_type == "boxcox_zscore":
+        return PrcpBoxCoxZScoreTransform(
+            glob_mean=stats["boxcox_mean"],
+            glob_std=stats["boxcox_std"],
+            boxcox_lambda=stats.get("boxcox_lambda", 0.3),
+            eps=eps,
+        )
     else:
         raise ValueError(f"Unknown transform type: {transform_type}")
 
@@ -226,6 +256,20 @@ def get_backtransforms_from_stats(variable: str,
                                 clamp_log_max=stats["log_max"], # Optionally clamp to the observed log-min and log-max
                                 eps=eps
                                 )
+    elif transform_type == "asinh_zscore":
+        return PrcpAsinhZScoreBackTransform(
+            glob_mean=stats["asinh_mean"],
+            glob_std=stats["asinh_std"],
+            asinh_scale=stats.get("asinh_scale", 1.0),
+            eps=eps,
+        )
+    elif transform_type == "boxcox_zscore":
+        return PrcpBoxCoxZScoreBackTransform(
+            glob_mean=stats["boxcox_mean"],
+            glob_std=stats["boxcox_std"],
+            boxcox_lambda=stats.get("boxcox_lambda", 0.3),
+            eps=eps,
+        )
     else:
         raise ValueError(f"Unknown transform type: {transform_type}")
 
@@ -645,6 +689,153 @@ class PrcpLogBackTransform(object):
         out = torch.clamp(out, min=0.0)
         return out
 
+# === Nonlinear precipitation transforms ===
+class PrcpAsinhZScoreTransform(object):
+    """
+        Asinh-based transform followed by global z-score:
+            y = asinh(x / a)
+            y' = (y - mean) / std
+
+        Intended for non-negative precipitation x (mm/day). Parameter `a` (asinh_scale)
+        controls where the transform transitions from linear to log-like behaviour.
+    """
+    def __init__(self,
+                 glob_mean: float,
+                 glob_std: float,
+                 asinh_scale: float = 1.0,
+                 eps: float = 0.01):
+        self.glob_mean = float(glob_mean)
+        self.glob_std = float(glob_std)
+        self.asinh_scale = float(asinh_scale)
+        self.eps = float(eps)
+
+    def __call__(self, sample: torch.Tensor) -> torch.Tensor:
+        x = sample
+        # Guard against tiny negatives / NaNs
+        x = torch.clamp(x, min=0.0)
+        a = max(self.asinh_scale, self.eps)
+        y = torch.asinh(x / a)
+        return (y - self.glob_mean) / (self.glob_std + EPS)
+
+
+class PrcpAsinhZScoreBackTransform(object):
+    """
+        Inverse of PrcpAsinhZScoreTransform:
+            y = z * std + mean
+            x = sinh(y) * a
+    """
+    def __init__(self,
+                 glob_mean: float,
+                 glob_std: float,
+                 asinh_scale: float = 1.0,
+                 eps: float = 0.01):
+        self.glob_mean = float(glob_mean)
+        self.glob_std = float(glob_std)
+        self.asinh_scale = float(asinh_scale)
+        self.eps = float(eps)
+
+    def __call__(self, sample):
+        """
+            Inverse asinh Z-score:
+                y = sample * glob_std + glob_mean
+                x = sinh(y) * asinh_scale
+
+            Accepts either torch.Tensor or numpy.ndarray and returns a torch.Tensor.
+        """
+        # Ensure tensor input
+        if not isinstance(sample, torch.Tensor):
+            sample = torch.tensor(sample, dtype=torch.float32)
+
+        # Build mean/std/scale tensors on same device/dtype
+        mean = torch.tensor(self.glob_mean, dtype=sample.dtype, device=sample.device)
+        std  = torch.tensor(self.glob_std,  dtype=sample.dtype, device=sample.device)
+        a    = torch.tensor(self.asinh_scale, dtype=sample.dtype, device=sample.device)
+
+        # De-standardize then apply inverse asinh
+        y = sample * std + mean
+        x = torch.sinh(y) * a
+
+        # Precipitation should be non-negative
+        return torch.clamp(x, min=0.0)
+
+
+class PrcpBoxCoxZScoreTransform(object):
+    """
+        Box–Cox transform followed by global z-score:
+            y = ( (x + eps)^lambda - 1 ) / lambda   (lambda != 0)
+            y = log(x + eps)                        (lambda == 0)
+
+        Works for non-negative precipitation x (mm/day).
+    """
+    def __init__(self,
+                 glob_mean: float,
+                 glob_std: float,
+                 boxcox_lambda: float = 0.3,
+                 eps: float = 0.01):
+        self.glob_mean = float(glob_mean)
+        self.glob_std = float(glob_std)
+        self.boxcox_lambda = float(boxcox_lambda)
+        self.eps = float(eps)
+
+    def __call__(self, sample):
+        """
+            Inverse Box–Cox Z-score:
+                bc = sample * boxcox_std + boxcox_mean
+                x_shift = exp(bc)          if lambda == 0
+                        = (lambda*bc+1)^(1/lambda) otherwise
+                x = x_shift - boxcox_eps
+
+            Accepts either torch.Tensor or numpy.ndarray and returns a torch.Tensor.
+        """
+        # Ensure tensor input
+        if not isinstance(sample, torch.Tensor):
+            sample = torch.tensor(sample, dtype=torch.float32)
+
+        mean = torch.tensor(self.glob_mean, dtype=sample.dtype, device=sample.device)
+        std  = torch.tensor(self.glob_std,  dtype=sample.dtype, device=sample.device)
+
+        bc = sample * std + mean
+        lam = self.boxcox_lambda
+
+        if abs(lam) < 1e-6:
+            x_shift = torch.exp(bc)
+        else:
+            x_shift = torch.pow(lam * bc + 1.0, 1.0 / lam)
+
+        x = x_shift - self.eps
+        return torch.clamp(x, min=0.0)
+
+
+class PrcpBoxCoxZScoreBackTransform(object):
+    """
+        Inverse of PrcpBoxCoxZScoreTransform:
+            y = z * std + mean
+            x = [lambda * y + 1]^(1/lambda) - eps,  lambda != 0
+            x = exp(y) - eps,                       lambda == 0
+    """
+    def __init__(self,
+                 glob_mean: float,
+                 glob_std: float,
+                 boxcox_lambda: float = 0.3,
+                 eps: float = 0.01):
+        self.glob_mean = float(glob_mean)
+        self.glob_std = float(glob_std)
+        self.boxcox_lambda = float(boxcox_lambda)
+        self.eps = float(eps)
+
+    def __call__(self, sample: torch.Tensor) -> torch.Tensor:
+        z = sample
+        y = z * self.glob_std + self.glob_mean
+        lam = self.boxcox_lambda
+        if abs(lam) < 1e-6:
+            x = torch.exp(y) - self.eps
+        else:
+            inner = torch.clamp(lam * y + 1.0, min=0.0)
+            x = inner ** (1.0 / lam) - self.eps
+        return torch.clamp(x, min=0.0)
+
+
+
 
 def build_back_transforms(hr_var,
                           hr_scaling_method, hr_scaling_params,
@@ -675,6 +866,20 @@ def build_back_transforms(hr_var,
         inv = ScaleBackTransform(0, 1,
                                  hr_scaling_params["glob_min"],
                                  hr_scaling_params["glob_max"])
+    elif hr_scaling_method == "asinh_zscore":
+        inv = PrcpAsinhZScoreBackTransform(
+            glob_mean=hr_scaling_params["asinh_mean"],
+            glob_std=hr_scaling_params["asinh_std"],
+            asinh_scale=hr_scaling_params.get("asinh_scale", 1.0),
+            eps=eps,
+        )
+    elif hr_scaling_method == "boxcox_zscore":
+        inv = PrcpBoxCoxZScoreBackTransform(
+            glob_mean=hr_scaling_params["boxcox_mean"],
+            glob_std=hr_scaling_params["boxcox_std"],
+            boxcox_lambda=hr_scaling_params.get("boxcox_lambda", 0.3),
+            eps=eps,
+        )
     else:
         raise ValueError(f"Unknown HR scaling method: {hr_scaling_method}")
 
@@ -694,12 +899,26 @@ def build_back_transforms(hr_var,
                                            buffer_frac=prm["buffer_frac"],
                                            clamp_log_min=prm.get("clamp_log_min", None),
                                            clamp_log_max=prm.get("clamp_log_max", None),
-                                             eps=eps
+                                           eps=eps
                                            )
         elif mth == "zscore":
             bt[key] = ZScoreBackTransform(prm["glob_mean"], prm["glob_std"])
         elif mth == "01":
             bt[key] = ScaleBackTransform(0, 1, prm["glob_min"], prm["glob_max"])
+        elif mth == "asinh_zscore":
+            bt[key] = PrcpAsinhZScoreBackTransform(
+                glob_mean=prm["asinh_mean"],
+                glob_std=prm["asinh_std"],
+                asinh_scale=prm.get("asinh_scale", 1.0),
+                eps=eps,
+            )
+        elif mth == "boxcox_zscore":
+            bt[key] = PrcpBoxCoxZScoreBackTransform(
+                glob_mean=prm["boxcox_mean"],
+                glob_std=prm["boxcox_std"],
+                boxcox_lambda=prm.get("boxcox_lambda", 0.3),
+                eps=eps,
+            )
         else:
             raise ValueError(f"Unknown LR scaling method: {mth}")
 
