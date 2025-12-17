@@ -22,6 +22,18 @@ formatter = logging.Formatter("[%(levelname)s] %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+# Local plotting style helper for readable multi-panel figures
+try:
+    from data_analysis_pipeline.comparison.plot_utils import paper_rc
+except Exception:
+    # Fallback for relative import when used as a package
+    try:
+        from .plot_utils import paper_rc  # type: ignore
+    except Exception:
+        paper_rc = None  # type: ignore
+from contextlib import contextmanager
+
+
 def compute_2d_power_spectrum(
                 data: np.ndarray,
                 detrend: bool = False) -> np.ndarray:
@@ -222,7 +234,7 @@ def batch_compare_power_spectra(
             ax.set_xticks(tick_vals)
             ax.set_xscale('log')
             ax.get_xaxis().set_major_formatter(ScalarFormatter())
-            ax.tick_params(axis='x', which='major', labelsize=10)
+            ax.tick_params(axis='x', which='major', labelsize=plt.rcParams.get('xtick.labelsize', 10))
             xlim = ax.get_xlim()
             ax.set_xlim(xlim[1], xlim[0])
             ax.set_ylabel('Power Spectrum Density')
@@ -236,7 +248,7 @@ def batch_compare_power_spectra(
             for label, wl in important_scales.items():
                 if wavelengths.min() <= wl <= wavelengths.max():
                     ax.axvline(wl, linestyle='--', color='gray', alpha=0.5)
-                    ax.text(wl, ax.get_ylim()[1], label, rotation=90, va='top', ha='right', fontsize=8)
+                    ax.text(wl, ax.get_ylim()[1], label, rotation=90, va='top', ha='right', fontsize=plt.rcParams.get('font.size', 10))
             if save_path:
                 if not os.path.exists(save_path):
                     os.makedirs(save_path)
@@ -335,7 +347,7 @@ def batch_compare_power_spectra(
         ax.set_xticks(tick_vals)
         ax.set_xscale('log')
         ax.get_xaxis().set_major_formatter(ScalarFormatter())
-        ax.tick_params(axis='x', which='major', labelsize=10)
+        ax.tick_params(axis='x', which='major', labelsize=plt.rcParams.get('xtick.labelsize', 10))
 
 
         # # Shade region below Nyquist wavelength (2 * dx = 5 km)
@@ -358,7 +370,7 @@ def batch_compare_power_spectra(
         for label, wl in important_scales.items():
             if wavelengths.min() <= wl <= wavelengths.max():
                 ax.axvline(wl, linestyle='--', color='gray', alpha=0.5)
-                ax.text(wl, ax.get_ylim()[1], label, rotation=90, va='top', ha='right', fontsize=8)
+                ax.text(wl, ax.get_ylim()[1], label, rotation=90, va='top', ha='right', fontsize=plt.rcParams.get('font.size', 10))
 
         if save_path:
             if not os.path.exists(save_path):
@@ -601,63 +613,65 @@ def compare_seasonal_distributions(
         season_bins_model1[season] = np.concatenate(season_bins_model1[season]) if season_bins_model1[season] else np.array([]) # type: ignore
         season_bins_model2[season] = np.concatenate(season_bins_model2[season]) if season_bins_model2[season] else np.array([]) # type: ignore
 
-    # === Plot 1: 1x2 panels, each model, seasonal histograms (STEP LINES) ===
-    # Uses outlines only to avoid fill overlap - log-scale via axis for consistent behaviour
-    fig1, axs1 = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True, sharey=True)
-    colors = {'Winter': '#3366cc', 'Spring': '#2ca02c', 'Summer': '#ffbf00', 'Autumn': '#c44e52'}
+    _rc_ctx = paper_rc(big=1.35, base=11) if paper_rc is not None else contextmanager(lambda: (yield))()
+    with _rc_ctx:
+        # === Plot 1: 1x2 panels, each model, seasonal histograms (STEP LINES) ===
+        # Uses outlines only to avoid fill overlap - log-scale via axis for consistent behaviour
+        fig1, axs1 = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True, sharey=True)
+        colors = {'Winter': '#3366cc', 'Spring': '#2ca02c', 'Summer': '#ffbf00', 'Autumn': '#c44e52'}
 
-    for season, color in colors.items():
-        if len(season_bins_model1[season]) > 0:
-            axs1[0].hist(season_bins_model1[season], bins=bins, density=True, histtype='step', linewidth=1.6, color=color, label=season)
-        if len(season_bins_model2[season]) > 0:
-            axs1[1].hist(season_bins_model2[season], bins=bins, density=True, histtype='step', linewidth=1.6, color=color, label=season)
+        for season, color in colors.items():
+            if len(season_bins_model1[season]) > 0:
+                axs1[0].hist(season_bins_model1[season], bins=bins, density=True, histtype='step', linewidth=1.6, color=color, label=season)
+            if len(season_bins_model2[season]) > 0:
+                axs1[1].hist(season_bins_model2[season], bins=bins, density=True, histtype='step', linewidth=1.6, color=color, label=season)
 
-    axs1[0].set_title(f'{model1}')
-    axs1[1].set_title(f'{model2}')
-    for ax in axs1:
-        if log_hist:
-            ax.set_yscale('log')
-        ax.legend(frameon=False)
-        ax.set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
-        ax.set_ylabel('Log count' if log_hist else 'Density')
-        ax.grid(True, which='both', ls='--', alpha=0.3)
-    
-    fig1.suptitle(f"{variable} | Seasonal Histogram Comparison (by model)", fontsize=16)
+        axs1[0].set_title(f'{model1}')
+        axs1[1].set_title(f'{model2}')
+        for ax in axs1:
+            if log_hist:
+                ax.set_yscale('log')
+            ax.legend(frameon=False)
+            ax.set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
+            ax.set_ylabel('Log count' if log_hist else 'Density')
+            ax.grid(True, which='both', ls='--', alpha=0.3)
+        
+        fig1.suptitle(f"{variable} | Seasonal Histogram Comparison (by model)", y=1.02)
 
-    # === Plot 2: 2x2 panels, each season, both models (STYLE BY MODEL) ===
-    # Same hue per season, distinguish models by linestyle/fill/hatch
-    fig2, axs2 = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True, sharey=True)
-    axs2 = axs2.flatten()
-    season_palette_fill = {'Winter': '#6fa3ff', 'Spring': '#7cd67a', 'Summer': '#ffd24d', 'Autumn': '#f28e8e'}
-    season_palette_line = {'Winter': '#1f4ba5', 'Spring': '#1d7f1d', 'Summer': '#e6ac00', 'Autumn': '#a93a3a'}
-    for i, season in enumerate(['Winter', 'Spring', 'Summer', 'Autumn']):
-        # Model 1: light fill + solid outline
-        if len(season_bins_model1[season]) > 0:
-            axs2[i].hist(season_bins_model1[season], bins=bins, density=True, histtype='stepfilled', alpha=0.25, color=season_palette_fill[season], edgecolor=season_palette_line[season], linewidth=1.2, label=model1, zorder=1)
-        # Model 3: no fill, dashed outline (on top)
-        if len(season_bins_model2[season]) > 0:
-            axs2[i].hist(season_bins_model2[season], bins=bins, density=True, histtype='step', linewidth=1.8, linestyle='--', color=season_palette_line[season], label=model2, zorder=2)
-            
-        axs2[i].set_title(f'{season}')
-        if log_hist:
-            axs2[i].set_yscale('log')
-        axs2[i].legend(frameon=False)
-        axs2[i].set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
-        axs2[i].set_ylabel('Log count' if log_hist else 'Density')
-        axs2[i].grid(True, which='both', ls='--', alpha=0.3)
+        # === Plot 2: 2x2 panels, each season, both models (STYLE BY MODEL) ===
+        # Same hue per season, distinguish models by linestyle/fill/hatch
+        fig2, axs2 = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True, sharey=True)
+        axs2 = axs2.flatten()
+        season_palette_fill = {'Winter': '#6fa3ff', 'Spring': '#7cd67a', 'Summer': '#ffd24d', 'Autumn': '#f28e8e'}
+        season_palette_line = {'Winter': '#1f4ba5', 'Spring': '#1d7f1d', 'Summer': '#e6ac00', 'Autumn': '#a93a3a'}
+        for i, season in enumerate(['Winter', 'Spring', 'Summer', 'Autumn']):
+            # Model 1: light fill + solid outline
+            if len(season_bins_model1[season]) > 0:
+                axs2[i].hist(season_bins_model1[season], bins=bins, density=True, histtype='stepfilled', alpha=0.25, color=season_palette_fill[season], edgecolor=season_palette_line[season], linewidth=1.2, label=model1, zorder=1)
+            # Model 3: no fill, dashed outline (on top)
+            if len(season_bins_model2[season]) > 0:
+                axs2[i].hist(season_bins_model2[season], bins=bins, density=True, histtype='step', linewidth=1.8, linestyle='--', color=season_palette_line[season], label=model2, zorder=2)
+                
+            axs2[i].set_title(f'{season}')
+            if log_hist:
+                axs2[i].set_yscale('log')
+            axs2[i].legend(frameon=False)
+            axs2[i].set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
+            axs2[i].set_ylabel('Log count' if log_hist else 'Density')
+            axs2[i].grid(True, which='both', ls='--', alpha=0.3)
 
-    fig2.suptitle(f"{variable} | Seasonal Histogram Comparison (by season)", fontsize=16)
+        fig2.suptitle(f"{variable} | Seasonal Histogram Comparison (by season)", y=1.02)
 
-    if save_figures:
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-        fname1 = f"{variable}_{model1}_vs_{model2}_seasonal_histogram_by_model".replace(" ", "_")
-        fname2 = f"{variable}_{model1}_vs_{model2}_seasonal_histogram_by_season".replace(" ", "_")
-        fig1.savefig(os.path.join(save_path, f'{fname1}.png'), dpi=300)
-        fig2.savefig(os.path.join(save_path, f'{fname2}.png'), dpi=300)
-        logger.info(f"      Saved seasonal histograms to {save_path}/{fname1}.png and {fname2}.png")
-    if show:
-        plt.show()
-    plt.close('all')
+        if save_figures:
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+            fname1 = f"{variable}_{model1}_vs_{model2}_seasonal_histogram_by_model".replace(" ", "_")
+            fname2 = f"{variable}_{model1}_vs_{model2}_seasonal_histogram_by_season".replace(" ", "_")
+            fig1.savefig(os.path.join(save_path, f'{fname1}.png'), dpi=300)
+            fig2.savefig(os.path.join(save_path, f'{fname2}.png'), dpi=300)
+            logger.info(f"      Saved seasonal histograms to {save_path}/{fname1}.png and {fname2}.png")
+        if show:
+            plt.show()
+        plt.close('all')
 
 

@@ -618,7 +618,7 @@ class TrainingPipeline_general:
                     gate_inputs.append(topo)
                 if self.rg_include_lr_baseline and (lr_ups_baseline is not None):
                     gate_inputs.append(lr_ups_baseline)
-                logger.info(f"[rain_gate debug] cond_images={cond_images is not None}, lsm={lsm is not None}, topo={topo is not None}, lr_ups_baseline={lr_ups_baseline is not None}")
+                # logger.info(f"[rain_gate debug] cond_images={cond_images is not None}, lsm={lsm is not None}, topo={topo is not None}, lr_ups_baseline={lr_ups_baseline is not None}")
                 if len(gate_inputs) > 0:
                     gate_x = torch.cat(gate_inputs, dim=1)  # [B, C_in, H, W]
                     # Predict rain probabilities (logits) from gate inputs

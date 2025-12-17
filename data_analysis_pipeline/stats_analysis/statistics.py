@@ -186,7 +186,8 @@ def compute_statistics(data,
             "max": np.max(stack, axis=(1, 2)),    # Shape: (T,)
             "median": np.median(stack, axis=(1, 2)),  # Shape: (T,)
             "percentile_25": np.percentile(stack, 25, axis=(1, 2)),  # Shape: (T,)
-            "percentile_75": np.percentile(stack, 75, axis=(1, 2))   # Shape: (T,)
+            "percentile_75": np.percentile(stack, 75, axis=(1, 2)),   # Shape: (T,)
+            "sum": np.sum(stack, axis=(1, 2))       # Shape: (T,)
         }
         if timestamps is not None:
             time_series_stats["timestamps"] = timestamps
@@ -201,7 +202,8 @@ def compute_statistics(data,
             "max": np.max(stack, axis=0),    # Shape: (H, W)
             "median": np.median(stack, axis=0),  # Shape: (H, W)
             "percentile_25": np.percentile(stack, 25, axis=0),  # Shape: (H, W)
-            "percentile_75": np.percentile(stack, 75, axis=0)   # Shape: (H, W)
+            "percentile_75": np.percentile(stack, 75, axis=0),   # Shape: (H, W)
+            "sum": np.sum(stack, axis=0)       # Shape: (H, W)
         }
 
 
@@ -276,6 +278,9 @@ def compute_global_stats(data_dict,
     global_std = np.std(stacked)
     global_min = np.min(stacked)
     global_max = np.max(stacked)
+    global_sum = np.sum(stacked)
+    global_count = stacked.size
+    global_yearly_sum = global_sum / (len(cutouts) / 365.0)  # Approximate yearly sum
 
     # Prepare containers for optional nonlinear-transform stats
     asinh_mean = asinh_std = asinh_min = asinh_max = None
@@ -353,6 +358,9 @@ def compute_global_stats(data_dict,
         "log_std": log_std,
         "log_min": log_min,
         "log_max": log_max,
+        "sum": global_sum,
+        "count": global_count,
+        "yearly_sum": global_yearly_sum,
         # Asinh-based transform stats
         "asinh_mean": asinh_mean,
         "asinh_std": asinh_std,

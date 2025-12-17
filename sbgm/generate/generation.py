@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from sbgm.special_transforms import get_backtransforms_from_stats, lr_baseline_to_hr_zspace
+from sbgm.special_transforms import build_back_transforms_from_stats, lr_baseline_to_hr_zspace
 from sbgm.utils import extract_samples, get_model_string
 from sbgm.score_sampling import edm_sampler
 from sbgm.monitoring import (
@@ -83,116 +83,33 @@ def _repeat_to_M(x, M: int):
     return x1.repeat(*reps)
 
 def _build_back_transforms(cfg: dict):
-    """
-    Construct inverse transforms for HR target, generated field, and LR condition variables.
-
-    For the LR target variable (same name as the HR target), we mirror the
-    scaling configuration used during dataset construction:
-
-    - If dual_lr is False and lr_main_var_scale == "HR", the LR target was
-      scaled using HR (DANRA) stats, so we build its inverse using the HR
-      stats as well.
-
-    - In all other cases, we build the inverse using LR (ERA5) stats.
-
-    This ensures that "forward transform + back-transform" is self-consistent
-    for the LR target variable, so the recovered physical ERA5 field is the
-    same regardless of whether LR or HR statistics were used in the latent
-    space.
-    """
-    hr_var = cfg['highres']['variable']
-    hr_model = cfg['highres']['model']
-    lr_model = cfg['lowres']['model']
-
-    # Geometry / domain strings
     full_domain_dims_hr = cfg['highres'].get('full_domain_dims', None)
-    full_domain_dims_str_hr = (
-        f"{full_domain_dims_hr[0]}x{full_domain_dims_hr[1]}"
-        if full_domain_dims_hr is not None else "full_domain"
-    )
+    full_domain_dims_str_hr = f"{full_domain_dims_hr[0]}x{full_domain_dims_hr[1]}" if full_domain_dims_hr is not None else "full_domain"
     crop_region_hr = cfg['highres'].get('cutout_domains', None)
     crop_region_hr_str = '_'.join(map(str, crop_region_hr)) if crop_region_hr is not None else 'no_crop'
 
     full_domain_dims_lr = cfg['lowres'].get('full_domain_dims', None)
-    full_domain_dims_str_lr = (
-        f"{full_domain_dims_lr[0]}x{full_domain_dims_lr[1]}"
-        if full_domain_dims_lr is not None else "full_domain"
-    )
+    full_domain_dims_str_lr = f"{full_domain_dims_lr[0]}x{full_domain_dims_lr[1]}" if full_domain_dims_lr is not None else "full_domain"
     crop_region_lr = cfg['lowres'].get('cutout_domains', None)
     crop_region_lr_str = '_'.join(map(str, crop_region_lr)) if crop_region_lr is not None else 'no_crop'
 
-    split = cfg.get('transforms', {}).get('scaling_split', 'train')
-    stats_root = cfg['paths']['stats_load_dir']
-    hr_buffer_frac = cfg['highres'].get('buffer_frac', 0.0)
-    lr_buffer_frac = cfg['lowres'].get('buffer_frac', 0.0)
-    eps = cfg.get('transforms', {}).get('prcp_eps', 0.01)
-
-    lr_vars = cfg['lowres']['condition_variables']
-    lr_scaling_methods = cfg['lowres']['scaling_methods']
-    dual_lr = bool(cfg['lowres'].get('dual_lr', False))
-    lr_main_scale = str(cfg['lowres'].get('lr_main_var_scale', 'LR')).upper()
-
-    bt = {}
-
-    # --- HR / generated (share the same stats / space) ---
-    inv_hr = get_backtransforms_from_stats(
-        variable=hr_var,
-        model=hr_model,
-        domain_str=full_domain_dims_str_hr,
-        crop_region_str=crop_region_hr_str,
-        scaling_split=split,
-        transform_type=cfg['highres']['scaling_method'],
-        buffer_frac=hr_buffer_frac,
-        stats_file_path=stats_root,
-        eps=eps,
+    return build_back_transforms_from_stats(
+        hr_var=cfg['highres']['variable'],
+        hr_model=cfg['highres']['model'],
+        domain_str_hr=full_domain_dims_str_hr,
+        crop_region_str_hr=crop_region_hr_str,
+        hr_scaling_method=cfg['highres']['scaling_method'],
+        hr_buffer_frac=cfg['highres'].get('buffer_frac', 0.0),
+        lr_vars=cfg['lowres']['condition_variables'],
+        lr_model=cfg['lowres']['model'],
+        domain_str_lr=full_domain_dims_str_lr,
+        crop_region_str_lr=crop_region_lr_str,
+        lr_scaling_methods=cfg['lowres']['scaling_methods'],
+        lr_buffer_frac=cfg['lowres'].get('buffer_frac', 0.0),
+        split='train',  # match training.generate_and_plot_samples
+        stats_dir_root=cfg['paths']['stats_load_dir'],
+        eps=cfg['transforms'].get('prcp_eps', 0.01),
     )
-    bt[f"{hr_var}_hr"] = inv_hr
-    bt["generated"] = inv_hr  # Generated samples are in the same normalized space as HR
-
-    # --- LR condition variables ---
-    for cond, mth in zip(lr_vars, lr_scaling_methods):
-        # Decide which stats (HR vs LR) to use for this LR variable.
-        #
-        # For the LR *target* variable, the dataset can be configured to use
-        # HR stats (lr_main_var_scale == "HR"/"HR_LR") or LR stats ("LR").
-        # We mirror that choice here so the inverse matches the forward
-        # transform.
-        if (not dual_lr) and (cond == hr_var) and (lr_main_scale == "HR" or lr_main_scale == "HR_LR"):
-            # LR main channel was scaled with HR stats -> invert with HR stats
-            logger.info(f"\n[DEBUG] Building LR back-transform for target variable '{cond}' using HR stats (dual_lr={dual_lr}, lr_main_var_scale={lr_main_scale})\n")
-            model_for_stats = hr_model
-            domain_str = full_domain_dims_str_hr
-            crop_region_str = crop_region_hr_str
-            buffer_frac = hr_buffer_frac
-        else:
-            logger.info(f"\n[DEBUG] Building LR back-transform for variable '{cond}' using LR stats (dual_lr={dual_lr}, lr_main_var_scale={lr_main_scale})\n")
-
-            # NOTE: !!!!!! THIS IS A TEST !!!!!! - FORCE USE OF HR STATS FOR ALL LR VARS !!!!!!
-            model_for_stats = hr_model
-            domain_str = full_domain_dims_str_hr
-            crop_region_str = crop_region_hr_str
-            buffer_frac = hr_buffer_frac
-            # # Default: use LR stats (ERA5 domain)
-            # model_for_stats = lr_model
-            # domain_str = full_domain_dims_str_lr
-            # crop_region_str = crop_region_lr_str
-            # buffer_frac = lr_buffer_frac
-
-        inv_lr = get_backtransforms_from_stats(
-            variable=cond,
-            model=model_for_stats,
-            domain_str=domain_str,
-            crop_region_str=crop_region_str,
-            scaling_split=split,
-            transform_type=mth,
-            buffer_frac=buffer_frac,
-            stats_file_path=stats_root,
-            eps=eps,
-        )
-        bt[f"{cond}_lr"] = inv_lr
-
-    return bt
-
 
 
 class GenerationRunner:
