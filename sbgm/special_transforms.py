@@ -93,17 +93,39 @@ def build_back_transforms_from_stats(hr_var: str,
 
     # ---------- LR conditions --------------------------------------------
     for cond, mth in zip(lr_vars, lr_scaling_methods):
-        inv_lr = get_backtransforms_from_stats(variable=cond,
-                                              model=lr_model,
-                                              domain_str=domain_str_lr,
-                                              crop_region_str=crop_region_str_lr,
-                                              scaling_split=split,
-                                              transform_type=mth,
-                                              buffer_frac=lr_buffer_frac,
-                                              stats_file_path=stats_dir_root,
-                                              eps=eps
-                                              )
+        # Default LR inverse (LR-statistics space)
+        inv_lr = get_backtransforms_from_stats(
+            variable=cond,
+            model=lr_model,
+            domain_str=domain_str_lr,
+            crop_region_str=crop_region_str_lr,
+            scaling_split=split,
+            transform_type=mth,
+            buffer_frac=lr_buffer_frac,
+            stats_file_path=stats_dir_root,
+            eps=eps
+        )
+
+        # Backward-compatible key
         bt[f"{cond}_lr"] = inv_lr
+
+        # Explicit alias for dual-LR
+        bt[f"{cond}_lr_lrspace"] = inv_lr
+
+        # If LR condition equals HR target var, also provide HR-space inverse
+        if cond == hr_var:
+            inv_lr_hrspace = get_backtransforms_from_stats(
+                variable=cond,
+                model=hr_model,
+                domain_str=domain_str_hr,
+                crop_region_str=crop_region_str_hr,
+                scaling_split=split,
+                transform_type=hr_scaling_method,
+                buffer_frac=hr_buffer_frac,
+                stats_file_path=stats_dir_root,
+                eps=eps
+            )
+            bt[f"{cond}_lr_hrspace"] = inv_lr_hrspace
 
     return bt
 
@@ -501,17 +523,14 @@ class PrcpLogTransform(object):
         
         # Scale the log-transformed data to have mean 0 and std 1
         elif self.scale_type == 'log_zscore':
-            # Standardize the log-transformed data
-            mu = self.glob_mean_log
-            sigma = self.glob_std_log
-            # Make sure sigma is not zero (and torch tensor for broadcasting)
-            sigma = torch.as_tensor(sigma, dtype=torch.float32, device=log_sample.device)
-            sigma = torch.clamp(sigma, min=EPS) # Avoid division by zero #
-
-            if mu is None or sigma is None:
+            if self.glob_mean_log is None or self.glob_std_log is None:
                 raise ValueError("Global mean and standard deviation must not be None for 'log_zscore' scaling.")
-            
-            log_sample = (log_sample - mu) / (sigma)  
+
+            mu = torch.as_tensor(self.glob_mean_log, dtype=log_sample.dtype, device=log_sample.device)
+            sigma = torch.as_tensor(self.glob_std_log, dtype=log_sample.dtype, device=log_sample.device)
+            sigma = torch.clamp(sigma, min=EPS)
+
+            log_sample = (log_sample - mu) / sigma
 
         elif self.scale_type == 'log_minus1_1':
             if self.glob_min_log is None or self.glob_max_log is None:
@@ -614,13 +633,14 @@ class PrcpLogBackTransform(object):
             log_sample = sample * (self.glob_max_log - self.glob_min_log) + self.glob_min_log
         
         elif self.scale_type == 'log_zscore':
-            sigma = torch.as_tensor(self.glob_std_log, dtype=sample.dtype, device=sample.device)
-            sigma = torch.clamp(sigma, min=EPS) # Avoid division by zero # type: ignore
-            mu = torch.as_tensor(self.glob_mean_log, dtype=sample.dtype, device=sample.device)
-            if mu is None or sigma is None:
+            if self.glob_mean_log is None or self.glob_std_log is None:
                 raise ValueError("Global mean and standard deviation must not be None for 'log_zscore' back-transform.")
-            
-            log_sample = (sample * (sigma)) + mu
+
+            sigma = torch.as_tensor(self.glob_std_log, dtype=sample.dtype, device=sample.device)
+            sigma = torch.clamp(sigma, min=EPS)
+            mu = torch.as_tensor(self.glob_mean_log, dtype=sample.dtype, device=sample.device)
+
+            log_sample = (sample * sigma) + mu
 
         elif self.scale_type == 'log_minus1_1':
             if self.glob_max_log is None or self.glob_min_log is None:

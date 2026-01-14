@@ -66,6 +66,69 @@ class TrainingPipeline_general:
         To run through the training batches in one epoch.
     '''
 
+    @staticmethod
+    def _build_cond_channel_map_cfg(lr_vars: list, hr_var: str, dual_lr: bool, lr_main_var_scale: str) -> dict:
+        """
+        Mirror the dataset's LR cond channel layout in training-side logic.
+
+        Conventions:
+          - If dual_lr and target variable exists in lr_vars: that variable expands to 2 channels:
+                * "main"    : scaled with lr_main_var_scale (HR/LR/HR_LR)
+                * "lr_only" : scaled with LR stats
+          - All other LR variables are 1 channel ("main")
+        """
+        def _space_tag(scale: str) -> str:
+            s = str(scale).upper()
+            if s == "LR":
+                return "lr_stats"
+            if s == "HR":
+                return "hr_stats"
+            if s in ("HR_LR", "LR_HR", "COMBINED", "BOTH"):
+                return "combo_stats"
+            return "lr_stats"
+
+        order = list(lr_vars)
+        slices = {}
+        spaces = {}
+
+        # Identify main LR condition (prefer exact match; fallback aliases)
+        main_lr_cond = None
+        if hr_var in order:
+            main_lr_cond = hr_var
+        else:
+            alias_pairs = [('prcp', 'tp'), ('tp', 'prcp'), ('temp', 't2m'), ('t2m', 'temp')]
+            for hr_name, lr_alias in alias_pairs:
+                if hr_var == hr_name and lr_alias in order:
+                    main_lr_cond = lr_alias
+                    break
+
+        c = 0
+        for cond in order:
+            if bool(dual_lr) and (main_lr_cond is not None) and (cond == main_lr_cond):
+                slices[cond] = {"main": (c, c + 1), "lr_only": (c + 1, c + 2)}
+                spaces[cond] = {"main": _space_tag(lr_main_var_scale), "lr_only": "lr_stats"}
+                c += 2
+            else:
+                slices[cond] = {"main": (c, c + 1)}
+                spaces[cond] = {"main": "lr_stats"}
+                c += 1
+
+        return {"order": order, "main_lr_cond": main_lr_cond, "slices": slices, "spaces": spaces, "n_channels_total": c}
+
+    def _cond_slice(self, var: str, kind: str = "main") -> tuple[int, int]:
+        """
+        Return (start, end) channel slice indices for a given LR variable and kind.
+        kind: "main" or "lr_only" (only exists for the main LR var when dual_lr=True).
+        """
+        cmap = getattr(self, "cond_channel_map_cfg", None)
+        if cmap is None:
+            raise RuntimeError("cond_channel_map_cfg is not initialized.")
+        if var not in cmap["slices"]:
+            raise KeyError(f"Variable '{var}' not found in cond_channel_map_cfg slices. Available: {list(cmap['slices'].keys())}")
+        if kind not in cmap["slices"][var]:
+            raise KeyError(f"Kind '{kind}' not available for var '{var}'. Available: {list(cmap['slices'][var].keys())}")
+        return cmap["slices"][var][kind]
+
     def __init__(self,
                  model,
                  marginal_prob_std_fn,
@@ -115,6 +178,22 @@ class TrainingPipeline_general:
 
         self.lr_vars = cfg['lowres']['condition_variables']
         self.lr_scaling_methods = cfg['lowres']['scaling_methods']
+
+        # Training-side mirror of the dataset LR-channel layout (critical for dual_lr and multi-var conditioning)
+        self.cond_channel_map_cfg = self._build_cond_channel_map_cfg(
+            lr_vars=self.lr_vars,
+            hr_var=self.hr_var,
+            dual_lr=bool(cfg['lowres'].get('dual_lr', False)),
+            lr_main_var_scale=str(cfg['lowres'].get('lr_main_var_scale', 'LR')),
+        )
+        logger.info(
+            "[train] LR channel layout (cfg mirror):\n"
+            f"  lr_vars            : {self.cond_channel_map_cfg['order']}\n"
+            f"  main_lr_cond       : {self.cond_channel_map_cfg['main_lr_cond']}\n"
+            f"  slices             : {self.cond_channel_map_cfg['slices']}\n"
+            f"  spaces             : {self.cond_channel_map_cfg['spaces']}\n"
+            f"  n_channels_total   : {self.cond_channel_map_cfg['n_channels_total']}"
+        )        
         self.full_domain_dims_lr = cfg['lowres']['full_domain_dims']
         self.crop_region_lr = cfg['lowres']['cutout_domains']
 
@@ -129,6 +208,7 @@ class TrainingPipeline_general:
         if self.hr_var in self.lr_vars:
             idx_t = self.lr_vars.index(self.hr_var)
             self._lr_method_for_target = self.lr_scaling_methods[idx_t]
+            logger.info(f"Determined LR scaling method for target variable '{self.hr_var}': {self._lr_method_for_target}")
         else:
             self._lr_method_for_target = None  # Target variable not in LR vars
             logger.warning(f"HR target variable '{self.hr_var}' not found in LR condition variables {self.lr_vars}. Cannot determine LR scaling method for target - residuals may not be aligned.")
@@ -336,10 +416,8 @@ class TrainingPipeline_general:
         if self.rg_enabled:
             # Determine input channel count from config
             c_in = 0
-            # LR condition channels (already upsampled to HR in dataset)
-            lr_c = len(self.lr_vars)
-            if bool(self.cfg['lowres'].get('dual_lr', False)) and (self.hr_var in self.lr_vars):
-                lr_c += 1  # Add second channel for dual LR input
+            # LR condition channels (already upsampled to HR in dataset) — respect dual-LR expansion
+            lr_c = int(self.cond_channel_map_cfg["n_channels_total"])
             c_in += lr_c
             # Optional static inputs
             if self.rg_include_lsm:
@@ -390,33 +468,65 @@ class TrainingPipeline_general:
         if cond_images is None:
             raise ValueError("cond_images is None, cannot extract LR baseline for residual prediction.")
         
-        cond_vars = self.cfg['lowres']['condition_variables']
         target_var = self.hr_var
-        if target_var not in cond_vars:
-            raise ValueError(f"Target variable '{target_var}' not found in condition variables {cond_vars}, cannot extract LR baseline for residual prediction.")
         
-        idx = cond_vars.index(target_var)
-        if cond_images.shape[1] <= idx:
-            raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx} for variable '{target_var}'.")
-        lr_in_lr_space = cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
+        # Determine which LR var name matches the HR target (supports aliases like prcp↔tp, temp↔t2m)
+        cmap = self.cond_channel_map_cfg
+        main_lr_cond = cmap.get("main_lr_cond", None)
+        if main_lr_cond is None:
+            raise ValueError(
+                f"Could not identify a main LR condition matching HR target '{target_var}' within {self.lr_vars}. "
+                "Cannot extract LR baseline for residual prediction."
+            )
 
-        if self.cfg.get('edm', {}).get('baseline_space', 'hr') == 'lr':
-            logger.info(f"baseline_space requested is 'lr'; using LR baseline channel as-is in LR space for residual prediction.")
-            return lr_in_lr_space  # Already in LR space, just upsampled to HR size
-        
-        # Else, need to convert from LR space to HR space 
-        
-        # Find the LR scaling method corresponding to baseline channel
+        # Choose which baseline channel to use:
+        #   - If baseline_space == 'lr' → prefer LR-stats channel (lr_only when dual_lr)
+        #   - Else (hr/auto) → if a HR-stats-scaled main channel exists, prefer it (no conversion needed),
+        #                     otherwise use LR-stats channel and convert to HR space.
+        baseline_space = str(self.cfg.get('edm', {}).get('baseline_space', 'hr')).lower()
+        dual_lr = bool(self.cfg.get('lowres', {}).get('dual_lr', False))
+        lr_main_var_scale = str(self.cfg.get('lowres', {}).get('lr_main_var_scale', 'LR')).upper()
+
+        use_kind = "main"
+        if dual_lr and (main_lr_cond in cmap["slices"]) and ("lr_only" in cmap["slices"][main_lr_cond]):
+            if baseline_space == "lr":
+                use_kind = "lr_only"
+            else:
+                # Prefer HR-scaled main channel when requested and configured
+                if lr_main_var_scale == "HR" and cmap["spaces"][main_lr_cond].get("main", "") == "hr_stats":
+                    use_kind = "main"
+                else:
+                    use_kind = "lr_only"
+
+        s0, s1 = self._cond_slice(main_lr_cond, kind=use_kind)
+        if cond_images.shape[1] < s1:
+            raise ValueError(
+                f"cond_images has shape {tuple(cond_images.shape)} but needs at least {s1} channels to extract "
+                f"baseline slice for '{main_lr_cond}:{use_kind}' = ({s0},{s1})."
+            )
+
+        lr_chan = cond_images[:, s0:s1, :, :]  # [B, 1, H, W] (already upsampled to HR size)
+        logger.info(f"[baseline] extracted LR baseline from cond_images var='{main_lr_cond}', kind='{use_kind}', baseline_space='{baseline_space}'")
+
+        # If baseline_space is explicitly 'lr', return as-is (caller will treat it as LR-space baseline)
+        if baseline_space == 'lr':
+            logger.info("[baseline] baseline_space='lr' → returning baseline channel as-is (LR-space / already-upsampled).")
+            return lr_chan
+
+        # If the extracted baseline channel is already HR-stats normalized, do NOT convert again.
+        # This happens for dual-LR when lr_main_var_scale='HR' and we picked kind='main'.
+        space_tag = self.cond_channel_map_cfg["spaces"][main_lr_cond].get(use_kind, "lr_stats")
+        if space_tag == "hr_stats":
+            logger.info("[baseline] baseline channel is already in HR-stats space → returning as-is (no LR→HR conversion).")
+            return lr_chan
+
+        # Else, convert LR-stats-normalized baseline to HR-stats space via lr_baseline_to_hr_zspace
         lr_method_for_baseline = self._lr_method_for_target 
-
-        # Ensure lr_method_for_baseline is a string
         if lr_method_for_baseline is None:
             raise ValueError("LR scaling method for baseline is None. Cannot proceed with lr_baseline_to_hr_zspace. Please check your configuration.")
 
-        # logger.info(f"Converting LR baseline channel from LR space to HR space using lr_baseline_to_hr_zspace with LR method '{lr_method_for_baseline}' and HR method '{self.hr_scaling_method}'.")
-        # Remap using transform/back-transform stack
         lr_in_hr_space = lr_baseline_to_hr_zspace(
-            lr_chan_norm=lr_in_lr_space,
+            lr_chan_norm=lr_chan,
             # LR meta
             lr_variable=self.hr_var,
             lr_model=self.cfg['lowres']['model'],
@@ -435,7 +545,6 @@ class TrainingPipeline_general:
             hr_scaling_method=self.hr_scaling_method,
             hr_buffer_frac=self.cfg['highres'].get('buffer_frac', 0.0),
             hr_stats_dir_root=self.cfg['paths']['stats_load_dir'],
-
             eps=self.global_prcp_eps
         )
 
@@ -714,14 +823,45 @@ class TrainingPipeline_general:
 
             hr = x
             lr_hr = lr_ups_baseline
-            # Get the lr_lr as the cond_image that corresponds to the hr_var, if available
-            if cond_images is not None and (self.hr_var in self.cfg['lowres']['condition_variables']):
-                idx_hr_in_cond = self.cfg['lowres']['condition_variables'].index(self.hr_var)
-                lr_lr = cond_images[:, idx_hr_in_cond:idx_hr_in_cond+1, :, :]  # [B, 1, H, W]
-            else:
-                lr_lr = None
+
+            # Get an LR condition channel corresponding to the HR target variable, robust to dual-LR.
+            # This is used only for diagnostics/monitoring (not required for training unless you enable residual prediction).
+            lr_lr = None
+            if cond_images is not None:
+                try:
+                    cmap = getattr(self, "cond_channel_map_cfg", None)
+                    main_lr_cond = None if cmap is None else cmap.get("main_lr_cond", None)
+
+                    if (cmap is not None) and (main_lr_cond is not None) and (main_lr_cond in cmap["slices"]):
+                        dual_lr = bool(self.cfg.get("lowres", {}).get("dual_lr", False))
+                        # Choose which LR channel to treat as "lr_lr" for diagnostics:
+                        #   - If dual LR: follow visualization.plot_dual_lr_channel (0->main, 1->lr_only)
+                        #   - Else: use the single "main" channel
+                        kind = "main"
+                        if dual_lr and ("lr_only" in cmap["slices"][main_lr_cond]):
+                            try:
+                                plot_ch = int(self.cfg.get("visualization", {}).get("plot_dual_lr_channel", 0))
+                            except Exception:
+                                plot_ch = 0
+                            kind = "lr_only" if plot_ch == 1 else "main"
+
+                        s0, s1 = self._cond_slice(main_lr_cond, kind=kind)
+                        if cond_images.shape[1] >= s1:
+                            lr_lr = cond_images[:, s0:s1, :, :]  # [B, 1, H, W]
+                        else:
+                            lr_lr = None
+                    else:
+                        lr_lr = None
+                except Exception as e:
+                    # Diagnostics-only; do not fail training for this.
+                    if (idx == 0) and (current_epoch == 1):
+                        logger.warning(f"[train] Could not extract lr_lr diagnostic slice from cond_images. Error: {e}")
+                    lr_lr = None
 
             residual = hr - lr_hr if (hr is not None and lr_hr is not None) else None
+            if (idx == 0) and (current_epoch == 1) and (self.edm_enabled and not self.edm_predict_residual):
+                logger.info("[train] edm.predict_residual=False → lr_ups_baseline not built; residual diagnostics will be None (expected).") 
+
             if do_log and (current_epoch % every == 0):
                 tensor_stats(hr, "train/hr_norm")
                 if lr_hr is not None:
@@ -1010,6 +1150,9 @@ class TrainingPipeline_general:
             if edm_on and self.edm_predict_residual:
                 lr_ups_baseline = self._build_lr_ups_baseline(cond_images)  # [B, 1, H, W]
 
+            if (idx == 0) and (current_epoch == 1) and edm_on and (not self.edm_predict_residual):
+                logger.info("[val] edm.predict_residual=False → lr_ups_baseline not built (expected).")
+
             # === Optional: gate-based diagnostics and (optionally) reweighting in validation ===
             pixel_weight_map = None
             wet_logits_val = None
@@ -1135,7 +1278,7 @@ class TrainingPipeline_general:
                 monitor_cfg = self.cfg.get('monitoring', {})
                 log_every = monitor_cfg.get('edm_metrics_every', 50)
                 if edm_on and log_every > 0 and (idx % log_every == 0):
-                    metrics = in_loop_metrics(loss_obj=self.loss_fn, model=self.model,
+                    metrics = in_loop_metrics(loss_obj=self.loss_fn, model=model_eval,
                         x0=x, y=y, cond_img=cond_images, lsm_cond=lsm, topo_cond=topo,
                         lr_ups=lr_ups_baseline, eval_land_only=self.eval_land_only)
                     if verbose and metrics is not None:
@@ -1173,7 +1316,6 @@ class TrainingPipeline_general:
                             cfg,
                             epoch,
                           ):
-        
         # Load the best model (EMA or network) from checkpoint WITHOUT altering training weights
         model_sd_backup = copy.deepcopy(self.model.state_dict())  # Backup current model state dict
 
@@ -1206,8 +1348,7 @@ class TrainingPipeline_general:
         if edm_on:
             sampler_edm = edm_sampler
             sampler = None
-            logger.info("→ Sampling using EDM sampler...")
-            
+            logger.info("→ Sampling using EDM sampler...") 
         else:
             sampler_edm = None
             if cfg['sampler']['sampler_type'] == 'pc_sampler':
@@ -1218,13 +1359,21 @@ class TrainingPipeline_general:
                 sampler = ode_sampler
             else:
                 raise ValueError(f"Sampler type {cfg['sampler']['sampler_type']} not recognized. Please choose from 'pc_sampler', 'Euler_Maruyama_sampler', or 'ode_sampler'.")
-        
-        
+
         full_domain_dims_str_hr = f"{self.full_domain_dims_hr[0]}x{self.full_domain_dims_hr[1]}" if self.full_domain_dims_hr is not None else "full_domain"
         full_domain_dims_str_lr = f"{self.full_domain_dims_lr[0]}x{self.full_domain_dims_lr[1]}" if self.full_domain_dims_lr is not None else "full_domain"
         crop_region_hr_str = '_'.join(map(str, self.crop_region_hr)) if self.crop_region_hr is not None else "no_crop"
         crop_region_lr_str = '_'.join(map(str, self.crop_region_lr)) if self.crop_region_lr is not None else "no_crop"
-        
+
+        # Use the same split as used for scaling statistics (avoid hardcoding "train")
+        scaling_split = str(cfg.get('transforms', {}).get('scaling_split', 'train'))
+        if epoch == 1:
+            try:
+                logger.info(f"[gen] Using scaling_split='{scaling_split}' for back-transforms.")
+                if hasattr(self, "cond_channel_map_cfg"):
+                    logger.info(f"[gen] LR channel map (cfg mirror): {self.cond_channel_map_cfg}")
+            except Exception:
+                pass
 
         back_transforms = build_back_transforms_from_stats(
                             hr_var              = cfg['highres']['variable'],
@@ -1239,10 +1388,12 @@ class TrainingPipeline_general:
                             crop_region_str_lr  = crop_region_lr_str,
                             lr_scaling_methods  = cfg['lowres']['scaling_methods'],
                             lr_buffer_frac      = cfg['lowres']['buffer_frac'] if 'buffer_frac' in cfg['lowres'] else 0.0,
-                            split               = 'train',
+                            split               = scaling_split,
                             stats_dir_root      = cfg['paths']['stats_load_dir'],
                             eps=self.global_prcp_eps
                             )
+        
+        logger.info(f"[debug] back-transforms keys: {sorted(list(back_transforms.keys()))}")
 
         # Setup units and cmaps
         hr_unit, lr_units = get_units(cfg)

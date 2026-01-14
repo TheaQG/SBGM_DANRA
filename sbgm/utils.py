@@ -368,14 +368,17 @@ def extract_samples(samples, device=None):
             if C != 1:
                 raise ValueError(f"[extract_samples] categorical y must have shape [B,1]; got {classifier.shape}.")
 
-    # LR conditions: if multiple, stack along channel dimensio
+    # LR conditions: if multiple, stack along channel dimension
     lr_keys = [k for k in samples.keys() if k.endswith('_lr') and not k.endswith('_original')]
     if len(lr_keys) == 0:
         lr_img = None
     elif len(lr_keys) == 1:
         lr_img = samples[lr_keys[0]].to(device, non_blocking=True).float()
     else:
-        lr_list = [samples[k].to(device, non_blocking=True).float() for k in sorted(lr_keys)]
+        # IMPORTANT: keep the LR channel order consistent with the dataset/cfg construction.
+        # Do NOT sort keys here; sorting can permute channels (e.g. prcp_lr, temp_lr) and
+        # break downstream logic that assumes cfg['lowres']['condition_variables'] order.
+        lr_list = [samples[k].to(device, non_blocking=True).float() for k in lr_keys]
         lr_img = torch.cat(lr_list, dim=1)
 
     # HR mask (LSM)

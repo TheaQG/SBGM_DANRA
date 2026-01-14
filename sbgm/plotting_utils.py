@@ -696,13 +696,72 @@ def plot_samples_and_generated(
                 logger.info(f"No inverse transformation found for key: {k}")
         return arr
     
+    def _lr_base_name_from_key(k: str) -> str:
+        # "prcp_lr" -> "prcp"; "msl_lr_original" -> "msl"
+        if k.endswith("_lr_original"):
+            return k[:-12]
+        if k.endswith("_lr"):
+            return k[:-3]
+        return k
+
+    def maybe_inverse_dual_lr(key: str, arr, prefer_channel: int = 0, verbose: bool = False):
+        """
+        Dual-LR safe inverse transform:
+          - If arr is (2,H,W) we pick the plotted channel first and apply the correct inverse transform
+            key for that channel if available.
+          - For non-dual tensors, fall back to maybe_inverse(key, ...).
+        """
+        if not (transform_back_bf_plot and back_transforms):
+            return arr
+
+        # Only special-case LR keys (others use the regular path)
+        if not (key.endswith("_lr") or key.endswith("_lr_original")):
+            return maybe_inverse(key, arr, verbose=verbose)
+
+        a = to_numpy(arr)
+
+        # If this is a dual-LR stacked tensor, pick the channel first
+        if a.ndim == 3 and a.shape[0] == 2:
+            ch = int(prefer_channel)
+            ch = 0 if ch not in (0, 1) else ch
+            a2 = a[ch, :, :]
+            base = _lr_base_name_from_key(key)
+
+            # Determine which stats-space ch0 represents (config-dependent)
+            dual_lr = bool(cfg.get("lowres", {}).get("dual_lr", False))
+            lr_main_scale = str(cfg.get("lowres", {}).get("lr_main_var_scale", "LR")).upper()
+
+            if dual_lr:
+                # Convention: ch0 = "main", ch1 = "lr_only"
+                # If main is HR-scaled -> prefer *_lr_hrspace when available
+                if ch == 0 and lr_main_scale == "HR":
+                    inv_key_candidates = [f"{base}_lr_hrspace", f"{base}_lrspace", f"{base}_lr", key]
+                else:
+                    inv_key_candidates = [f"{base}_lr_lrspace", f"{base}_lrspace", f"{base}_lr", key]
+            else:
+                inv_key_candidates = [f"{base}_lr", key]
+
+            for kk in inv_key_candidates:
+                if kk in back_transforms and callable(back_transforms[kk]):
+                    if verbose:
+                        logger.info(f"[plot] Applying inverse transform for '{key}' using '{kk}' (channel={ch}).")
+                    return back_transforms[kk](a2)
+
+            # Fallback: no inverse available for the chosen channel
+            if verbose:
+                logger.info(f"[plot] No inverse transform found for '{key}' (channel={ch}); returning scaled values.")
+            return a2
+
+        # Non-dual case: apply inverse directly if available
+        return maybe_inverse(key, a, verbose=verbose)
+
     def _prep_for_limits(sample_dict, key):
         """Prep image like in plotting (inverse, mask, squeeze) for consistent vlim calc"""
         if key is None or key not in sample_dict or sample_dict[key] is None:
             return None
         arr = to_numpy(sample_dict[key]).squeeze()
         arr = _squeeze_geo_value(arr, key)
-        arr = maybe_inverse(key, arr)
+        arr = maybe_inverse_dual_lr(key, arr, prefer_channel=plot_dual_lr_channel)
         if not show_ocean and key in {gen_key, hr_key, f"{hr_key}_original"}:
             if "lsm_hr" in sample_dict and sample_dict["lsm_hr"] is not None:
                 mask = to_numpy(sample_dict["lsm_hr"]).squeeze()
@@ -861,7 +920,7 @@ def plot_samples_and_generated(
             # ========= Retrieve image data =========
             img_data = to_numpy(sample[key]).squeeze()
             img_data = _squeeze_geo_value(img_data, key)
-            img_data = maybe_inverse(key, img_data)
+            img_data = maybe_inverse_dual_lr(key, img_data, prefer_channel=plot_dual_lr_channel)
 
             # For HR images mask out ocean using lsm_hr if needed. TODO: Allow user to specify mask key?
             if not show_ocean and key in {gen_key, hr_key, f"{hr_key}_original"}:
@@ -921,7 +980,7 @@ def plot_samples_and_generated(
                         titles = {
                             gen_key: "Generated",
                             hr_key: f"HR {hr_model}, {var}\nback-transformed [{hr_units}]",
-                            **{k: f"LR {lr_model} ({k[:-3]})\nback-transformed [{lr_units[lr_keys.index(k[:-3])] if k[:-3] in lr_keys else 'unknown'}]" for k in lr_keys},
+                            **{k: f"LR {lr_model} ({k[:-3]})\nback-transformed [{lr_units[cfg['lowres']['condition_variables'].index(k[:-3])] if (k[:-3] in cfg.get('lowres', {}).get('condition_variables', [])) else 'unknown'}]" for k in lr_keys},
                             **{k: f"LR {lr_model} ({k[:-12]})\nscaled" for k in original_keys},
                         }
                     else:
@@ -929,7 +988,7 @@ def plot_samples_and_generated(
                             gen_key: "Generated",
                             hr_key: f"HR {hr_model}, {var}\nscaled",
                             **{k: f"LR {lr_model} ({k[:-3]})\nscaled" for k in lr_keys},
-                            **{k: f"LR {lr_model} ({k[:-12]})\noriginal [{lr_units[lr_keys.index(k[:-12])] if k[:-12] in lr_keys else 'unknown'}]" for k in original_keys},
+                            **{k: f"LR {lr_model} ({k[:-12]})\noriginal [{lr_units[cfg['lowres']['condition_variables'].index(k[:-12])] if (k[:-12] in cfg.get('lowres', {}).get('condition_variables', [])) else 'unknown'}]" for k in original_keys},
                         }
                 else:
                     titles = {

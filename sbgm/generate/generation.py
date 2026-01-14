@@ -59,18 +59,25 @@ class GenerationConfig:
 
 
 def _save_npz(path: Path, **arrays):
-    """Save arrays to npz at path, creating parent dirs if needed."""
+    """Save arrays to npz at path, creating parent dirs if needed.
+
+    Important: do NOT write None values into npz (they become dtype=object arrays).
+    Also ensure torch.Tensors are converted to numpy arrays.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    out = {}
+
+    out: dict[str, np.ndarray] = {}
     for k, v in arrays.items():
         if v is None:
-            out[k] = None
+            # Skip None to avoid dtype=object arrays inside the npz
+            continue
+        if isinstance(v, torch.Tensor):
+            out[k] = v.detach().cpu().numpy()
         elif isinstance(v, np.ndarray):
             out[k] = v
-        elif isinstance(v, torch.Tensor):
-            out[k] = v.detach().float().cpu().numpy()
         else:
-            out[k] = np.array(v)
+            out[k] = np.asarray(v)
+
     np.savez_compressed(path, **out)
 
 def _repeat_to_M(x, M: int):
@@ -155,7 +162,6 @@ class GenerationRunner:
         else:
             self._lr_method_for_target = None  # Target variable not in LR vars
             logger.warning(f"HR target variable '{self.hr_var}' not found in LR condition variables {self.lr_vars}. Cannot determine LR scaling method for target - residuals may not be aligned.")
-        
 
         # cutout stationarity control + optional static LSM for evaluation
         # Support both plain dict configs and OmegaConf-style DictConfig.
@@ -263,6 +269,9 @@ class GenerationRunner:
             self.bt_lr_target = None
             logger.warning(f"HR target variable '{self.hr_var}' not found in LR condition variables {self.lr_vars}. Cannot build LR back-transform for target variable.")
         
+        self.bt_lr_lrspace = self.back_transforms.get(f"{self.hr_var}_lr_lrspace") or self.back_transforms.get(f"{self.hr_var}_lr")
+        self.bt_lr_hrspace = self.back_transforms.get(f"{self.hr_var}_lr_hrspace")
+
         # sampler selection
         if bool(cfg.get('edm', {}).get('enabled', False)) or self.gen_config.use_edm:
             self._sampler_kind = 'edm'
@@ -365,64 +374,148 @@ class GenerationRunner:
         return self._lsm_static
     
     @torch.no_grad()
-    def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None):
-        """
-            Extract LR baseline channel (same variable as HR target) from cond_images and upsample to HR resolution.
-            Ensure it is expressed in HR z-space (or HR min-max space) before using for residual EDM.
-            Returns [B, 1, H, W] or raises if unavailable when predict_residual is True.
+    @torch.no_grad()
+    def _build_lr_ups_baseline(self, cond_images: torch.Tensor | None) -> torch.Tensor:
+        """Build the LR upsampled baseline used for residual prediction.
+
+        This MUST be aligned with the dataset channel layout (see `_build_cond_channel_map` in `data_modules.py`)
+        and with the logic used in `run()` when extracting/saving LR channels.
+
+        Returns:
+            Tensor [B,1,H,W] in the requested baseline_space:
+              - baseline_space='lr'   -> LR-space (normalized with LR stats)
+              - baseline_space='hr'   -> HR-space (normalized with HR stats)
+              - baseline_space='auto' -> prefer HR-space if available, else convert LR->HR
         """
         if cond_images is None:
             raise ValueError("cond_images is None, cannot extract LR baseline for residual prediction.")
-        
-        cond_vars = self.cfg['lowres']['condition_variables']
+
+        # Config
         target_var = self.hr_var
+        cond_vars = list(self.cfg.get('lowres', {}).get('condition_variables', []))
         if target_var not in cond_vars:
-            raise ValueError(f"Target variable '{target_var}' not found in condition variables {cond_vars}, cannot extract LR baseline for residual prediction.")
+            raise ValueError(
+                f"Target variable '{target_var}' not found in condition variables {cond_vars}, "
+                "cannot extract LR baseline for residual prediction."
+            )
+
+        dual_lr = bool(self.cfg.get('lowres', {}).get('dual_lr', False))
+        main_scale = str(self.cfg.get('lowres', {}).get('lr_main_var_scale', 'LR')).upper()
+        baseline_space = str(self.cfg.get('edm', {}).get('baseline_space', 'hr')).lower()
         
-        idx = cond_vars.index(target_var)
-        if cond_images.shape[1] <= idx:
-            raise ValueError(f"cond_images has shape {cond_images.shape}, cannot extract channel index {idx} for variable '{target_var}'.")
-        lr_in_lr_space = cond_images[:, idx:idx+1, :, :]  # [B, 1, h, w] - cond images already upsampled to HR size
+        # Reconstruct the expected channel indices deterministically (mirrors `_build_cond_channel_map`)
+        c = 0
+        target_main_idx = None
+        target_lronly_idx = None
+        for cond in cond_vars:
+            if dual_lr and (cond == target_var):
+                target_main_idx = c
+                target_lronly_idx = c + 1
+                c += 2
+            else:
+                if cond == target_var:
+                    target_main_idx = c
+                c += 1
 
-        if self.cfg.get('edm', {}).get('baseline_space', 'hr') == 'lr':
-            logger.info(f"baseline_space requested is 'lr'; using LR baseline channel as-is in LR space for residual prediction.")
-            return lr_in_lr_space  # Already in LR space, just upsampled to HR size
+        if target_main_idx is None:
+            raise ValueError(
+                f"Could not determine baseline channel index for target '{target_var}'. "
+                f"cond_vars={cond_vars}, dual_lr={dual_lr}"
+            )
+        if cond_images.shape[1] <= target_main_idx:
+            raise ValueError(
+                f"cond_images has shape {tuple(cond_images.shape)}, but needs channel index {target_main_idx} "
+                f"for target '{target_var}'."
+            )
         
-        # Find the LR scaling method corresponding to baseline channel
-        lr_method_for_baseline = self._lr_method_for_target 
+        # Slice candidate channels
+        main_chan = cond_images[:, target_main_idx:target_main_idx+1, :, :]  # [B,1,H,W]
+        lronly_chan = None
+        if target_lronly_idx is not None and cond_images.shape[1] > target_lronly_idx:
+            lronly_chan = cond_images[:, target_lronly_idx:target_lronly_idx+1, :, :]
+        # Determine what "space" the main channel lives in
+        # - if lr_main_var_scale == 'LR' -> main is LR-space
+        # - else ('HR', 'HR_LR', ...)    -> main is HR-space
+        main_is_lrspace = (main_scale == 'LR')
 
-        # Ensure lr_method_for_baseline is a string
-        if lr_method_for_baseline is None:
-            raise ValueError("LR scaling method for baseline is None. Cannot proceed with lr_baseline_to_hr_zspace. Please check your configuration.")
+        # Pick an LR-space candidate (needed for baseline_space='lr' and for LR->HR conversion)
+        lrspace_chan = None
+        if lronly_chan is not None:
+            # In dual-LR, the lr_only channel is always LR-space by definition
+            lrspace_chan = lronly_chan
+        elif main_is_lrspace:
+            lrspace_chan = main_chan
 
-        # logger.info(f"Converting LR baseline channel from LR space to HR space using lr_baseline_to_hr_zspace with LR method '{lr_method_for_baseline}' and HR method '{self.hr_scaling_method}'.")
-        # Remap using transform/back-transform stack
-        lr_in_hr_space = lr_baseline_to_hr_zspace(
-            lr_chan_norm=lr_in_lr_space,
-            # LR meta
-            lr_variable=self.hr_var,
-            lr_model=self.cfg['lowres']['model'],
-            lr_domain_str=self._dom_lr_str,
-            lr_crop_region_str=self._crop_lr_str,
-            lr_split=self.cfg['transforms'].get('scaling_split', 'train'),
-            lr_scaling_method=lr_method_for_baseline,
-            lr_buffer_frac=self.cfg['lowres'].get('buffer_frac', 0.0),
-            lr_stats_dir_root=self.cfg['paths']['stats_load_dir'],
-            # HR meta
-            hr_variable=self.hr_var,
-            hr_model=self.cfg['highres']['model'],
-            hr_domain_str=self._dom_hr_str,
-            hr_crop_region_str=self._crop_hr_str,
-            hr_split=self.cfg['transforms'].get('scaling_split', 'train'),
-            hr_scaling_method=self.hr_scaling_method,
-            hr_buffer_frac=self.cfg['highres'].get('buffer_frac', 0.0),
-            hr_stats_dir_root=self.cfg['paths']['stats_load_dir'],
+        # Pick an HR-space candidate (needed for baseline_space='hr'/'auto' when available)
+        hrspace_chan = None
+        if (not main_is_lrspace):
+            hrspace_chan = main_chan
 
-            eps=self.global_prcp_eps
-        )
+        # baseline_space == 'lr' -> must return LR-space (no conversion)
+        if baseline_space == 'lr':
+            if lrspace_chan is None:
+                raise ValueError(
+                    f"baseline_space='lr' but no LR-space baseline channel exists for target '{target_var}'. "
+                    f"dual_lr={dual_lr}, lr_main_var_scale={main_scale}."
+                )
+            logger.info("[generation] lr_ups baseline: using LR-space channel (baseline_space='lr').")
+            return lrspace_chan
 
-        return lr_in_hr_space
-    
+        # baseline_space == 'hr' or 'auto'
+        if baseline_space in ('hr', 'auto'):
+            if hrspace_chan is not None:
+                # Already in HR-space
+                logger.info("[generation] lr_ups baseline: using HR-space channel (already HR-space).")
+                return hrspace_chan
+
+            # Need to convert LR-space -> HR-space
+            if lrspace_chan is None:
+                raise ValueError(
+                    f"baseline_space='{baseline_space}' requires HR-space baseline, but neither an HR-space channel "
+                    f"nor an LR-space channel is available for target '{target_var}'."
+                )
+
+            lr_method_for_baseline = self._lr_method_for_target
+            if lr_method_for_baseline is None:
+                raise ValueError(
+                    "LR scaling method for baseline is None. Cannot proceed with lr_baseline_to_hr_zspace. "
+                    "Please check your configuration."
+                )
+
+            logger.info(
+                "[generation] lr_ups baseline: converting LR-space -> HR-space via lr_baseline_to_hr_zspace "
+                "(baseline_space='%s').",
+                baseline_space,
+            )
+
+            lr_in_hr_space = lr_baseline_to_hr_zspace(
+                lr_chan_norm=lrspace_chan,
+                # LR meta
+                lr_variable=self.hr_var,
+                lr_model=self.cfg['lowres']['model'],
+                lr_domain_str=self._dom_lr_str,
+                lr_crop_region_str=self._crop_lr_str,
+                lr_split=self.cfg['transforms'].get('scaling_split', 'train'),
+                lr_scaling_method=lr_method_for_baseline,
+                lr_buffer_frac=self.cfg['lowres'].get('buffer_frac', 0.0),
+                lr_stats_dir_root=self.cfg['paths']['stats_load_dir'],
+                # HR meta
+                hr_variable=self.hr_var,
+                hr_model=self.cfg['highres']['model'],
+                hr_domain_str=self._dom_hr_str,
+                hr_crop_region_str=self._crop_hr_str,
+                hr_split=self.cfg['transforms'].get('scaling_split', 'train'),
+                hr_scaling_method=self.hr_scaling_method,
+                hr_buffer_frac=self.cfg['highres'].get('buffer_frac', 0.0),
+                hr_stats_dir_root=self.cfg['paths']['stats_load_dir'],
+                eps=self.global_prcp_eps,
+            )
+
+            return lr_in_hr_space
+
+        raise ValueError(f"Unknown edm.baseline_space='{baseline_space}'. Expected one of: 'lr', 'hr', 'auto'.")
+
+
     @torch.no_grad()
     def run(self, gen_dataloader, save=True, output_results: bool = False):
         model_name = get_model_string(self.cfg)
@@ -592,71 +685,105 @@ class GenerationRunner:
                         logger.info("[generation] Saved ensembles_phys → %s", self.out_root / 'ensembles_phys' / f'{date0}.npz')
                         logger.info("[generation] Saved pmm_phys → %s", self.out_root / 'pmm_phys' / f'{date0}.npz')
 
+            def _m(x):
+                return float(torch.nanmean(x)) if (x is not None and torch.is_tensor(x)) else None
 
-            # Save HR
-            hr = x_hr_1.detach().cpu().float() if x_hr_1 is not None else None  
-            
-            # Find corresponding LR channel(s) upsampled to HR for saving.
-            # The target variable may appear multiple times in cond_images (e.g., LR-scaled and HR-scaled).
-            lrs_model_by_kind = {}   # {"lrspace": tensor, "hrspace": tensor}
-            if cond_images_gen is not None and self._lr_target_indices:
-                for idx in self._lr_target_indices:
-                    if cond_images_gen.shape[1] <= idx:
-                        continue
-                    chan = cond_images_gen[:1, idx:idx+1, :, :].detach().cpu().float()  # [1,1,H,W]
-                    # Decide which inverse to use based on configured scaling method for this channel
-                    try:
-                        method = self.lr_scaling_methods[idx] if idx < len(self.lr_scaling_methods) else None
-                    except Exception:
-                        method = None
-                    # Heuristic: if method matches HR scaling for target, treat as "hrspace", else "lrspace"
-                    kind = None
-                    if isinstance(method, str) and self.hr_scaling_method and (self.hr_scaling_method in method):
-                        kind = "hrspace"
-                    elif isinstance(method, str) and ("lr" in method or "LR" in method):
-                        kind = "lrspace"
-                    else:
-                        # fallback: first occurrence goes to lrspace if not set, second to hrspace
-                        kind = "lrspace" if "lrspace" not in lrs_model_by_kind else "hrspace"
-                    lrs_model_by_kind[kind] = chan
-            else:
-                lrs_model_by_kind = {}
+            # --- after we have x_hr_1 and cond_images_gen ---
 
-            if self.gen_config.save_space in ('physical', 'both'):
-                # Back-transform HR reference
-                hr_phys = hr.detach().cpu().float() if hr is not None else None
+            # Save HR (model space)
+            hr = x_hr_1.detach().cpu().float() if x_hr_1 is not None else None
+
+            # Decide expected LR target channel indices deterministically
+            dual_lr = bool(self.cfg["lowres"].get("dual_lr", False))
+            main_scale = str(self.cfg["lowres"].get("lr_main_var_scale", "LR")).upper()
+
+            c = 0
+            target_main_idx = None
+            target_lronly_idx = None
+
+            for cond in self.lr_vars:
+                if dual_lr and cond == self.hr_var:
+                    # convention: main channel first, then explicit LR-only channel
+                    target_main_idx = c
+                    target_lronly_idx = c + 1
+                    c += 2
+                else:
+                    if cond == self.hr_var:
+                        target_main_idx = c
+                    c += 1
+
+            # Extract the LR target channels (model space, already upsampled to HR grid)
+            lrs_model_by_kind = {}
+            if cond_images_gen is not None:
+                if target_lronly_idx is not None and cond_images_gen.shape[1] > target_lronly_idx:
+                    lrs_model_by_kind["lrspace"] = cond_images_gen[:1, target_lronly_idx:target_lronly_idx+1].detach().cpu().float()
+
+                if target_main_idx is not None and cond_images_gen.shape[1] > target_main_idx:
+                    # main channel lives in LR-space if lr_main_var_scale == LR, else HR-space
+                    kind = "lrspace" if main_scale == "LR" else "hrspace"
+                    lrs_model_by_kind[kind] = cond_images_gen[:1, target_main_idx:target_main_idx+1].detach().cpu().float()
+
+            # --- back-transform and save (physical references) ---
+            if self.gen_config.save_space in ("physical", "both"):
+
+                # HR physical ref
+                hr_phys = hr
                 if callable(self.bt_hr) and hr_phys is not None:
                     try:
                         hr_phys = self.bt_hr(hr_phys)
                         hr_phys = _cast_phys(hr_phys)
                     except Exception as e:
-                        logger.warning(f"[generation] Failed to back-transform HR reference to physical space: {e}")
-                # Back-transform LR reference(s) depending on their scaling method
+                        logger.warning(f"[generation] Failed to back-transform HR reference for {date0}: {e}")
+                        hr_phys = None
+
+                # LR physical refs
                 lr_lrspace_phys = None
                 lr_hrspace_phys = None
-                if "lrspace" in lrs_model_by_kind and callable(self.bt_lr_target):
-                    try:
-                        lr_lrspace_phys = self.bt_lr_target(lrs_model_by_kind["lrspace"])
-                        lr_lrspace_phys = _cast_phys(lr_lrspace_phys)
-                    except Exception as e:
-                        logger.warning(f"[generation] Failed to back-transform LR(lrspace) to physical: {e}")
-                if "hrspace" in lrs_model_by_kind and callable(self.bt_hr):
-                    try:
-                        lr_hrspace_phys = self.bt_hr(lrs_model_by_kind["hrspace"])
-                        lr_hrspace_phys = _cast_phys(lr_hrspace_phys)
-                    except Exception as e:
-                        logger.warning(f"[generation] Failed to back-transform LR(hrspace) to physical via HR inverse: {e}")
-                # Select canonical 'lr' to keep compatibility (prefer lrspace if present)
-                lr_phys = lr_lrspace_phys if lr_lrspace_phys is not None else lr_hrspace_phys
+
+                # LR-space channel -> LR inverse (LR stats)
+                if "lrspace" in lrs_model_by_kind:
+                    if callable(self.bt_lr_lrspace):
+                        try:
+                            lr_lrspace_phys = self.bt_lr_lrspace(lrs_model_by_kind["lrspace"])
+                            lr_lrspace_phys = _cast_phys(lr_lrspace_phys)
+                        except Exception as e:
+                            logger.warning(f"[generation] Failed to back-transform LR(lrspace) for {date0}: {e}")
+                    else:
+                        logger.warning(f"[generation] Missing bt_lr_lrspace; cannot invert LR(lrspace) for {date0}")
+
+                # HR-space channel -> HR-space LR inverse (NOT bt_hr)
+                if "hrspace" in lrs_model_by_kind:
+                    if callable(self.bt_lr_hrspace):
+                        try:
+                            lr_hrspace_phys = self.bt_lr_hrspace(lrs_model_by_kind["hrspace"])
+                            lr_hrspace_phys = _cast_phys(lr_hrspace_phys)
+                        except Exception as e:
+                            logger.warning(f"[generation] Failed to back-transform LR(hrspace) for {date0}: {e}")
+                    else:
+                        logger.warning(f"[generation] Missing bt_lr_hrspace; cannot invert LR(hrspace) for {date0}")
+
+                # Canonical LR for evaluation: ALWAYS LR-stats physical.
+                lr_phys = lr_lrspace_phys
+                if lr_phys is None:
+                    logger.warning(f"[generation] No lr_lrspace_phys for {date0}; saving canonical lr=None to avoid wrong LR reference")
+
                 if save:
                     _save_npz(
-                        self.out_root / 'lr_hr_phys' / f'{date0}.npz',
+                        self.out_root / "lr_hr_phys" / f"{date0}.npz",
                         hr=hr_phys,
                         lr=lr_phys,
                         lr_lrspace=lr_lrspace_phys,
-                        lr_hrspace=lr_hrspace_phys
+                        lr_hrspace=lr_hrspace_phys,
                     )
-                    logger.info("[generation] Saved lr_hr_phys → %s", self.out_root / 'lr_hr_phys' / f'{date0}.npz')
+                    logger.info("[generation] Saved lr_hr_phys → %s", self.out_root / "lr_hr_phys" / f"{date0}.npz")
+
+                    def _m(x):
+                        return float(torch.nanmean(x)) if (x is not None and torch.is_tensor(x)) else None
+
+                    logger.info(
+                        "[generation] %s LR means (phys): lr=%s lr_lrspace=%s lr_hrspace=%s",
+                        date0, _m(lr_phys), _m(lr_lrspace_phys), _m(lr_hrspace_phys)
+                    )
             # === Optional in-memory return for quicklook ===
             if results is not None:
                 # Ensure everything is CPU tensors to avoid holding GPU regs

@@ -23,15 +23,27 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 # Local plotting style helper for readable multi-panel figures
+# NOTE: This needs to work both when executed as a script (directory on sys.path)
+# and when imported as a package.
+from contextlib import contextmanager
 try:
+    # Common when running from project root
     from data_analysis_pipeline.comparison.plot_utils import paper_rc
 except Exception:
-    # Fallback for relative import when used as a package
     try:
+        # When this module is part of a package        
         from .plot_utils import paper_rc  # type: ignore
     except Exception:
-        paper_rc = None  # type: ignore
-from contextlib import contextmanager
+        try:
+            # When running this file directly from its folder
+            from plot_utils import paper_rc  # type: ignore
+        except Exception:
+            paper_rc = None  # type: ignore
+
+
+@contextmanager
+def _null_rc():
+    yield
 
 
 def compute_2d_power_spectrum(
@@ -613,7 +625,8 @@ def compare_seasonal_distributions(
         season_bins_model1[season] = np.concatenate(season_bins_model1[season]) if season_bins_model1[season] else np.array([]) # type: ignore
         season_bins_model2[season] = np.concatenate(season_bins_model2[season]) if season_bins_model2[season] else np.array([]) # type: ignore
 
-    _rc_ctx = paper_rc(big=1.35, base=11) if paper_rc is not None else contextmanager(lambda: (yield))()
+    # Larger text for multi-panel figures (readable when embedded side-by-side in LaTeX)
+    _rc_ctx = paper_rc(big=1.65, base=12) if paper_rc is not None else _null_rc()
     with _rc_ctx:
         # === Plot 1: 1x2 panels, each model, seasonal histograms (STEP LINES) ===
         # Uses outlines only to avoid fill overlap - log-scale via axis for consistent behaviour
@@ -626,12 +639,12 @@ def compare_seasonal_distributions(
             if len(season_bins_model2[season]) > 0:
                 axs1[1].hist(season_bins_model2[season], bins=bins, density=True, histtype='step', linewidth=1.6, color=color, label=season)
 
-        axs1[0].set_title(f'{model1}')
-        axs1[1].set_title(f'{model2}')
+        axs1[0].set_title(f'{model1}', pad=8)
+        axs1[1].set_title(f'{model2}', pad=8)
         for ax in axs1:
             if log_hist:
                 ax.set_yscale('log')
-            ax.legend(frameon=False)
+            ax.legend(frameon=False, fontsize=plt.rcParams.get('legend.fontsize', None))
             ax.set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
             ax.set_ylabel('Log count' if log_hist else 'Density')
             ax.grid(True, which='both', ls='--', alpha=0.3)
@@ -652,10 +665,10 @@ def compare_seasonal_distributions(
             if len(season_bins_model2[season]) > 0:
                 axs2[i].hist(season_bins_model2[season], bins=bins, density=True, histtype='step', linewidth=1.8, linestyle='--', color=season_palette_line[season], label=model2, zorder=2)
                 
-            axs2[i].set_title(f'{season}')
+            axs2[i].set_title(f'{season}', pad=8)
             if log_hist:
                 axs2[i].set_yscale('log')
-            axs2[i].legend(frameon=False)
+            axs2[i].legend(frameon=False, fontsize=plt.rcParams.get('legend.fontsize', None))
             axs2[i].set_xlabel(f'{variable} ({get_unit_for_variable(variable)})')
             axs2[i].set_ylabel('Log count' if log_hist else 'Density')
             axs2[i].grid(True, which='both', ls='--', alpha=0.3)

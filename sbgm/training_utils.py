@@ -382,7 +382,7 @@ def get_dataloader(cfg, verbose=True):
                             use_sin_cos_embedding=cfg['stationary_conditions']['seasonal_conditions'].get('use_sin_cos_embedding', False),
                             use_leap_years=cfg['stationary_conditions']['seasonal_conditions'].get('use_leap_years', True),                            
                             cfg = cfg,
-                            split = "gen",
+                            split = "test",
                             shuffle=False,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
                             cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
@@ -637,7 +637,7 @@ def get_gen_dataloader(cfg, verbose=True):
                             use_sin_cos_embedding=cfg['stationary_conditions']['seasonal_conditions'].get('use_sin_cos_embedding', False),
                             use_leap_years=cfg['stationary_conditions']['seasonal_conditions'].get('use_leap_years', True),                            
                             cfg = cfg,
-                            split = "gen",
+                            split = "test",
                             shuffle=False,
                             cutouts=cfg['transforms']['sample_w_cutouts'],
                             cutout_domains=list(cutout_domains) if cfg['transforms']['sample_w_cutouts'] else None,
@@ -861,7 +861,7 @@ def get_final_gen_dataloader(cfg, split: str = "test", verbose: bool = True):
         # default: test → dataset split name "gen"
         hr_dir = hr_data_dir_gen
         lr_cond_dirs = lr_cond_dirs_gen
-        ds_split = "gen"
+        ds_split = "test"
 
     data_zarr = zarr.open_group(hr_dir, mode='r')
     n_samples_full = len(list(data_zarr.keys()))
@@ -1191,7 +1191,7 @@ def apply_cfg_dropout(
     dev_geo = lsm_cond.device if lsm_cond is not None else (topo_cond.device if topo_cond is not None else dev_available)
     dev_cls = y.device if isinstance(y, torch.Tensor) else dev_available
 
-    drop_lr_batch    = (torch.rand((), device=dev_lr) < p_lr).item() 
+    drop_lr_batch    = (torch.rand((), device=dev_lr) < p_lr).item()
     drop_geo_batch   = (torch.rand((), device=dev_geo) < p_geo).item()
     drop_class_batch = (torch.rand((), device=dev_cls) < p_class).item() if isinstance(y, torch.Tensor) else False
 

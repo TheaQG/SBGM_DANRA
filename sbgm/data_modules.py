@@ -344,6 +344,43 @@ class DualLRTransform:
             b = b.to(a.device)
         return torch.cat([a, b], dim=0) # [2, H, W]
 
+def _build_cond_channel_map(lr_conditions, main_lr_cond, dual_lr, lr_main_var_scale):
+    """
+    Deterministic channel layout for LR conditions.
+
+    Conventions:
+      - If dual_lr and cond == main_lr_cond:
+          channel 0 = "main"    (scaled with lr_main_var_scale: HR/LR/HR_LR)
+          channel 1 = "lr_only" (scaled with LR stats)
+      - Else:
+          one channel "main" (scaled with LR stats by default)
+    """
+    def _space_tag(scale: str) -> str:
+        s = str(scale).upper()
+        if s == "LR":
+            return "lr_stats"
+        if s == "HR":
+            return "hr_stats"
+        if s in ("HR_LR", "LR_HR", "COMBINED", "BOTH"):
+            return "combo_stats"
+        return "lr_stats"  # safe fallback
+
+    order = list(lr_conditions)
+    slices = {}
+    spaces = {}
+
+    c = 0
+    for cond in order:
+        if bool(dual_lr) and (main_lr_cond is not None) and (cond == main_lr_cond):
+            slices[cond] = {"main": (c, c+1), "lr_only": (c+1, c+2)}
+            spaces[cond] = {"main": _space_tag(lr_main_var_scale), "lr_only": "lr_stats"}
+            c += 2
+        else:
+            slices[cond] = {"main": (c, c+1)}
+            spaces[cond] = {"main": "lr_stats"}
+            c += 1
+
+    return {"order": order, "slices": slices, "spaces": spaces, "n_channels_total": c}
 
 def list_all_keys(zgroup):
     all_keys = []
@@ -544,7 +581,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self.hr_scaling_method = hr_scaling_method
 
         # ========= Dual-LR/main LR scaling preferences =========
-        self.lr_main_var_scale = (cfg['lowres'].get('lr_main_var_scale', 'HR') if cfg is not None and 'lowres' in cfg else 'HR')
+        self.lr_main_var_scale = (cfg['lowres'].get('lr_main_var_scale', 'LR') if cfg is not None and 'lowres' in cfg else 'LR')
         fall_back_method = 'log_zscore' if self.hr_variable in ['prcp', 'tp', 'cape'] else 'zscore'
         self.lr_main_var_scale_method = (cfg['lowres'].get('lr_main_var_scale_method', fall_back_method) if cfg is not None and 'lowres' in cfg else fall_back_method)
 
@@ -566,6 +603,24 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         if self.main_lr_cond is None:
             logger.warning(f"Could not identify a main LR condition matching HR variable '{self.hr_variable}'. Dual-LR logic will be skipped; using standard per-condition scaling.")
 
+        self.cond_channel_map = _build_cond_channel_map(
+            lr_conditions=self.lr_conditions,
+            main_lr_cond=self.main_lr_cond,
+            dual_lr=self.dual_lr,
+            lr_main_var_scale=self.lr_main_var_scale,
+        )
+        logger.info(
+            "[data] LR channel layout summary:\n"
+            f"  LR conditions        : {self.lr_conditions}\n"
+            f"  Main LR condition    : {self.main_lr_cond}\n"
+            f"  dual_lr              : {self.dual_lr}\n"
+            f"  lr_main_var_scale    : {self.lr_main_var_scale}\n"
+            f"  channel order        : {self.cond_channel_map['order']}\n"
+            f"  channel slices       : {self.cond_channel_map['slices']}\n"
+            f"  channel spaces       : {self.cond_channel_map['spaces']}\n"
+            f"  total LR channels    : {self.cond_channel_map['n_channels_total']}"
+        )
+        self.lr_conditions_ordered = list(self.cond_channel_map["order"])
 
         # Global epsilon for log scaling to avoid log(0)
         self.glob_prcp_epsilon = cfg['transforms'].get('prcp_eps', 0.01) if cfg is not None else 0.01
@@ -652,7 +707,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
         # For each LR condition, build a file map: date -> file key
         self.lr_file_map = {}
-        for cond in self.lr_conditions:
+        for cond in self.lr_conditions_ordered:
             self.lr_file_map[cond] = {}
             for file in self.lr_cond_files_dict[cond]:
                 try:
@@ -663,7 +718,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
         # Compute common dates across HR and all LR conditions
         common_dates = set(self.hr_file_map.keys())
-        for cond in self.lr_conditions:
+        for cond in self.lr_conditions_ordered:
             common_dates = common_dates.intersection(set(self.lr_file_map[cond].keys()))
         self.common_dates = sorted(list(common_dates))
         if len(self.common_dates) < self.n_samples:
@@ -736,8 +791,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             crop_region_lr_str = '_'.join(map(str, crop_region_lr)) # if (cfg is not None and self.cutouts and self.lr_cutout_domains is not None) else "full"
             scaling_split = self.scaling_split
             stats_load_dir = cfg['paths']['stats_load_dir'] if cfg is not None else './stats'
-            self.hr_buffer_frac = cfg['highres'].get('buffer_frac', 0.05) if cfg is not None and 'highres' in cfg else 0.05
-            self.lr_buffer_frac = cfg['lowres'].get('buffer_frac', 0.05) if cfg is not None and 'lowres' in cfg else 0.05
+            self.hr_buffer_frac = cfg['highres'].get('buffer_frac', 0.00) if cfg is not None and 'highres' in cfg else 0.00
+            self.lr_buffer_frac = cfg['lowres'].get('buffer_frac', 0.00) if cfg is not None and 'lowres' in cfg else 0.00
 
             for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
                 logger.info(f"LR condition: {cond_var}, scaling method: {trans_type}")
@@ -752,40 +807,72 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 is_main = (self.main_lr_cond is not None and cond_var == self.main_lr_cond)
 
                 if is_main and self.dual_lr:
-                    # Build TWO channels: (A) combined HR+LR stats (fallback to HR if missing), (B) standard LR-only stats
+                    # Dual LR: channel A ("main") follows lr_main_var_scale; channel B ("lr_only") always LR-stats.
+                    scale_mode = str(self.lr_main_var_scale).upper()
 
-                    # (A) Combined HR+LR stats
-                    try: 
-                        t_combined = transforms.Compose(prefix + [
+                    # Channel A stats source
+                    if scale_mode == "HR":
+                        stats_model_A = self.hr_model
+                        ds_A, cr_A = domain_str_hr, crop_region_hr_str
+                        buffer_A = self.hr_buffer_frac
+                    elif scale_mode == "LR":
+                        stats_model_A = self.lr_model
+                        ds_A, cr_A = domain_str_lr, crop_region_lr_str
+                        buffer_A = self.lr_buffer_frac
+                    else:
+                        # HR_LR / combined
+                        stats_model_A = self.combined_stats_model_name
+                        ds_A, cr_A = domain_str_lr, crop_region_lr_str
+                        buffer_A = self.lr_buffer_frac
+
+                    try:
+                        t_main = transforms.Compose(prefix + [
                             get_transforms_from_stats(
                                 variable=cond_var,
-                                model=self.combined_stats_model_name, # TODO: Should be recalculated in stats module and named DANRA_ERA5
-                                domain_str=domain_str_lr,
-                                crop_region_str=crop_region_lr_str,
+                                model=stats_model_A,
+                                domain_str=ds_A,
+                                crop_region_str=cr_A,
                                 scaling_split=scaling_split,
                                 transform_type=trans_type,
-                                buffer_frac=self.lr_buffer_frac,
+                                buffer_frac=buffer_A,
                                 stats_file_path=stats_load_dir,
                                 eps=eps_val,
                             )
                         ])
-                        logger.info(f"Using combined HR+LR stats '{self.combined_stats_model_name}' for dual LR main channel A of condition '{cond_var}'")
+                        logger.info(f"Dual-LR channel A (main) for '{cond_var}' scaled using '{scale_mode}' stats from model '{stats_model_A}'.")
                     except Exception as e:
-                        logger.warning(f"Failed to load combined HR+LR '{self.combined_stats_model_name}' for condition '{cond_var}'. Falling back to HR stats for channel A. Error: {e}")
-                        t_combined = transforms.Compose(prefix + [
-                            get_transforms_from_stats(
-                                variable=cond_var,
-                                model=self.hr_model,
-                                domain_str=domain_str_lr,
-                                crop_region_str=crop_region_lr_str,
-                                scaling_split=scaling_split,
-                                transform_type=trans_type,
-                                buffer_frac=self.hr_buffer_frac,
-                                stats_file_path=stats_load_dir,
-                                eps=eps_val,
-                            )
-                        ])
-                    # (B) Standard LR-only stats
+                        if scale_mode in ("HR_LR", "LR_HR", "COMBINED", "BOTH"):
+                            logger.warning(f"Dual-LR: combined stats '{stats_model_A}' not found for '{cond_var}'. Falling back to HR stats. Error: {e}")
+                            t_main = transforms.Compose(prefix + [
+                                get_transforms_from_stats(
+                                    variable=cond_var,
+                                    model=self.hr_model,
+                                    domain_str=domain_str_hr,
+                                    crop_region_str=crop_region_hr_str,
+                                    scaling_split=scaling_split,
+                                    transform_type=trans_type,
+                                    buffer_frac=self.hr_buffer_frac,
+                                    stats_file_path=stats_load_dir,
+                                    eps=eps_val,
+                                )
+                            ])
+                        else:
+                            logger.warning(f"Dual-LR: requested stats '{stats_model_A}' not found for '{cond_var}'. Falling back to LR stats. Error: {e}")
+                            t_main = transforms.Compose(prefix + [
+                                get_transforms_from_stats(
+                                    variable=cond_var,
+                                    model=self.lr_model,
+                                    domain_str=domain_str_lr,
+                                    crop_region_str=crop_region_lr_str,
+                                    scaling_split=scaling_split,
+                                    transform_type=trans_type,
+                                    buffer_frac=self.lr_buffer_frac,
+                                    stats_file_path=stats_load_dir,
+                                    eps=eps_val,
+                                )
+                            ])
+
+                    # Channel B: LR-only stats
                     t_lr_only = transforms.Compose(prefix + [
                         get_transforms_from_stats(
                             variable=cond_var,
@@ -800,9 +887,8 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                         )
                     ])
 
-                    # Wrap into a callable that returns a stacked 2-channel tensor
-                    self.lr_transforms_dict[cond_var] = DualLRTransform(t_combined, t_lr_only)
-                    logger.info(f"Dual-LR transform set for main condition '{cond_var}': returning 2-channels [combined, LR-only].")
+                    self.lr_transforms_dict[cond_var] = DualLRTransform(t_main, t_lr_only)
+                    logger.info(f"Dual-LR transform set for main condition '{cond_var}': returning 2-channels [main({scale_mode}), lr_only(LR)].")
                 elif is_main and not self.dual_lr:
                     # Single channel, but choose statistics source as per lr_main_var_scale
                     scale_mode = str(self.lr_main_var_scale).upper()
@@ -879,6 +965,21 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                         )
                     ]
                     self.lr_transforms_dict[cond_var] = transforms.Compose(transform_list)
+                
+                # Log summary of LR transforms
+                for cond, transform in self.lr_transforms_dict.items():
+                    if isinstance(transform, DualLRTransform):
+                        logger.info(
+                            f"[data] LR transform for '{cond}': DualLRTransform → "
+                            f"channels=[main({self.cond_channel_map['spaces'][cond]['main']}), "
+                            f"lr_only({self.cond_channel_map['spaces'][cond]['lr_only']})]"
+                        )
+                    else:
+                        logger.info(
+                            f"[data] LR transform for '{cond}': single-channel → "
+                            f"space={self.cond_channel_map['spaces'][cond]['main']}"
+                        )
+
 
                     
             # 2. Set HR target transform
@@ -923,7 +1024,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             self.lr_transforms_dict = {cond: transforms.Compose([
                 SafeToTensor(),
                 ResizeTensor(self.lr_size_reduced)
-            ]) for cond in self.lr_conditions}
+            ]) for cond in self.lr_conditions_ordered}
 
             # 2. Set HR target transform
             self.hr_transform = transforms.Compose([
@@ -1202,7 +1303,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         hr_file_name = self.hr_file_map[date]
 
         # Look up LR files for each condition using the common date
-        for cond in self.lr_conditions:
+        for cond in self.lr_conditions_ordered:
             lr_file_name = self.lr_file_map[cond][date]
             # Load LR condition data from its own zarr group
             try:
@@ -1327,6 +1428,42 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
 
         # Add item to cache
         self._addToCache(idx, sample_dict)
+
+        # Log shapes of first sample only
+        if not hasattr(self, "_logged_first_sample"):
+            self._logged_first_sample = True
+
+            for cond in self.lr_conditions_ordered:
+                lr_t = sample_dict.get(f"{cond}_lr", None)
+                if lr_t is not None:
+                    logger.info(
+                        f"[data][sample0] {cond}_lr shape={tuple(lr_t.shape)} "
+                        f"(expected channels={len(self.cond_channel_map['slices'][cond])})"
+                    )
+
+            if "img_cond" in sample_dict:
+                logger.info(
+                    f"[data][sample0] img_cond final shape={tuple(sample_dict['img_cond'].shape)} "
+                    f"(expected C={self.cond_channel_map['n_channels_total']})"
+                )
+                
+            for cond in self.lr_conditions_ordered:
+                lr_t = sample_dict.get(f"{cond}_lr", None)
+                if lr_t is None:
+                    continue
+
+                with torch.no_grad():
+                    stats = {
+                        "min": float(lr_t.min()),
+                        "max": float(lr_t.max()),
+                        "mean": float(lr_t.mean()),
+                        "std": float(lr_t.std()),
+                    }
+
+                logger.info(
+                    f"[data][sample0] {cond}_lr stats "
+                    f"(per-channel): {stats}"
+                )                
 
         return sample_dict #sample
 

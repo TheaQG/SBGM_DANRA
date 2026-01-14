@@ -209,8 +209,21 @@ class EvalDataResolver:
             logger.info(f"[EvalDataResolver] No LR arrays found in {p} for any of keys ['lr', 'lr_lrspace']; returning None to avoid wrong channel.")
             return None
         if chosen is not None and chosen != self.lr_phys_key:
-            logger.info(f"[EvalDataResolver] Requested LR key '{self.lr_phys_key}' not found; using '{chosen}' instead for {date}")        
-        lr_t = torch.from_numpy(np.asarray(x))
+            logger.info(f"[EvalDataResolver] Requested LR key '{self.lr_phys_key}' not found; using '{chosen}' instead for {date}")
+
+        x_arr = np.asarray(x)
+        # Guard against object arrays (commonly created if someone saved None into the npz)
+        if x_arr.dtype == np.object_:
+            # Handle the common case where the stored object is literally None
+            if x_arr.size == 1 and x_arr.item() is None:
+                logger.warning(f"[EvalDataResolver] LR key '{chosen}' is None in {p}; returning None")
+                return None
+            logger.warning(
+                f"[EvalDataResolver] LR key '{chosen}' has dtype=object in {p} (shape={x_arr.shape}); returning None"
+            )
+            return None
+
+        lr_t = torch.from_numpy(x_arr)
         if lr_t.ndim == 3:
             lr_t = lr_t[0:1, ...]
         elif lr_t.ndim == 2:
@@ -286,10 +299,7 @@ class EvalDataResolver:
                     rm = rm.squeeze(0)
             if rm.shape == m.shape:
                 m = m & rm
-                logger.warning(
-                    f"[EvalDataResolver] ROI mask shape {tuple(rm.shape)} does not match "
-                    f"LSM shape {tuple(m.shape)}, skipping intersection."
-                )
+
 
         return m
 

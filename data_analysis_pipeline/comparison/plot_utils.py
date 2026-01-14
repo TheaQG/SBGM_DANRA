@@ -117,8 +117,9 @@ def plot_samples_grid(
 
     def _add_colorbar_and_boxplot(fig, ax, im, img_2d, vlim):
         divider = make_axes_locatable(ax)
-        bax = divider.append_axes("right", size="10%", pad=0.1)
-        cax = divider.append_axes("right", size="5%", pad=0.1)
+        # Give the colorbar a bit more width; narrow boxplot slightly to avoid squashed bars
+        bax = divider.append_axes("right", size="8%", pad=0.10)
+        cax = divider.append_axes("right", size="7%", pad=0.12)
         cbar = fig.colorbar(im, cax=cax, orientation="vertical")
         # Ensure colorbar tick labels scale with rcParams
         cbar.ax.tick_params(labelsize=plt.rcParams.get("ytick.labelsize", 10))
@@ -151,7 +152,7 @@ def plot_samples_grid(
             fig, axs = plt.subplots(
                 n_rows,
                 n_cols,
-                figsize=(10 + 4*(n_cols-2), 4 * n_rows),
+                figsize=(10 + 5*(n_cols-2), 4 * n_rows),
                 squeeze=False,
                 constrained_layout=True,
             )
@@ -217,7 +218,7 @@ def plot_samples_grid(
                     if "Difference" in model_label:
                         # difference: only colorbar
                         divider = make_axes_locatable(ax)
-                        cax = divider.append_axes("right", size="5%", pad=0.1)
+                        cax = divider.append_axes("right", size="7%", pad=0.12)
                         cbar = fig.colorbar(im, cax=cax, orientation="vertical")
                         cbar.ax.tick_params(labelsize=plt.rcParams.get("ytick.labelsize", 10))
                     else:
