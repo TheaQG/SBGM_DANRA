@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as mcm
 from matplotlib.gridspec import GridSpec
+from matplotlib.patches import Rectangle
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from typing import Optional, Union, List, Dict, Tuple
 
@@ -75,74 +76,116 @@ def _season_from_month(m: int) -> str:
 # ------------------------------
 # DK outline via LSM (cached)
 # ------------------------------
-_DK_LSM_CACHE: Dict[Tuple[int, int, int, int], np.ndarray] = {}
+# Cache cropped masks by (lsm_path, y0, y1, x0, x1)
+_DK_LSM_CACHE: Dict[Tuple[str, int, int, int, int], np.ndarray] = {}
+# Cache full-domain land mask by path
+_LSM_FULL_CACHE: Dict[str, np.ndarray] = {}
 
-def _load_dk_lsm_outline(
-    bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
-    base: str = "/scratch/project_465001695/quistgaa/Data/Data_DiffMod",
-    rel_path: str = "data_lsm/truth_fullDomain/lsm_full.npz",
+
+def _load_lsm_full(
+    lsm_path: str,
     key_candidates: tuple[str, ...] = ("lsm_hr", "lsm", "mask", "roi", "lsm_full", "data", "arr_0"),
 ) -> np.ndarray | None:
-    """Load and crop a land-sea mask and return a boolean [H,W] mask for Denmark.
-    bounds is interpreted as (y0, y1, x0, x1) with y1/x1 exclusive; e.g., (200,328,380,508) → 128x128.
+    """Load full-domain LSM as 2D float array, oriented consistently with origin='lower' plotting.
+
+    We match your dataset convention: full-domain arrays are flipped with np.flipud before cropping.
     """
     try:
-        logger.info("[DEBUG] Loading DK LSM outline from %s/%s", base, rel_path)
-        # base = os.environ.get(env_key, None)
-        # if not base:
-        #     return None
-        p = Path(base) / rel_path
+        p = Path(lsm_path)
         if not p.exists():
-            logger.warning("[DEBUG] DK LSM outline file not found: %s", str(p))
+            logger.warning("[DEBUG] LSM file not found: %s", str(p))
             return None
+
         d = np.load(p, allow_pickle=True)
-        # Print the keys available in the npz file for debugging
+
         arr = None
         if hasattr(d, "files"):
             for k in key_candidates:
                 if k in d.files:
                     arr = d[k]
                     break
+
         if arr is None:
-            logger.warning("[DEBUG] DK LSM outline: no suitable key found in %s", str(p))
+            logger.warning("[DEBUG] LSM: no suitable key found in %s", str(p))
             return None
+
         a = np.asarray(arr)
-        # normalize to [H,W]
         if a.ndim == 4 and a.shape[:2] == (1, 1):
             a = a.squeeze(0).squeeze(0)
         elif a.ndim == 3 and a.shape[0] == 1:
             a = a.squeeze(0)
-        y0, y1, x0, x1 = bounds
-        a = np.flipud(a)  # flip vertically if needed
-        a = a[y0:y1, x0:x1]
-        m = (a >= 0.5)
-        m = np.flipud(m)  # flip back to original orientation
 
-        logger.info("[DEBUG] DK LSM outline loaded with shape %s", str(m.shape))
-        return m.astype(bool, copy=False)
+        a = np.squeeze(a)
+        if a.ndim != 2:
+            logger.warning("[DEBUG] LSM: unexpected shape after squeeze: %s", str(a.shape))
+            return None
+
+        # Match dataset orientation
+        a = np.flipud(a)
+        return a.astype(np.float32, copy=False)
+
     except Exception as e:
-        logger.exception("[DEBUG] Exception while loading DK LSM outline: %s", str(e))
+        logger.exception("[DEBUG] Exception while loading LSM: %s", str(e))
         return None
 
-def get_dk_lsm_outline(
-    bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
-) -> np.ndarray | None:
+
+def get_lsm_land_mask_full(lsm_path: str) -> np.ndarray | None:
+    """Return cached full-domain boolean land mask (True=land)."""
+    if lsm_path in _LSM_FULL_CACHE:
+        return _LSM_FULL_CACHE[lsm_path]
+
+    a = _load_lsm_full(lsm_path)
+    if a is None:
+        return None
+
+    m = (a >= 0.5)
+    _LSM_FULL_CACHE[lsm_path] = m
+    return m
+
+
+def get_dk_lsm_outline(*, lsm_path: str | None, bounds: tuple[int, int, int, int]) -> np.ndarray | None:
+    """Return land mask cropped to bounds (y0,y1,x0,x1) on the full-domain grid.
+
+    - Uses cfg-provided lsm_path (no hardcoded base paths).
+    - If bounds spans full domain, returns full-domain mask.
+    - Caches per (lsm_path, bounds).
     """
-    Return cached DK outline mask (boolean [H,W]) for the requested `bounds`.
-    Caches per-bounds so different crops return correctly sized masks.
-    """
-    global _DK_LSM_CACHE
+    if lsm_path is None:
+        return None
+
     try:
-        key = (int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3]))
+        y0, y1, x0, x1 = map(int, bounds)
     except Exception:
-        # Fallback to default if bounds malformed
-        key = (200, 328, 380, 508)
+        return None
+
+    key = (str(lsm_path), y0, y1, x0, x1)
     if key in _DK_LSM_CACHE:
         return _DK_LSM_CACHE[key]
-    m = _load_dk_lsm_outline(bounds=key)
-    if m is not None:
-        _DK_LSM_CACHE[key] = m
+
+    full = get_lsm_land_mask_full(str(lsm_path))
+    if full is None:
+        return None
+
+    H, W = full.shape
+
+    # Full-domain request
+    if (y0 == 0 and x0 == 0 and y1 == H and x1 == W):
+        _DK_LSM_CACHE[key] = full
+        return full
+
+    # Clip bounds safely
+    y0c = max(0, min(H, y0))
+    y1c = max(0, min(H, y1))
+    x0c = max(0, min(W, x0))
+    x1c = max(0, min(W, x1))
+
+    if (y1c <= y0c) or (x1c <= x0c):
+        return None
+
+    m = full[y0c:y1c, x0c:x1c]
+    _DK_LSM_CACHE[key] = m
     return m
+
 
 def overlay_outline(ax, mask: np.ndarray | None, *, color: str = "black", linewidth: float = 0.8):
     """Overlay a contour outline (level 0.5) on the given axes if mask is provided."""
@@ -161,14 +204,21 @@ def imshow_variable(
     *,
     variable: str,
     bounds: tuple[int, int, int, int] = (200, 328, 380, 508),    
+    lsm_path: str | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     cmap: str | None = None,
     add_dk_outline: bool = True,
     outline_color: str = "darkgrey",
     outline_linewidth: float = 0.8,
-    under_color: str | None = "#c2c2c2",
+    under_color: str | None = "#e6e6e6",
     under_threshold: float | None = 1e-6,
+    # Ocean handling
+    ocean_mode: str = "show",      # "show" | "mask" | "hatch"
+    bad_color: str = "#9e9e9e",     # excluded ocean/background
+    hatch_pattern: str = "///",
+    hatch_edgecolor: str = "#7f7f7f",
+    lsm_mask: np.ndarray | None = None,  # True=land, False=ocean, shape (H,W)
 ):
     """
     Centralized imshow for spatial maps that:
@@ -200,6 +250,24 @@ def imshow_variable(
             cm_obj = cm_in
     except Exception:
         cm_obj = cm_in
+    
+    # BAD color: used for NaNs (e.g., excluded ocean) and must be distinct from “dry” underflow
+    try:
+        if hasattr(cm_obj, "copy"):
+            cm_obj = cm_obj.copy() # type: ignore
+        if hasattr(cm_obj, "set_bad"):
+            cm_obj.set_bad(bad_color) # type: ignore
+    except Exception:
+        pass
+
+    # Ocean masking: ocean pixels -> NaN so they render as BAD
+    if ocean_mode in ("mask", "hatch") and (lsm_mask is not None):
+        lm = np.asarray(lsm_mask)
+        lm = np.squeeze(lm)
+        if lm.ndim == 2 and lm.shape == arr.shape:
+            if not np.issubdtype(arr.dtype, np.floating):
+                arr = arr.astype(np.float32)
+            arr = np.where(lm, arr, np.nan)    
 
     # Optionally set an "under" color (values < vmin) for near-zero masks (e.g., no-rain as gray)
     if under_color is not None:
@@ -220,15 +288,50 @@ def imshow_variable(
                     pass
 
     # If an under_threshold is specified and vmin not provided, use it
-    if under_threshold is not None and vmin is None:
-        vmin = float(under_threshold)
+    # Ensure “under” actually triggers: vmin must be >= under_threshold
+    if under_threshold is not None:
+        thr = float(under_threshold)
+        if vmin is None:
+            vmin = thr
+        else:
+            vmin = max(float(vmin), thr)
 
     im = ax.imshow(arr, cmap=cm_obj, vmin=vmin, vmax=vmax, interpolation="nearest", origin="lower")
-    if add_dk_outline:
-        mask = get_dk_lsm_outline(bounds)
-        # flip upside down to match imshow orientation
-        mask = np.flipud(mask)  # type: ignore
-        overlay_outline(ax, mask, color=outline_color, linewidth=outline_linewidth)
+
+    if ocean_mode == "hatch" and (lsm_mask is not None):
+        try:
+            lm = np.asarray(lsm_mask)
+            lm = np.squeeze(lm)
+            if lm.ndim == 2 and lm.shape == arr.shape:
+                ocean = (~lm).astype(float)
+                cf = ax.contourf(
+                    ocean,
+                    levels=[0.5, 1.5],
+                    colors="none",
+                    hatches=[hatch_pattern],
+                    origin="lower",
+                )
+                for coll in cf.collections:
+                    try:
+                        coll.set_edgecolor(hatch_edgecolor)
+                        coll.set_linewidth(0.0)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    if add_dk_outline and (lsm_path is not None):
+        # If plotting a full-domain field, override bounds to full domain.
+        full = get_lsm_land_mask_full(str(lsm_path))
+        b = bounds
+        if full is not None:
+            Hf, Wf = full.shape
+            if arr.shape == (Hf, Wf):
+                b = (0, Hf, 0, Wf)
+
+        mask = get_dk_lsm_outline(lsm_path=lsm_path, bounds=b)
+        if mask is not None:
+            overlay_outline(ax, mask, color=outline_color, linewidth=outline_linewidth)
     # ax.invert_yaxis()
     ax.set_xticks([])
     ax.set_yticks([])
@@ -400,7 +503,7 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
     hr_units, lr_units = get_units(cfg)
     lr_model = cfg['lowres']['model']
     var = cfg['highres']['variable']
-    show_ocean = cfg['visualization'].get('show_ocean', True)
+    # show_ocean = cfg['visualization'].get('show_ocean', True)
     force_matching_scale = cfg['visualization'].get('force_matching_scale', False)
     global_min = cfg['highres'].get('scaling_params', None)
     global_max = cfg['highres'].get('scaling_params', None)
@@ -409,10 +512,110 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
     default_lr_cmap = 'inferno'
     extra_cmap_dict = {"topo": "terrain", "sdf": "coolwarm", "lsm": "binary"}
 
+    scaling_enabled = bool(cfg.get("transforms", {}).get("scaling", True))
+    prcp_under_color = cfg['visualization'].get('prcp_under_color', "#c2c2c2")
+    # If scaling is off, we assume physical units (mm/day) and use a visible threshold.
+    # If scaling is on (z/log space), a tiny threshold is safer.
+    prcp_under_threshold = float(cfg['visualization'].get("prcp_under_threshold", 0.01 if not scaling_enabled else 1e-6))
+
     # visualization options
     cfg_vis = cfg.get('visualization', {}) if isinstance(cfg, dict) else {}
+
+    # Path for DK outline (avoid hardcoding; comes from YAML cfg)
+    lsm_outline_path = None
+    try:
+        lsm_outline_path = cfg.get("paths", {}).get("lsm_path", None)
+    except Exception:
+        lsm_outline_path = None
+
+    # Resolve plotting bounds for DK-outline overlay in (y0,y1,x0,x1).
+    # Priority:
+    #   1) sample['hr_points'] (most correct; supports random crops)
+    #   2) cfg['highres']['stationary_cutout']['bounds'] (your standard generation crop)
+    #   3) cfg['evaluation']['stationary_cutout']['hr_bounds']
+    #   4) full-domain bounds from cfg['highres']['full_domain_dims']
+    def _bounds_from_hr_points(s: dict) -> tuple[int, int, int, int] | None:
+        pt = s.get("hr_points", None)
+        if isinstance(pt, (list, tuple)) and len(pt) == 4:
+            try:
+                x1, x2, y1, y2 = map(int, pt)  # pt is [x1,x2,y1,y2]
+                return (y1, y2, x1, x2)
+            except Exception:
+                return None
+        return None
+
+    def _resolve_plot_bounds(s: dict) -> tuple[int, int, int, int]:
+        b = _bounds_from_hr_points(s)
+        if b is not None:
+            return b
+
+        # Main fallback: your standard stationary HR crop bounds
+        try:
+            sb = cfg.get("highres", {}).get("stationary_cutout", {})
+            bb = sb.get("bounds", None)
+            if isinstance(bb, (list, tuple)) and len(bb) == 4:
+                return (int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3]))
+        except Exception:
+            pass
+
+        # Evaluation fallback
+        try:
+            ev = cfg.get("evaluation", {}).get("stationary_cutout", {})
+            bb = ev.get("hr_bounds", None)
+            if isinstance(bb, (list, tuple)) and len(bb) == 4:
+                return (int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3]))
+        except Exception:
+            pass
+
+        # Full-domain fallback (no Denmark hardcode)
+        try:
+            fd = cfg.get("highres", {}).get("full_domain_dims", None)
+            if isinstance(fd, (list, tuple)) and len(fd) == 2:
+                H, W = int(fd[0]), int(fd[1])
+                return (0, H, 0, W)
+        except Exception:
+            pass
+
+        # Last resort
+        return (0, 0, 0, 0)
+
+    # HR-on-LR rectangle overlay controls
+    draw_hr_rect_on_lr = bool(cfg_vis.get("draw_hr_rect_on_lr", True))
+    hr_rect_color = str(cfg_vis.get("hr_rect_color", "#ff4d4d"))
+    hr_rect_linewidth = float(cfg_vis.get("hr_rect_linewidth", 1.5))
+
+    # bounds in YAML are (y0,y1,x0,x1)
+    plot_bounds = (200, 328, 380, 508)
+    sb = cfg.get("highres", {}).get("stationary_cutout", {})
+    if bool(sb.get("enabled", False)) and sb.get("bounds", None) is not None:
+        bb = sb["bounds"]
+        if isinstance(bb, (list, tuple)) and len(bb) == 4:
+            plot_bounds = (int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3]))
     overlay_lsm_contour = bool(cfg_vis.get('overlay_lsm_contour', False))
     dual_lr_lock_scale = bool(cfg_vis.get('dual_lr_lock_scale', True))  # NEW
+    ocean_mode = str(cfg_vis.get("ocean_mode", "show")).lower()
+    if (not bool(cfg_vis.get("show_ocean", True))) and ("ocean_mode" not in cfg_vis):
+        ocean_mode = "mask"
+    bad_color = str(cfg_vis.get("ocean_bad_color", "#9e9e9e"))
+    hatch_pattern = str(cfg_vis.get("ocean_hatch_pattern", "///"))
+    hatch_edgecolor = str(cfg_vis.get("ocean_hatch_edgecolor", "#7f7f7f"))
+
+    # Build land mask once
+    lsm_mask = None
+    try:
+        for mk in ("lsm_hr", "lsm"):
+            if mk in sample:
+                m = sample[mk]
+                m = m.detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m)
+                m = np.squeeze(m)
+                if m.ndim == 2:
+                    lsm_mask = (m >= 0.5)
+                    break
+                if m.ndim == 3 and m.shape[0] == 1:
+                    lsm_mask = (m[0] >= 0.5)
+                    break
+    except Exception:
+        lsm_mask = None
 
     # Build items
     hr_key = f"{var}_hr"
@@ -461,7 +664,12 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
     fig, axs = plt.subplots(1, n, figsize=figsize)
     if n == 1:
         axs = np.array([axs])
-    fig.suptitle(f"Sample from train dataset, {var} (HR: {hr_model}, LR: {lr_model})", fontsize=16)
+    date_str = sample.get("date", None)
+    date_txt = f" | date={date_str}" if date_str is not None else ""
+    fig.suptitle(
+        f"Sample from train dataset, {var} (HR: {hr_model}, LR: {lr_model}){date_txt}",
+        fontsize=16
+    )
 
     # Helper: compute joint vmin/vmax for a dual pair
     def _joint_limits_for_pair(key, ch_idx, img2d_cur):
@@ -487,12 +695,6 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
             arr = arr[ch_idx]
         img = arr.squeeze().numpy()
 
-        # mask ocean for HR images
-        if not show_ocean and (key.endswith("_hr") or key.endswith("_hr_original")) and ("lsm_hr" in sample):
-            m = sample["lsm_hr"]
-            m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
-            img = np.where(m < 1, np.nan, img)
-
         # choose cmap
         if key.endswith('_hr') or key.endswith('_hr_original'):
             cmap = hr_cmap
@@ -515,6 +717,13 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
         else:
             vmin, vmax = np.nanmin(img), np.nanmax(img)
 
+        # Make exact-zero rain show in under-color, not white
+        is_prcp_like = (var in ["prcp", "tp"]) or ("prcp" in key) or ("tp" in key)
+        if is_prcp_like and prcp_under_threshold is not None:
+            # Only push vmin up if it would otherwise include 0
+            if vmin is None or vmin <= prcp_under_threshold:
+                vmin = prcp_under_threshold
+
         # title
         if key.endswith('_hr'):
             title = f"HR {hr_model} ({var})\nscaled"
@@ -532,8 +741,49 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
         else:
             title = key
 
-        # draw
-        im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest', origin='lower')
+        # Ensure masked (NaN) pixels show as bad_color (ocean/background) + make “no rain” distinct
+        try:
+            cm_obj = mcm.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
+            if hasattr(cm_obj, "set_bad"):
+                cm_obj.set_bad(bad_color)
+
+            # Precip: set under-color (values < vmin)
+            is_prcp_like = (var in ["prcp", "tp"]) or ("prcp" in key) or ("tp" in key)
+            if is_prcp_like and hasattr(cm_obj, "set_under"):
+                cm_obj.set_under(prcp_under_color)
+
+            cmap_to_use = cm_obj
+        except Exception:
+            cmap_to_use = cmap
+
+        # draw (single consistent policy):
+        # - ocean_mode: show/mask/hatch
+        # - bad_color: color for excluded pixels (NaNs)
+        # - under_color/threshold: used to distinguish "no rain" from tiny rain for precip-like fields
+        is_prcp_like = (var in ("prcp", "tp")) or ("prcp" in key) or ("tp" in key)
+
+        im = imshow_variable(
+            ax,
+            img,
+            variable=(var if is_prcp_like else key.replace("_hr", "").replace("_lr", "").replace("_original", "")),
+            bounds=plot_bounds,
+            lsm_path=lsm_outline_path,
+            # bounds=tuple(cfg.get("highres", {}).get("stationary_cutout", {}).get("bounds", (200, 328, 380, 508))),
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap_to_use,
+            add_dk_outline=True,
+            outline_color="darkgrey",
+            outline_linewidth=0.8,
+            under_color=(prcp_under_color if is_prcp_like else None),
+            under_threshold=(prcp_under_threshold if is_prcp_like else None),
+            ocean_mode=ocean_mode,
+            bad_color=bad_color,
+            hatch_pattern=hatch_pattern,
+            hatch_edgecolor=hatch_edgecolor,
+            lsm_mask=lsm_mask,
+        )
+        
         ax.set_xticks([]); ax.set_yticks([]); ax.set_title(title, fontsize=10)
 
         # optional land/sea contour
@@ -543,10 +793,38 @@ def plot_sample(sample, cfg, figsize=(15, 4)):
                 m = sample["lsm_hr"]
                 # m = m.squeeze().detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m).squeeze()
                 try:
-                    # ax.contour(lsm_data, levels=[0.5], colors='white', linewidths=0.5)
-                    ax.contour(m.astype(float, copy=False), levels=[0.5], colors='darkgrey', linewidths=0.8)
+                    m_np = m.detach().cpu().numpy() if torch.is_tensor(m) else np.asarray(m)
+                    m_np = np.squeeze(m_np)
+                    ax.contour(m_np.astype(float, copy=False), levels=[0.5], colors="darkgrey", linewidths=0.8)
                 except Exception as e:
                     logger.warning(f"LSM contour failed on {key}: {e}")
+
+
+        # Draw HR patch location on LR context panels (useful for D1/full-domain context)
+        try:
+            if draw_hr_rect_on_lr and (key.endswith("_lr") or key.endswith("_lr_original")):
+                pt = sample.get("hr_points", None)
+                if isinstance(pt, (list, tuple)) and len(pt) == 4:
+                    x1, x2, y1, y2 = map(int, pt)  # [x1,x2,y1,y2]
+                    H_img, W_img = int(img.shape[0]), int(img.shape[1])
+
+                    # Only draw when LR panel is full-domain (avoid clutter for D0 where LR==HR patch)
+                    fd_lr = cfg.get("lowres", {}).get("full_domain_dims", None)
+                    if isinstance(fd_lr, (list, tuple)) and len(fd_lr) == 2:
+                        if (H_img, W_img) == (int(fd_lr[0]), int(fd_lr[1])):
+                            rect = Rectangle(
+                                (x1, y1),
+                                max(1, x2 - x1),
+                                max(1, y2 - y1),
+                                fill=False,
+                                edgecolor=hr_rect_color,
+                                linewidth=hr_rect_linewidth,
+                            )
+                            ax.add_patch(rect)
+        except Exception as e:
+            logger.debug(f"HR-on-LR rectangle overlay failed on {key}: {e}")
+
+
 
         # colorbar + boxplot (same layout you had)
         divider = make_axes_locatable(ax)

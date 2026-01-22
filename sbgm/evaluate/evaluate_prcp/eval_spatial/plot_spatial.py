@@ -63,7 +63,10 @@ def _draw_single(
         overlay_outline(ax, dk_mask)
 
     if add_stats:
-        flat = arr.ravel()  # stats on original data (orientation doesn’t matter)
+        if dk_mask is not None and dk_mask.shape == arr.shape:
+            flat = arr[dk_mask]
+        else:
+            flat = arr.ravel()
         flat = flat[np.isfinite(flat)]
         if flat.size > 0:
             mu = float(np.nanmean(flat))

@@ -1,0 +1,509 @@
+experiment:
+  name: dataset_test
+  config_name: dataset_test
+  date: $(date +%Y%m%d_%H%M%S)
+paths:
+  data_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small
+  checkpoint_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models
+  checkpoint_name: sbgm_cfgTest.pth.tar
+  sample_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples
+  evaluation_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/evaluate_sbgm/results
+  log_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs
+  specific_fig_name: test__plot_fct
+  path_save: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples
+  lsm_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small/data_lsm/truth_fullDomain/lsm_full.npz
+  topo_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small/data_topo/truth_fullDomain/topo_full.npz
+  slope_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small/data_slope/truth_fullDomain/slope_full.npz
+  stats_load_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats
+highres:
+  model: DANRA
+  variable: prcp
+  data_size:
+  - 128
+  - 128
+  scaling_method: log_zscore
+  full_domain_dims:
+  - 589
+  - 789
+  buffer_frac: 0.0
+  cutout_domains:
+  - 170
+  - 350
+  - 340
+  - 520
+  cutout_name: danra
+  stationary_cutout:
+    enabled: false
+    bounds:
+    - 200
+    - 328
+    - 380
+    - 508
+lowres:
+  model: ERA5
+  full_domain_dims:
+  - 589
+  - 789
+  condition_variables:
+  - temp
+  - prcp
+  scaling_methods:
+  - zscore
+  - log_zscore
+  dual_lr: false
+  lr_main_var_scale: LR
+  lr_main_var_scale_method: log_zscore
+  buffer_frac: 0.0
+  data_size:
+  - 589
+  - 789
+  resize_factor: 1
+  cutout_domains:
+  - 0
+  - 589
+  - 0
+  - 789
+  cutout_name: danra
+  stationary_cutout:
+    enabled: true
+    bounds:
+    - 0
+    - 589
+    - 0
+    - 789
+  context_mode: full
+  context_data_size:
+  - 589
+  - 789
+sampler:
+  sampler_type: edm_sampler
+  n_timesteps: 56
+  time_embedding: 256
+  last_fmap_channels: 512
+  num_heads: 4
+  block_layers:
+  - 2
+  - 2
+  - 2
+  - 2
+data_handling:
+  cache_size: 0
+  cache_size_train: 0
+  cache_size_valid: 0
+  cache_size_gen: 0
+  num_workers: 1
+  n_gen_samples: 8
+  pin_memory: true
+transforms:
+  scaling: false
+  scaling_split: train
+  force_matching_scale: false
+  sample_w_cutouts: true
+  prcp_eps: 0.01
+stationary_conditions:
+  geographic_conditions:
+    sample_w_geo: true
+    sample_w_sdf: false
+    geo_variables:
+    - lsm
+    - topo
+    with_mask: false
+    topo_min: -12
+    topo_max: 12
+    norm_min: -1
+    norm_max: 1
+    max_land_weight: 1.0
+    min_ocean_weight: 0.5
+    topo_dx_m: 1000.0
+    topo_dy_m: 1000.0
+  seasonal_conditions:
+    sample_w_cond_season: true
+    use_sin_cos_embedding: true
+    use_leap_years: true
+    n_seasons: 4
+visualization:
+  transform_back_bf_plot: true
+  create_figs: true
+  gen_and_plot_every_n_epochs: 10
+  save_figs: true
+  plot_losses: true
+  plot_initial_sample: true
+  show_figs: false
+  show_both_orig_scaled: false
+  show_geo: false
+  show_ocean: false
+  overlay_lsm_contour: true
+  force_matching_scale: true
+  add_boxplot_per_panel: true
+  add_boxplot_summary: true
+  plot_dual_lr_channel: 0
+  ocean_mode: show
+  ocean_bad_color: '#9e9e9e'
+  prcp_under_threshold: 1e-6
+  prcp_under_color: '#c2c2c2'
+  draw_hr_rect_on_lr: true
+  hr_rect_color: '#ff4d4d'
+  hr_rect_linewidth: 1.5
+model:
+  use_resize_conv: false
+  decoder_norm: group
+  decoder_gn_groups: 8
+  decoder_activation: SiLU
+training:
+  seed: 504
+  device: cuda
+  use_mixed_precision: false
+  use_grad_clip: false
+  grad_clip_norm: 0.0
+  verbose: true
+  batch_size: 16
+  learning_rate: 0.0002
+  min_lr: 5.0e-07
+  lr_scheduler: ReduceLROnPlateau
+  lr_scheduler_params:
+    factor: 0.5
+    patience: 15
+    threshold: 0.01
+    min_lr: 1e-6
+  weight_init: true
+  custom_weight_initializer: null
+  with_ema: false
+  eval_use_ema: false
+  load_ema: false
+  ema_decay: 0.999
+  weight_decay: 1.0e-06
+  ema_warmup_steps: 2000
+  epochs: 400
+  loss_type: sdfweighted
+  sdf_weighted_loss: false
+  optimizer: adamw
+  load_checkpoint: false
+  early_stopping: true
+  early_stopping_params:
+    patience: 75
+    min_delta: 0.0001
+  train_use_amp: false
+  train_postfix_every: 10
+  detect_anomaly: false
+  debug_device_asserts: false
+  debug_pre_sigma_div: false
+classifier_free_guidance:
+  enabled: false
+  drop_prob_lr: 0.1
+  drop_prob_geo: 0.1
+  guidance_scale: 1.0
+  null_label_id: 0
+  null_scalar_value: 0.0
+  guidance_scale_max: 3.0
+  sigma_weighted: true
+  drop_lr_ups_in_uncond: true
+edm:
+  enabled: true
+  P_mean: -1.5
+  P_std: 1.2
+  sigma_data: 1.0
+  sigma_min: 0.002
+  sigma_star: 1.0
+  sigma_max: 80
+  rho: 7.0
+  S_churn: 2.0
+  S_min: 40.0
+  S_max: 80.0
+  S_noise: 1.0
+  sampling_steps: 56
+  predict_residual: false
+  baseline_space: hr
+  drop_lr_ups_in_uncond: true
+rain_gate:
+  enabled: true
+  include_lsm: false
+  include_topo: false
+  include_lr_baseline: false
+  wet_threshold_mm: 0.3
+  wet_threshold_modelSpace: -10.0
+  loss_weight_bce: 0.02
+  pos_weight: 1.15
+  c_hidden: 16
+  learning_rate: 0.0002
+  reweight_enabled: false
+  weight_strategy: binary
+  weight_alpha: 0.5
+  prob_gamma: 2.0
+  clip_max: 1.8
+  detach_weights: true
+  reweight_warm_start_epochs: 10
+  reweight_ramp_epochs: 10
+  binary_threshold: 0.5
+scale_control:
+  enabled: false
+  method: auto_from_psd
+  preserve_scale_km: null
+  pixel_km: 2.5
+  land_only: true
+  window: hann
+  c_sigma: 1.0
+ve_dsm:
+  t_eps: 1e-3
+monitoring:
+  edm_metrics_enabled: true
+  edm_metrics_every: 100
+  edm_cosine_metric: true
+  plot_every_n_epochs: 5
+  backtransform_extreme_prcp: true
+  end_of_epoch:
+    enabled: true
+    eval_batches: 1
+    grid_km_per_px: 2.5
+    fss_km:
+    - 5
+    - 10
+    - 20
+    fss_threshold_mm: 1.0
+    psd_band:
+    - 0.05
+    - 0.4
+    wet_day_threshold_mm: 0.1
+    psd_compare_to_hr: true
+    quantiles_compare_to_hr: true
+diagnostics:
+  per_batch_stats: true
+  log_every: 100
+  model_outputs: false
+  warn_if_abs_gt: 15.0
+  warn_if_phys_gt: 350.0
+  save_histograms: true
+  histogram_bins: 200
+  histogram_range: null
+  histogram_every: 500
+  histogram_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/histograms
+evaluation:
+  stationary_cutout:
+    hr_enabled: true
+    lr_enabled: true
+    cutout_domains:
+    - 340
+    - 520
+    - 170
+    - 350
+    hr_bounds:
+    - 380
+    - 508
+    - 200
+    - 328
+    lr_bounds:
+    - 380
+    - 508
+    - 200
+    - 328
+generation:
+  fixed_dates: true
+  random_dates: false
+  start_index: 0
+  seed: 504
+  logging:
+    file_level: INFO
+    console_level: WARNING
+full_gen_eval:
+  split: val
+  use_new_eval: true
+  seed: 504
+  sampler_cleanup: true
+  sigma_star_grid:
+  - 0.8
+  - 0.85
+  - 0.9
+  - 0.95
+  - 1.0
+  - 1.05
+  - 1.1
+  - 1.15
+  - 1.2
+  - 1.25
+  sigma_control:
+    sigma_star_mode: late_ramp
+    ramp_start_frac: 0.6
+    ramp_end_frac: 0.85
+    example_sigma_subset:
+    - 0.8
+    - 0.9
+    - 1.0
+    - 1.1
+    - 1.2
+    crps_rain_thresh: 1.0
+    hk_min_hr_frac: 0.0001
+    hk_min_hr_abs: 1.0e-12
+  sampler_grid:
+    rho:
+    - 7.0
+    S_churn:
+    - 2.0
+    sigma_scale:
+    - 1.0
+  sampler_eval_tasks:
+  - prcp_probabilistic
+  - prcp_scale
+  - prcp_distributional
+  - prcp_extremes
+  - prcp_spatial
+  - prcp_temporal
+  - prcp_features
+  - prcp_dates
+  ensemble_size: 32
+  max_dates: 1000
+  eval_land_only: true
+  prefer_phys: true
+  lr_key: lr
+  make_plots: true
+  hr_dx_km: 2.5
+  lr_dx_km: 31.0
+  grid_km_per_px: 2.5
+  lr_grid_km_per_px: 31
+  use_ensemble: true
+  ensemble_n_members: null
+  ensemble_member_seed: 1234
+  ensemble_reduction_fallback: pmm
+  ensemble_cache_members: false
+  dist_ensemble_pool_mode: pool
+  do_prob: true
+  do_scale: true
+  do_dist: true
+  do_ext: true
+  do_spat: true
+  do_temp: true
+  do_feat: true
+  do_dates: true
+  plot_only: false
+  baselines_overlay:
+    enabled: true
+    types:
+    - qm
+    split: test
+    labels:
+      bilinear: LR bilinear
+      qm: QM (per-pixel)
+      unet_sr: UNet-SR
+    styles:
+      bilinear:
+        color: '#c47a02'
+        ls: --
+        lw: 0.8
+      qm:
+        color: '#008b8b'
+        ls: -.
+        lw: 0.8
+      unet_sr:
+        color: '#7a68a6'
+        ls: ':'
+        lw: 0.8
+  gen_dir: null
+  eval_dir: null
+  fss_threshold_mm:
+  - 1.0
+  - 5.0
+  - 10.0
+  - 20.0
+  - 50.0
+  fss_scales_km:
+  - 5
+  - 10
+  - 20
+  - 40
+  compute_lr_fss: true
+  iss_thresholds_mm:
+  - 1.0
+  - 5.0
+  - 10.0
+  - 20.0
+  - 50.0
+  iss_scales_km:
+  - 5
+  - 10
+  - 20
+  - 40
+  compute_lr_iss: true
+  thresholds_mm:
+  - 1.0
+  - 5.0
+  - 10.0
+  - 20.0
+  wet_threshold_mm: 0.5
+  reliability_bins: 10
+  spread_skill_bins: 10
+  pit_bins: 20
+  variogram_p: 0.5
+  variogram_max_pairs: 5000
+  psd_ignore_low_k_bins: 2
+  psd_normalize: none
+  low_k_max: 0.005
+  high_k_max: 0.05
+  random_ref_kind: phase_randomized
+  seasonal_summaries: true
+  region_mask_path: null
+  pixel_dist_n_bins: 100
+  pixel_dist_vmax_percentile: 99.5
+  pixel_dist_save_cap: 20000000
+  pixel_dist_include_lr: true
+  ext_agg_kind: mean
+  ext_rxk_days:
+  - 1
+  - 5
+  ext_gev_rps_years:
+  - 2
+  - 5
+  - 10
+  - 20
+  - 50
+  ext_blocks_per_year: 12.0
+  ext_pot_thr_kind: hr_quantile
+  ext_pot_thr_val: 0.95
+  ext_pot_rps_years:
+  - 2
+  - 5
+  - 10
+  - 20
+  - 50
+  ext_days_per_year: 365.25
+  ext_wet_threshold_mm: 1.0
+  ext_include_lr: true
+  ext_tails_basis: pooled_pixels
+  spatial_corr_kinds:
+  - pearson
+  - spearman
+  spatial_deseasonalize: true
+  spatial_vmin: null
+  spatial_vmax: null
+  spatial_show_diff: true
+  spatial_include_gen: false
+  spatial_include_ens: true
+  spatial_include_hr: true
+  spatial_include_lr: true
+  temporal_include_lr: true
+  temporal_wet_thr_mm: 1.0
+  temporal_max_lag: 30
+  temporal_max_spell: 25
+  temporal_group_by: year
+  temporal_ensemble_pool_mode: member_mean
+  sal_structure_mode: object
+  sal_threshold_kind: quantile
+  sal_threshold_value: 0.85
+  sal_connectivity: 8
+  sal_min_area_px: 16
+  sal_smooth_sigma: 1.0
+  sal_peakedness_mode: herfindahl
+  dates_list:
+  - '20190107'
+  - '20190203'
+  - '20190312'
+  dates_include_lr: true
+  dates_include_members: true
+  dates_n_members: 3
+  dates_cmap: auto
+  dates_percentile: 99.5
+quicklook:
+  n_dates: 6
+  members_to_show: 5
+  sampler_steps: null
+  seed: null
+  specific_dates: null
+  vmax_mm: null
+  save_png: true

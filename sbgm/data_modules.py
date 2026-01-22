@@ -794,6 +794,10 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             self.hr_buffer_frac = cfg['highres'].get('buffer_frac', 0.00) if cfg is not None and 'highres' in cfg else 0.00
             self.lr_buffer_frac = cfg['lowres'].get('buffer_frac', 0.00) if cfg is not None and 'lowres' in cfg else 0.00
 
+            # Set domain dimensions
+            self.hr_full_domain_dims = (cfg['highres']['full_domain_dims'][0], cfg['highres']['full_domain_dims'][1]) if cfg is not None and 'highres' in cfg else (self.hr_data_size[0], self.hr_data_size[1])
+            self.lr_full_domain_dims = (cfg['lowres']['full_domain_dims'][0], cfg['lowres']['full_domain_dims'][1]) if cfg is not None and 'lowres' in cfg else (self.target_lr_size[0], self.target_lr_size[1])
+
             for cond_var, trans_type in zip(self.lr_conditions, self.lr_scaling_methods):
                 logger.info(f"LR condition: {cond_var}, scaling method: {trans_type}")
                 # Common prefix for all LR transforms
@@ -1095,69 +1099,106 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             Conventions:
             - Points are [x1, x2, y1, y2] in pixel indices on their *native* grids.
             - Slicing is [y1:y2, x1:x2] elsewhere in the code.
-            - self.hr_data_size = (H_hr, W_hr); self.target_lr_size = (H_lr, W_lr).
+            - self.hr_data_size = (H_hr, W_hr)
+
+            Paper 2 additions:
+            - LR can be a *context window* larger than the HR patch (e.g. full domain).
+            - If `self.lr_context_mode == 'full'`, LR crop is the full LR domain.
+            - Else, LR crop is a centered window of size `self.lr_context_size` around the HR patch center,
+            clipped to `self.lr_full_domain_dims`.
 
             Priority:
             1) If fixed_cutout_hr==True and fixed_hr_bounds valid:
                 hr_point = fixed_hr_bounds
-                lr_point = (fixed_lr_bounds if fixed_cutout_lr and valid) else map HR→LR (or same if no lr_data_size)
+                lr_point = fixed_lr_bounds if fixed_cutout_lr and valid
+                        else (full LR if context_mode='full')
+                        else centered LR context around hr_point
                 return
             2) Else if fixed_cutout_lr==True and fixed_lr_bounds valid:
                 lr_point = fixed_lr_bounds
-                hr_point = map LR→HR  (co-locate if domains align)  # preferred
-                            (else fall back to HR random if HR domain truly unrelated)
+                hr_point = centered HR patch around lr_point (if full dims known)
+                        else fallback to map_point_to_size
                 return
             3) Else if cutouts==False:
                 return (None, None)
             4) Else (random HR crop):
                 hr_point = random from HR cutout domain
-                lr_point = map HR→LR if LR domain equivalent/unspecified, else random from LR domain
+                lr_point = full LR if context_mode='full'
+                        else centered LR context around hr_point if LR domain equivalent/unspecified
+                        else random from LR domain
                 return
         """
+
+        # Determine full-domain dims used for clipping centered windows.
+        full_hr = tuple(self.hr_full_domain_dims) if getattr(self, "hr_full_domain_dims", None) is not None else None
+        full_lr = tuple(self.lr_full_domain_dims) if getattr(self, "lr_full_domain_dims", None) is not None else full_hr
+
+        # Helper: build LR point from an HR point according to context policy
+        def _lr_from_hr(hr_pt):
+            # Authoritative LR ROI if explicitly fixed
+            if self.fixed_cutout_lr and self._valid_bounds(self.fixed_lr_bounds):
+                return [int(v) for v in self.fixed_lr_bounds]  # type: ignore
+
+            # If LR context is full domain
+            if str(getattr(self, "lr_context_mode", "centered")).lower() == "full" and (full_lr is not None):
+                return [0, int(full_lr[1]), 0, int(full_lr[0])]
+
+            # Centered LR context window around HR patch center
+            if full_lr is None:
+                # Fallback: if we don't know full dims, co-locate with HR indices
+                return hr_pt
+            lr_ctx_size = getattr(self, "lr_context_size", None)
+            if lr_ctx_size is None:
+                # Fallback to the old behavior (co-located size)
+                return hr_pt
+            return self._center_window(hr_pt, tuple(lr_ctx_size), full_lr)
+
         # ----- Case 1: HR is fixed (authoritative), LR follows
         if self.fixed_cutout_hr and self._valid_bounds(self.fixed_hr_bounds):
             hr_point = [int(v) for v in self.fixed_hr_bounds]  # authoritative HR ROI # type: ignore
-
-            # LR decision
-            if self.lr_data_size is None:
-                lr_point = hr_point  # same indices if LR uses HR grid/size
-            else:
-                if self.fixed_cutout_lr and self._valid_bounds(self.fixed_lr_bounds):
-                    lr_point = [int(v) for v in self.fixed_lr_bounds] # authoritative LR ROI # type: ignore
-                else:
-                    # co-locate LR by mapping HR→LR
-                    lr_point = self._map_point_to_size(hr_point, self.hr_data_size, self.target_lr_size)
+            lr_point = _lr_from_hr(hr_point)
             return hr_point, lr_point
 
         # Warn once if HR was requested fixed but bounds invalid
         if self.fixed_cutout_hr and not self._valid_bounds(self.fixed_hr_bounds):
-            logger.warning(f"fixed_cutout_hr=True but fixed_hr_bounds invalid: {self.fixed_hr_bounds}. "
-                        "HR will not be fixed; proceeding with LR/normal policy.")
+            logger.warning(
+                f"fixed_cutout_hr=True but fixed_hr_bounds invalid: {self.fixed_hr_bounds}. "
+                "HR will not be fixed; proceeding with LR/normal policy."
+            )
 
         # ----- Case 2: LR is fixed (authoritative), HR follows
         if self.fixed_cutout_lr and self._valid_bounds(self.fixed_lr_bounds):
             lr_point = [int(v) for v in self.fixed_lr_bounds]  # authoritative LR ROI # type: ignore
 
-            # Prefer to co-locate HR by mapping LR→HR when domains are equivalent/unspecified.
-            # If LR domain is clearly unrelated to HR domain, fall back to HR random (to avoid nonsense mapping).
-            domains_same = self._domains_equivalent(self.lr_cutout_domains, self.hr_cutout_domains,
-                                                    self.lr_cutout_name, self.hr_cutout_name)
+            # Prefer to co-locate HR by centering HR patch within LR window (same grid case).
+            domains_same = self._domains_equivalent(
+                self.lr_cutout_domains, self.hr_cutout_domains,
+                self.lr_cutout_name, self.hr_cutout_name
+            )
             if domains_same or (self.lr_cutout_domains is None):
-                hr_point = self._map_point_to_size(lr_point, self.target_lr_size, self.hr_data_size)
+                if full_hr is not None:
+                    hr_point = self._center_window(lr_point, self.hr_data_size, full_hr)
+                else:
+                    # Legacy fallback (may be incorrect if sizes are not meaningful scales)
+                    hr_point = self._map_point_to_size(
+                        lr_point,
+                        getattr(self, "target_lr_size", self.hr_data_size),
+                        self.hr_data_size
+                    )
             else:
                 # HR domain differs materially; choose a valid HR crop instead of blind mapping
                 if not self.cutouts:
                     hr_point = None
                 else:
                     hr_point = find_rand_points(self.hr_cutout_domains, self.hr_data_size)
-                    # NOTE: If you *want* forced co-location even for different named domains,
-                    # replace the line above with the mapping call and accept possible mismatch.
             return hr_point, lr_point
 
         # Warn once if LR was requested fixed but bounds invalid
         if self.fixed_cutout_lr and not self._valid_bounds(self.fixed_lr_bounds):
-            logger.warning(f"fixed_cutout_lr=True but fixed_lr_bounds invalid: {self.fixed_lr_bounds}. "
-                        "LR will not be fixed; proceeding with HR/normal policy.")
+            logger.warning(
+                f"fixed_cutout_lr=True but fixed_lr_bounds invalid: {self.fixed_lr_bounds}. "
+                "LR will not be fixed; proceeding with HR/normal policy."
+            )
 
         # ----- Case 3: No cutouts → full domain (points unused)
         if not self.cutouts:
@@ -1166,15 +1207,23 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         # ----- Case 4: Random HR crop, LR follows policy
         hr_point = find_rand_points(self.hr_cutout_domains, self.hr_data_size)
 
-        if self.lr_data_size is None:
-            lr_point = hr_point
+        # LR follows: either a full-domain LR context, a centered LR context around HR patch, or an independent LR random crop
+        domains_same = self._domains_equivalent(
+            self.lr_cutout_domains, self.hr_cutout_domains,
+            self.lr_cutout_name, self.hr_cutout_name
+        )
+
+        if str(getattr(self, "lr_context_mode", "centered")).lower() == "full" and (full_lr is not None):
+            lr_point = [0, int(full_lr[1]), 0, int(full_lr[0])]
         else:
-            domains_same = self._domains_equivalent(self.lr_cutout_domains, self.hr_cutout_domains,
-                                                    self.lr_cutout_name, self.hr_cutout_name)
             if (self.lr_cutout_domains is None) or domains_same:
-                lr_point = self._map_point_to_size(hr_point, self.hr_data_size, self.target_lr_size)
+                lr_point = _lr_from_hr(hr_point)
             else:
-                lr_point = find_rand_points(self.lr_cutout_domains, self.target_lr_size)
+                # LR domain differs materially; choose a random LR context crop in its own domain
+                lr_ctx_size = getattr(self, "lr_context_size", None)
+                if lr_ctx_size is None:
+                    lr_ctx_size = getattr(self, "target_lr_size", self.hr_data_size)
+                lr_point = find_rand_points(self.lr_cutout_domains, tuple(lr_ctx_size))
 
         return hr_point, lr_point
 
@@ -1273,6 +1322,44 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         self._validate_season_y(y, use_sincos=False, where=" /dataset-build")
         return y
 
+    @staticmethod
+    def _center_window(point, window_hw, full_hw):
+        # point = [x1,x2,y1,y2]
+        x1, x2, y1, y2 = [int(v) for v in point]
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        wh, ww = int(window_hw[0]), int(window_hw[1])  # (H,W)
+
+        # propose window
+        half_w = ww // 2
+        half_h = wh // 2
+        nx1 = cx - half_w
+        nx2 = nx1 + ww
+        ny1 = cy - half_h
+        ny2 = ny1 + wh
+
+        H, W = int(full_hw[0]), int(full_hw[1])
+
+        # shift if out of bounds (preserve size if possible)
+        if nx1 < 0:
+            nx2 -= nx1
+            nx1 = 0
+        if ny1 < 0:
+            ny2 -= ny1
+            ny1 = 0
+        if nx2 > W:
+            d = nx2 - W
+            nx1 -= d
+            nx2 = W
+        if ny2 > H:
+            d = ny2 - H
+            ny1 -= d
+            ny2 = H
+
+        nx1 = max(0, nx1); ny1 = max(0, ny1)
+        nx2 = min(W, nx2); ny2 = min(H, ny2)
+
+        return [nx1, nx2, ny1, ny2]
     def __getitem__(self, idx:int):
         '''
             For each sample:
@@ -1317,7 +1404,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             # Crop LR data using lr_point if cutouts are enabled and lr_point is not None
             if self.cutouts and data is not None and lr_point is not None:
                 # lr_point is in format [x1, x2, y1, y2]
-                data = data[lr_point[0]:lr_point[1], lr_point[2]:lr_point[3]]
+                data = data[lr_point[2]:lr_point[3], lr_point[0]:lr_point[1]]
                 logger.debug(f"Cropped {cond} data to shape {data.shape} using lr_point {lr_point}")
             # logger.debug(f"Data shape for {cond}: {data.shape if data is not None else None}")
                 
@@ -1342,7 +1429,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
             hr = None
 
         if self.cutouts and (hr is not None) and (hr_point is not None):
-            hr = hr[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
+            hr = hr[hr_point[2]:hr_point[3], hr_point[0]:hr_point[1]]
             logger.debug(f"Cropped HR data to shape {hr.shape} using hr_point {hr_point}")
         if self.save_original and (hr is not None):
             sample_dict[f"{self.hr_variable}_hr_original"] = hr.clone()
@@ -1354,7 +1441,7 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
         if self.geo_variables is not None and 'lsm' in self.geo_variables and self.lsm_full_domain is not None:
             lsm_hr = self.lsm_full_domain
             if self.cutouts and lsm_hr is not None and hr_point is not None:
-                lsm_hr = lsm_hr[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
+                lsm_hr = lsm_hr[hr_point[2]:hr_point[3], hr_point[0]:hr_point[1]]
             # Ensure the mask is contiguous and transform
             lsm_hr = np.ascontiguousarray(lsm_hr)
             # Separate geo transform, with resize to HR size
@@ -1390,10 +1477,10 @@ class DANRA_Dataset_cutouts_ERA5_Zarr(Dataset):
                 if geo_data is not None and self.cutouts:
                     # For geo data, if an LR-specific size and domain are provided, use lr_point
                     if self.lr_data_size is not None and self.lr_cutout_domains is not None and lr_point is not None:
-                        geo_data = geo_data[lr_point[0]:lr_point[1], lr_point[2]:lr_point[3]]
+                        geo_data = geo_data[lr_point[2]:lr_point[3], lr_point[0]:lr_point[1]]
                     else:
                         if hr_point is not None:
-                            geo_data = geo_data[hr_point[0]:hr_point[1], hr_point[2]:hr_point[3]]
+                            geo_data = geo_data[hr_point[2]:hr_point[3], hr_point[0]:hr_point[1]]
                 
                 if geo_data is not None and geo_transform is not None:
                     geo_data = geo_transform(geo_data)

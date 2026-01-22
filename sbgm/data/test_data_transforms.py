@@ -13,20 +13,25 @@ Run:
   python scripts/test_dataset_transforms.py --cfg path/to/config.yaml --n 5 --idx 0 10 100
 """
 
+
+
 from __future__ import annotations
 
 import os
 import json
+import copy
 import argparse
 from typing import Any, Dict, Optional, List, Tuple
 
 import numpy as np
 import torch
 
-# If your project uses yaml
+from pathlib import Path
+import matplotlib.pyplot as plt
+
 import yaml
 
-# Import your dataset + transform helpers
+# Import datasets + transform helpers
 from sbgm.data_modules import DANRA_Dataset_cutouts_ERA5_Zarr
 from sbgm.special_transforms import (
     build_back_transforms_from_stats,
@@ -35,6 +40,9 @@ from sbgm.special_transforms import (
     get_transforms_from_stats,
     get_backtransforms_from_stats,
 )
+
+# Colormap helper for variables
+from sbgm.variable_utils import get_cmap_for_variable
 
 # ------------------------- helpers -------------------------
 
@@ -80,7 +88,394 @@ def _print_header(title: str):
 def _device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+# ------------------------- dataset tester helpers -------------------------
+
+def _ensure_outdir(outdir: str) -> Path:
+    p = Path(outdir)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _tensor_info_simple(name, t):
+    if t is None:
+        return f"{name}: None"
+    if torch.is_tensor(t):
+        return (
+            f"{name}: shape={tuple(t.shape)} dtype={t.dtype} "
+            f"min={float(t.min()):.4g} mean={float(t.mean()):.4g} max={float(t.max()):.4g}"
+        )
+    return f"{name}: type={type(t)}"
+
+def _save_dataset_quicklook_plotting_utils(sample: Dict[str, Any], cfg: dict, outdir: Path, figsize: Tuple[int,int]) -> None:
+    try:
+        from sbgm.plotting_utils import plot_sample
+    except Exception as e:
+        print(f"[DATASET TESTER] Could not import plot_sample: {e}")
+        return
+
+    date_str = sample.get("date", "unknown")
+    hr_pts = sample.get("hr_points", None)
+    lr_pts = sample.get("lr_points", None)
+    hr_tag = "hrpts_" + "_".join(map(str, hr_pts)) if isinstance(hr_pts, (list, tuple)) else "hrpts_na"
+    lr_tag = "lrpts_" + "_".join(map(str, lr_pts)) if isinstance(lr_pts, (list, tuple)) else "lrpts_na"
+
+    try:
+        fig, _ = plot_sample(sample, cfg, figsize=tuple(figsize))
+        fig.savefig(str(outdir / f"dataset_quicklook_{date_str}_{hr_tag}_{lr_tag}.png"), dpi=150)
+        plt.close(fig)
+    except Exception as e:
+        print(f"[DATASET TESTER] plot_sample failed: {e}")
+
+def _save_dataset_quicklook(sample: Dict[str, Any], outdir: Path, max_lr_vars: int = 3):
+    hr_keys = [k for k in sample.keys() if k.endswith("_hr")]
+    if not hr_keys:
+        return
+    
+    hr_key = hr_keys[0]
+    hr = sample[hr_key]
+    if not (torch.is_tensor(hr) and hr.ndim >= 2):
+        return
+    
+    hr_img = hr[0] if hr.ndim == 3 else hr  # handle channel dim
+    hr_img = hr_img.detach().cpu().numpy()
+
+    lr_keys = [k for k in sample.keys() if k.endswith("_lr")][:max_lr_vars]
+
+    ncols = 1 + len(lr_keys)
+    fig, axs = plt.subplots(1, ncols, figsize=(4 * ncols, 4))
+
+    hr_var = hr_key.replace('_hr', '')
+    im = axs[0].imshow(hr_img, cmap=get_cmap_for_variable(hr_var))
+    axs[0].set_title(f"HR: {hr_key}")
+    plt.colorbar(im, ax=axs[0])
+
+    for i, k in enumerate(lr_keys, start=1):
+        lr = sample[k]
+        if torch.is_tensor(lr):
+            img = lr[0] if lr.ndim == 3 else lr
+            img = img.detach().cpu().numpy()
+            lr_var = k.replace('_lr', '')
+            im = axs[i].imshow(img, cmap=get_cmap_for_variable(lr_var))
+            axs[i].set_title(f"LR: {k}")
+            plt.colorbar(im, ax=axs[i])
+    
+    for ax in axs:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    fig.tight_layout()
+    # Build informative filename
+    date_str = sample.get('date', 'unknown')
+    hr_pts = sample.get('hr_points', None)
+    lr_pts = sample.get('lr_points', None)
+    hr_tag = 'hrpts_' + '_'.join(map(str, hr_pts)) if isinstance(hr_pts, (list, tuple)) else 'hrpts_na'
+    lr_tag = 'lrpts_' + '_'.join(map(str, lr_pts)) if isinstance(lr_pts, (list, tuple)) else 'lrpts_na'
+    fig.savefig(str(outdir / f"dataset_quicklook_{date_str}_{hr_tag}_{lr_tag}.png"), dpi=150)
+    plt.close(fig)
+
+
+# ------------------------- region stats helpers -------------------------
+
+def _region_slices(h: int, w: int) -> Dict[str, Tuple[slice, slice]]:
+    """ A few consistent subregions for quick sanity stats. """
+    cy0, cy1 = int(h * 0.25), int(h * 0.75)
+    cx0, cx1 = int(w * 0.25), int(w * 0.75)
+    return {
+        "full": (slice(0, h), slice(0, w)),
+        "center": (slice(cy0, cy1), slice(cx0, cx1)),
+        "nw": (slice(0, cy0), slice(0, cx0)),
+        "ne": (slice(0, cy0), slice(cx1, w)),
+        "sw": (slice(cy1, h), slice(0, cx0)),
+        "se": (slice(cy1, h), slice(cx1, w)),
+    }
+
+
+def _stats_dict(x: Any) -> Dict[str, Any]:
+    a = _to_numpy(x)
+    if a is None:
+        return {'shape': None}
+    a = np.asarray(a)
+    if a.size == 0:
+        return {'shape': list(a.shape)}
+    return {
+        'shape': list(a.shape),
+        'min': float(np.nanmin(a)),
+        'mean': float(np.nanmean(a)),
+        'max': float(np.nanmax(a)),
+        'sum': float(np.nansum(a)),
+        'p95': float(np.nanpercentile(a, 95)),
+        'p99': float(np.nanpercentile(a, 99)),
+    }
+
+
+def _write_sample_stats(sample: Dict[str, Any], outdir: Path, keys: List[str]) -> None:
+    """ Write per-sample stats JSON (full + a few subregions) for selected tensor keys"""
+    date_str = str(sample.get('date', 'unknown'))
+    hr_pts = sample.get('hr_points', None)
+    lr_pts = sample.get('lr_points', None)
+    hr_tag = 'hrpts_' + '_'.join(map(str, hr_pts)) if isinstance(hr_pts, (list, tuple)) else 'hrpts_na'
+    lr_tag = 'lrpts_' + '_'.join(map(str, lr_pts)) if isinstance(lr_pts, (list, tuple)) else 'lrpts_na'
+
+    payload: Dict[str, Any] = {
+        'date': date_str,
+        'hr_points': hr_pts,
+        'lr_points': lr_pts,
+        'stats': {}
+    }
+
+    for k in keys:
+        if k not in sample:
+            continue
+        arr = _to_numpy(sample[k])
+        if arr is None:
+            continue
+        arr = np.asarray(arr)
+        # If channel-first 3D: take channel 0 for regional stats, but keep global stats on full tensor
+        payload['stats'][k] = {'global': _stats_dict(arr)}
+        if arr.ndim >= 2:
+            # Choose 2D plane for regional stats
+            if arr.ndim == 3:
+                plane = arr[0]
+            elif arr.ndim == 2:
+                plane = arr
+            elif arr.ndim == 4:
+                plane = arr[0, 0]
+            else:
+                plane = arr.reshape(arr.shape[-2], arr.shape[-1])
+            
+            h, w = plane.shape[-2], plane.shape[-1]
+            regs = _region_slices(h, w)
+            payload['stats'][k]['regions'] = {}
+            for rname, (ys, xs) in regs.items():
+                payload['stats'][k]['regions'][rname] = _stats_dict(plane[ys, xs])
+
+    (outdir / f"dataset_stats_{date_str}_{hr_tag}_{lr_tag}.json").write_text(json.dumps(payload, indent=2) + "\n")
+
 # ------------------------- main checks -------------------------
+
+# --- Land/sea mask helpers and stats
+def _get_land_mask(sample: Dict[str, Any], target_2d_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+    """ Return boolean mask for land pixels in HR space if available
+
+    Try a few common keys used in dataset.
+    Mask convention: land ~1, sea ~0.  
+    """
+    cand_keys = ["lsm", "lsm_hr", "landmask", "land_sea_mask"]
+    mask = None
+    for k in cand_keys:
+        if k in sample:
+            mask = _to_numpy(sample[k])
+            if mask is not None:
+                break
+
+    if mask is None:
+        return None
+    
+    mask = np.asarray(mask)
+
+    # Reduce to 2D if needed
+    if mask.ndim == 3:
+        mask2 = mask[0]
+    elif mask.ndim == 2:
+        mask2 = mask
+    elif mask.ndim == 4:
+        mask2 = mask[0, 0]
+    else:
+        return None
+    
+    if mask2.shape != target_2d_shape:
+        # Cannot safely resample; skip rather than wrong mask
+        return None
+    return (mask2 >= 0.5)
+
+def _print_land_sea_stats(name: str, field_2d: np.ndarray, land_mask: Optional[np.ndarray]) -> None:
+    """Print mean/std over all pixels vs land-only"""
+    arr = np.asarray(field_2d)
+    all_flat = arr[np.isfinite(arr)]
+    if all_flat.size == 0:
+        print(f"[MASK STATS] {name}: no valid pixels/finite values.")
+        return
+    
+    mu_all = float(np.nanmean(all_flat))
+    std_all = float(np.nanstd(all_flat))
+
+    if land_mask is None:
+        print(f"[MASK STATS] {name}: all pixels: mean={mu_all:.4g} std={std_all:.4g} (no land mask in sample)")
+        return
+    
+    land_flat = arr[land_mask]
+    land_flat = land_flat[np.isfinite(land_flat)]
+    if land_flat.size == 0:
+        print(f"[MASK STATS] {name}: all={mu_all:.4g} +/- {std_all:.4g} | land=EMPTY")
+        return
+    
+    mu_land = float(np.nanmean(land_flat))
+    sd_land = float(np.nanstd(land_flat))
+    frac_land = float(np.mean(land_mask))
+
+    print(f"[MASK STATS] {name}: all={mu_all:.4g} +/- {std_all:.4g} | land={mu_land:.4g} +/- {sd_land:.4g} (frac land={frac_land:.3f})")
+
+# Dataset test runner
+def run_dataset_tester(cfg: dict, outdir: str, indices: List[int],
+                       *, save_stats: bool = False,
+                       plot_style: str = "plotting_utils",
+                       figsize: Tuple[int,int] = (15,4),
+                       context_demo: bool = False):
+    """
+    Lightweight dataset sanity checker
+    Verifies that spatial/temporal context mechanisms are active and
+    inspects concrete samples before training/generation.
+
+    Note: 
+        This tester is not meant to compute normalization statistics for a domain.
+        For that, run the full data_analysis_pipeline/stats_analysis on the target domain
+    """
+    outp = _ensure_outdir(outdir)
+
+    # Save resolved config for provenance
+    (outp / 'cfg_used.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
+
+
+    from sbgm.utils import build_data_path
+
+    def _run_once(cfg_local: dict, tag: str):
+        """Run the dataset tester once for a given cfg variant (used for D0/D1 demo)."""
+        print("\n" + "#" * 90)
+        print(f"[DATASET TESTER] CONTEXT DEMO RUN: {tag}")
+        print("#" * 90)
+        full_domain_dims_hr = cfg_local["highres"].get("full_domain_dims", None)
+        full_domain_dims_lr = cfg_local["lowres"].get("full_domain_dims", None)
+
+        hr_zarr = build_data_path(
+            cfg_local['paths']['data_dir'],
+            cfg_local['highres']['model'],
+            cfg_local['highres']['variable'],
+            full_domain_dims_hr,
+            'train'
+        )
+
+        lr_zarr_dict = {}
+        for v in cfg_local["lowres"]["condition_variables"]:
+            lr_zarr_dict[v] = build_data_path(
+                cfg_local['paths']['data_dir'],
+                cfg_local['lowres']['model'],
+                v,
+                full_domain_dims_lr,
+                'train'
+            )
+
+        # Load lsm/topo if available
+        lsm = None
+        topo = None
+        lsm_path = cfg_local.get("paths", {}).get("lsm_path", None)
+        topo_path = cfg_local.get("paths", {}).get("topo_path", None)
+        if lsm_path and os.path.exists(lsm_path):
+            lsm = np.flipud(np.load(lsm_path)["data"]).copy()
+        if topo_path and os.path.exists(topo_path):
+            topo = np.flipud(np.load(topo_path)["data"]).copy()
+
+        default_bounds = (200, 328, 380, 508)
+        hr_bounds = cfg_local.get("highres", {}).get("stationary_cutout", {}).get("bounds", None) or list(default_bounds)
+        lr_bounds = cfg_local.get("lowres", {}).get("stationary_cutout", {}).get("bounds", None) or list(default_bounds)
+
+        # NOTE: YAML stationary_cutout.bounds are [y0, y1, x0, x1]. Dataset convention is [x1, x2, y1, y2].
+        def _yx_to_xy(b):
+            if b is None:
+                return None
+            b = [int(v) for v in b]
+            if len(b) != 4:
+                return b
+            y0, y1, x0, x1 = b
+            return [x0, x1, y0, y1]
+
+        hr_bounds_xy = _yx_to_xy(hr_bounds)
+        lr_bounds_xy = _yx_to_xy(lr_bounds)
+
+        ds = DANRA_Dataset_cutouts_ERA5_Zarr(
+            hr_variable_dir_zarr=hr_zarr,
+            hr_data_size=tuple(cfg_local["highres"]["data_size"]) if cfg_local["highres"]["data_size"] is not None else (128, 128),
+            n_samples=int(cfg_local.get("data_handling", {}).get("n_samples_debug", 20)),
+            cache_size=int(cfg_local.get("data_handling", {}).get("cache_size", 0)),
+            hr_variable=cfg_local["highres"]["variable"],
+            hr_model=cfg_local["highres"]["model"],
+            hr_scaling_method=cfg_local["highres"]["scaling_method"],
+            lr_conditions=cfg_local["lowres"]["condition_variables"],
+            lr_model=cfg_local["lowres"]["model"],
+            lr_scaling_methods=cfg_local["lowres"]["scaling_methods"],
+            lr_cond_dirs_zarr=lr_zarr_dict,
+            geo_variables=cfg_local.get('stationary_conditions', {}).get('geographic_conditions', {}).get('geo_variables', None),
+            lsm_full_domain=lsm,
+            topo_full_domain=topo,
+            cfg=cfg_local,
+            scale=cfg_local.get("transforms", {}).get("scaling", False),
+            split='train',
+            shuffle=False,
+            cutouts=bool(cfg_local.get("transforms", {}).get("sample_w_cutouts", False)),
+            cutout_domains=cfg_local["highres"].get("cutout_domains", None),
+            lr_data_size=tuple(cfg_local["lowres"]["data_size"]) if cfg_local["lowres"]["data_size"] is not None else None,
+            lr_cutout_domains=cfg_local["lowres"].get("cutout_domains", None),
+            fixed_cutout_hr=True,
+            fixed_hr_bounds=hr_bounds_xy,
+            fixed_cutout_lr=True,
+            fixed_lr_bounds=lr_bounds_xy,
+        )
+
+        print(f"[DATASET TESTER] ({tag}) Dataset length: {len(ds)}")
+        # Print key context settings
+        lr_cfg = cfg_local.get("lowres", {})
+        print(f"[DATASET TESTER] ({tag}) lowres.context_mode={lr_cfg.get('context_mode', None)}")
+        print(f"[DATASET TESTER] ({tag}) lowres.context_data_size={lr_cfg.get('context_data_size', None)}")
+        print(f"[DATASET TESTER] ({tag}) lowres.data_size={lr_cfg.get('data_size', None)}")
+
+        for i in indices:
+            sample = ds[i]
+            print(f"\n[DATASET TESTER] ({tag}) Sample index: {i}")
+            for k in sorted(sample.keys()):
+                print(_tensor_info_simple(k, sample[k]))
+
+            # Explicit sanity: LR context window should match cfg['lowres']['context_data_size'] when provided
+            for v in cfg_local["lowres"]["condition_variables"]:
+                k = f"{v}_lr"
+                if k in sample and torch.is_tensor(sample[k]):
+                    print(f"[DATASET TESTER] ({tag}) {k} context shape: {tuple(sample[k].shape)}")
+
+            # Save quicklook
+            if plot_style == "plotting_utils":
+                _save_dataset_quicklook_plotting_utils(sample, cfg_local, outp, figsize)
+            else:
+                _save_dataset_quicklook(sample, outp)
+
+            # Optional stats JSON (debug only)
+            if save_stats:
+                keys = [f"{cfg_local['highres']['variable']}_hr"] + [f"{v}_lr" for v in cfg_local["lowres"]["condition_variables"]]
+                for g in ["lsm", "lsm_hr", "topo", "sdf"]:
+                    if g in sample:
+                        keys.append(g)
+                _write_sample_stats(sample, outp, keys)
+
+
+    # If requested, run both D0 and D1 variants back-to-back.
+    if context_demo:
+        # D0: co-located patch LR (same size as HR patch)
+        cfg_d0 = copy.deepcopy(cfg)
+        cfg_d0.setdefault("lowres", {})
+        cfg_d0["lowres"]["context_mode"] = "centered"
+        cfg_d0["lowres"]["context_data_size"] = list(cfg_d0["highres"].get("data_size", [128, 128]))
+
+        # D1: full-domain LR context
+        cfg_d1 = copy.deepcopy(cfg)
+        cfg_d1.setdefault("lowres", {})
+        cfg_d1["lowres"]["context_mode"] = "full"
+        # keep context_data_size present for clarity/debug, but full overrides it
+        if cfg_d1["lowres"].get("full_domain_dims", None) is not None:
+            cfg_d1["lowres"]["context_data_size"] = list(cfg_d1["lowres"]["full_domain_dims"])
+
+        _run_once(cfg_d0, tag="D0")
+        _run_once(cfg_d1, tag="D1")
+    else:
+        _run_once(cfg, tag="single")
+
 
 @torch.no_grad()
 def test_one_sample(
@@ -102,6 +497,14 @@ def test_one_sample(
     print(f"\n[HR scaled] {hr_key}: {_stats(sample.get(hr_key))}")
     if f"{hr_var}_hr_original" in sample:
         print(f"[HR orig ] {hr_var}_hr_original: {_stats(sample.get(f'{hr_var}_hr_original'))}")
+
+    # Land/sea masking sanity (HR space)
+    if hr_key in sample and torch.is_tensor(sample.get(hr_key)):
+        hr = sample[hr_key]
+        hr2d = _to_numpy(hr[0] if (hr.ndim == 3) else (hr[0,0] if hr.ndim ==4 else hr))
+        if hr2d is not None and hr2d.ndim == 2:
+            land_mask = _get_land_mask(sample, (hr2d.shape[0], hr2d.shape[1]))
+            _print_land_sea_stats(hr_key, hr2d, land_mask)
 
     for v in lr_vars:
         k = f"{v}_lr"
@@ -266,6 +669,10 @@ def test_one_sample(
         print(f"  hr_scaled: {_stats(sample[f'{main}_hr'])}")
 
 def main():
+    """
+        TODO:
+            - Move all transform building logic to a function to avoid too much code in main()
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", type=str, required=True, help="Path to your YAML config.")
     ap.add_argument("--n", type=int, default=3, help="Number of samples to test (if --idx not given).")
@@ -273,10 +680,42 @@ def main():
     ap.add_argument("--no_cutouts", action="store_true", help="Force cutouts=False to simplify debugging.")
     ap.add_argument("--save_original", action="store_true", help="Force dataset save_original=True to enable roundtrip tests.")
     ap.add_argument("--verbose", action="store_true", help="Extra prints.")
+    # Extend CLI with dataset-tester mode
+    ap.add_argument("--mode", type=str, default='transforms', choices=['transforms', 'dataset'],
+                    help='transforms: existing transform tests (default); dataset: dataset sanity tester (location, domains, context).')
+    ap.add_argument('--outdir', type=str, default='./_dataset_tester_out', help='Output directory for dataset tester.')
+    ap.add_argument("--dataset_save_stats", action="store_true", help="If set, write per-sample stats JSON (can be slow). Default: Off.")
+    ap.add_argument("--dataset_plot_style", type=str, default='plotting_utils', choices=['plotting_utils', 'simple'], help="Plotting style for dataset tester quicklook.")
+    ap.add_argument("--dataset_figsize", type=int, nargs=2, default=[15, 4], help="Figsize for plotting_utils plot_sample, e.g. --dataset_figsize 15 4")
+    ap.add_argument("--dataset_random_crop", action="store_true", help="If set, dataset tester uses random cutouts. Default: fixed 128x128 bounds.")
     args = ap.parse_args()
 
     with open(args.cfg, "r") as f:
         cfg = yaml.safe_load(f)
+
+
+
+
+    # Dataset tester mode
+    if args.mode == 'dataset':
+        if args.idx is not None and len(args.idx) > 0:
+            indices = args.idx
+        else:
+            indices = list(range(min(args.n, 3)))  # limit to 3 for tester
+
+        run_dataset_tester(
+            cfg,
+            outdir=args.outdir,
+            indices=indices,
+            save_stats=args.dataset_save_stats,
+            plot_style=args.dataset_plot_style,
+            figsize=tuple(args.dataset_figsize),
+            context_demo=True,
+        )
+        return
+
+
+
 
     # ---- Prepare minimal geo inputs if your dataset expects them
     # If your cfg points to lsm/topo paths elsewhere, you can load them here.
@@ -306,14 +745,6 @@ def main():
     for v in cfg["lowres"]["condition_variables"]:
         lr_zarr = build_data_path(cfg['paths']['data_dir'], cfg['lowres']['model'], v, full_domain_dims_lr, 'train')
         lr_zarr_dict[v] = lr_zarr
-    # hr_zarr = cfg["paths"]["hr_zarr_dir"] if "hr_zarr_dir" in cfg["paths"] else None
-    # lr_zarr_dict = cfg["paths"].get("lr_zarr_dirs", None)  # expect dict {var: path}
-
-    if hr_zarr is None or lr_zarr_dict is None:
-        raise ValueError(
-            "This script expects cfg['paths']['hr_zarr_dir'] and cfg['paths']['lr_zarr_dirs'] (dict). "
-            "Either add them to your config or modify the script to use your build_data_path() logic."
-        )
 
     # ---- Instantiate dataset
     dcfg = cfg.copy()
