@@ -1,20 +1,20 @@
 experiment:
-  name: dataset_test
-  config_name: dataset_test
-  date: $(date +%Y%m%d_%H%M%S)
+  name: B2_local
+  config_name: B2_local
+  date: '20260127'
 paths:
-  data_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small
-  checkpoint_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models
+  data_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/../../Data/data_DiffMod_small
+  checkpoint_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models
   checkpoint_name: sbgm_cfgTest.pth.tar
-  sample_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples
-  evaluation_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/evaluate_sbgm/results
-  log_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs
+  sample_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples
+  evaluation_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/evaluate_sbgm/results
+  log_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs
   specific_fig_name: test__plot_fct
-  path_save: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples
-  lsm_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small/data_lsm/truth_fullDomain/lsm_full.npz
-  topo_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small/data_topo/truth_fullDomain/topo_full.npz
-  slope_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/Data/data_DiffMod_small/data_slope/truth_fullDomain/slope_full.npz
-  stats_load_dir: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats
+  path_save: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples
+  lsm_path: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/../../Data/data_DiffMod_small/data_lsm/truth_fullDomain/lsm_full.npz
+  topo_path: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/../../Data/data_DiffMod_small/data_topo/truth_fullDomain/topo_full.npz
+  slope_path: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/../../Data/data_DiffMod_small/data_slope/truth_fullDomain/slope_full.npz
+  stats_load_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats
 highres:
   model: DANRA
   variable: prcp
@@ -55,26 +55,22 @@ lowres:
   lr_main_var_scale_method: log_zscore
   buffer_frac: 0.0
   data_size:
-  - 589
-  - 789
+  - 128
+  - 128
   resize_factor: 1
   cutout_domains:
-  - 0
-  - 789
-  - 0
-  - 589
+  - 170
+  - 350
+  - 340
+  - 520
   cutout_name: danra
   stationary_cutout:
-    enabled: true
+    enabled: false
     bounds:
-    - 0
-    - 789
-    - 0
-    - 589
-  context_mode: full
-  context_data_size:
-  - 589
-  - 789
+    - 200
+    - 328
+    - 380
+    - 508
 sampler:
   sampler_type: edm_sampler
   n_timesteps: 56
@@ -94,9 +90,8 @@ data_handling:
   num_workers: 0
   n_gen_samples: 8
   pin_memory: true
-  crop_str_order: xy
 transforms:
-  scaling: false
+  scaling: true
   scaling_split: train
   force_matching_scale: false
   sample_w_cutouts: true
@@ -104,7 +99,7 @@ transforms:
 stationary_conditions:
   geographic_conditions:
     sample_w_geo: true
-    sample_w_sdf: false
+    sample_w_sdf: true
     geo_variables:
     - lsm
     - topo
@@ -138,13 +133,6 @@ visualization:
   add_boxplot_per_panel: true
   add_boxplot_summary: true
   plot_dual_lr_channel: 0
-  ocean_mode: show
-  ocean_bad_color: '#9e9e9e'
-  prcp_under_threshold: 1e-6
-  prcp_under_color: '#c2c2c2'
-  draw_hr_rect_on_lr: true
-  hr_rect_color: '#ff4d4d'
-  hr_rect_linewidth: 1.5
 model:
   use_resize_conv: false
   decoder_norm: group
@@ -152,12 +140,12 @@ model:
   decoder_activation: SiLU
 training:
   seed: 504
-  device: cuda
+  device: cpu
   use_mixed_precision: false
   use_grad_clip: false
   grad_clip_norm: 0.0
   verbose: true
-  batch_size: 16
+  batch_size: 4
   learning_rate: 0.0002
   min_lr: 5.0e-07
   lr_scheduler: ReduceLROnPlateau
@@ -165,7 +153,7 @@ training:
     factor: 0.5
     patience: 15
     threshold: 0.01
-    min_lr: 1e-6
+    min_lr: 1.0e-06
   weight_init: true
   custom_weight_initializer: null
   with_ema: false
@@ -174,9 +162,9 @@ training:
   ema_decay: 0.999
   weight_decay: 1.0e-06
   ema_warmup_steps: 2000
-  epochs: 400
+  epochs: 2
   loss_type: sdfweighted
-  sdf_weighted_loss: false
+  sdf_weighted_loss: true
   optimizer: adamw
   load_checkpoint: false
   early_stopping: true
@@ -244,7 +232,7 @@ scale_control:
   window: hann
   c_sigma: 1.0
 ve_dsm:
-  t_eps: 1e-3
+  t_eps: 0.001
 monitoring:
   edm_metrics_enabled: true
   edm_metrics_every: 100
@@ -276,26 +264,26 @@ diagnostics:
   histogram_bins: 200
   histogram_range: null
   histogram_every: 500
-  histogram_path: /Users/au728490/Library/CloudStorage/OneDrive-Aarhusuniversitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/histograms
+  histogram_path: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/histograms
 evaluation:
   stationary_cutout:
     hr_enabled: true
     lr_enabled: true
     cutout_domains:
-    - 340
-    - 520
     - 170
     - 350
+    - 340
+    - 520
     hr_bounds:
-    - 380
-    - 508
     - 200
     - 328
+    - 380
+    - 508
     lr_bounds:
-    - 380
-    - 508
     - 200
     - 328
+    - 380
+    - 508
 generation:
   fixed_dates: true
   random_dates: false
@@ -375,9 +363,10 @@ full_gen_eval:
   do_dates: true
   plot_only: false
   baselines_overlay:
-    enabled: true
+    enabled: false
     types:
     - qm
+    - unet_sr
     split: test
     labels:
       bilinear: LR bilinear

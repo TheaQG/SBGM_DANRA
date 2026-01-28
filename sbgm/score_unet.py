@@ -12,12 +12,265 @@
 import torch
 import logging
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models.resnet import ResNet, BasicBlock
-from typing import Optional, Iterable
+from typing import Optional, Iterable, Tuple
 import functools
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Spatial context encoder: multi-scale + global pooled vector
+#
+# Goal:
+#   - Input: full-domain LR fields [B, C_in, H_full, W_full]
+#   - Output:
+#       (a) patch-aligned feature map at HR size [B, C_feat, H_hr, W_hr]
+#       (b) global context vector [B, C_global]
+#   - Use:
+#       (a) concat ctx_patch into cond_img channels
+#       (b) project ctx_global -> time_dim and add to sigma embedding (global bias)
+#
+# NOTE:
+#   We keep EDM operating at HR resolution (128x128). This encoder is the ONLY
+#   component that “sees” the full spatial context.
+# ============================================================================
+
+
+def crop_from_full_by_hr_points(full: torch.Tensor, hr_points: Tuple[int, int, int, int]) -> torch.Tensor:
+    """
+    Crop a full-domain tensor using HR-index points.
+
+    hr_points convention: (x1, x2, y1, y2)
+    slicing convention: [:, :, y1:y2, x1:x2]
+    """
+    if full.ndim != 4:
+        raise ValueError(f"crop_from_full_by_hr_points expected [B,C,H,W], got {tuple(full.shape)}")
+    x1, x2, y1, y2 = [int(v) for v in hr_points]
+
+    H, W = int(full.shape[-2]), int(full.shape[-1])
+    # Clamp to valid range
+    x1 = max(0, min(x1, W))
+    x2 = max(0, min(x2, W))
+    y1 = max(0, min(y1, H))
+    y2 = max(0, min(y2, H))
+
+    # Ensure proper ordering
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    if (x2 - x1) <= 0 or (y2 - y1) <= 0:
+        raise ValueError(
+            f"crop_from_full_by_hr_points produced an empty crop: hr_points={hr_points} -> clamped (x1,x2,y1,y2)=({x1},{x2},{y1},{y2}) "
+            f"for full tensor spatial (H,W)=({H},{W})."
+        )
+
+    return full[:, :, y1:y2, x1:x2]
+
+class _ConvGNAct(nn.Module):
+    """
+        Convolution + GroupNorm + SiLU activation.
+    """
+    def __init__(self, c_in: int, c_out: int, *, groups: int = 8, k: int = 3, s: int = 1, p: int = 1):
+        super().__init__()
+        self.conv = nn.Conv2d(c_in, c_out, kernel_size=k, stride=s, padding=p)
+        g = min(int(groups), int(c_out))
+        while g > 1 and (c_out % g != 0):
+            g -= 1
+        self.gn = nn.GroupNorm(num_groups=g, num_channels=c_out)
+        self.act = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.gn(self.conv(x)))
+
+
+class SpatialContextEncoderMS(nn.Module):
+    """
+    Multi-scale spatial context encoder with a global pooled vector.
+
+    Lightweight U-Net style:
+      - downsample path -> bottleneck (big receptive field)
+      - upsample path -> full-resolution feature map
+      - global vector from bottleneck global average pool
+
+    Returns:
+      feat_full: [B, C_feat, H_full', W_full'] (close to H_full,W_full)
+      g:         [B, C_global]
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        *,
+        c_base: int = 32,
+        c_feat: int = 16,
+        c_global: int = 128,
+        n_down: int = 3,
+        groups: int = 8,
+    ):
+        super().__init__()
+        if n_down < 1:
+            raise ValueError("SpatialContextEncoderMS: n_down must be >= 1")
+
+        self.in_channels = int(in_channels)
+        self.c_base = int(c_base)
+        self.c_feat = int(c_feat)
+        self.c_global = int(c_global)
+        self.n_down = int(n_down)
+
+        # Stem (full res)
+        self.stem = nn.Sequential(
+            _ConvGNAct(self.in_channels, self.c_base, groups=groups),
+            _ConvGNAct(self.c_base, self.c_base, groups=groups),
+        )
+
+        # Down path
+        downs = []
+        ch = self.c_base
+        self._skip_channels = []
+        for _ in range(self.n_down):
+            ch_next = ch * 2
+            downs.append(
+                nn.Sequential(
+                    _ConvGNAct(ch, ch_next, groups=groups, s=2),  # stride-2 downsample
+                    _ConvGNAct(ch_next, ch_next, groups=groups),
+                )
+            )
+            self._skip_channels.append(ch_next)
+            ch = ch_next
+        self.down = nn.ModuleList(downs)
+
+        # Bottleneck
+        self.mid = nn.Sequential(
+            _ConvGNAct(ch, ch, groups=groups),
+            _ConvGNAct(ch, ch, groups=groups),
+        )
+
+        # Global head from bottleneck
+        self.global_head = nn.Sequential(
+            nn.Linear(ch, self.c_global),
+            nn.SiLU(),
+            nn.Linear(self.c_global, self.c_global),
+        )
+
+        # Up path
+        ups = []
+        for i in range(self.n_down):
+            ch_skip = self._skip_channels[-(i + 1)]
+            ch_up_in = ch
+            ch_up_out = ch_skip // 2
+            ups.append(
+                nn.ModuleDict(
+                    {
+                        "up": nn.ConvTranspose2d(ch_up_in, ch_up_out, kernel_size=2, stride=2),
+                        "blk": nn.Sequential(
+                            _ConvGNAct(ch_up_out + ch_skip, ch_up_out, groups=groups),
+                            _ConvGNAct(ch_up_out, ch_up_out, groups=groups),
+                        ),
+                    }
+                )
+            )
+            ch = ch_up_out
+        self.up = nn.ModuleList(ups)
+
+        # Project to conditioning feature channels
+        self.out_proj = nn.Conv2d(ch, self.c_feat, kernel_size=1, padding=0)
+
+    def forward(self, x_full: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if x_full.ndim != 4:
+            raise ValueError(f"SpatialContextEncoderMS expected [B,C,H,W], got {tuple(x_full.shape)}")
+
+        h = self.stem(x_full)
+
+        skips = []
+        for d in self.down:
+            h = d(h)
+            skips.append(h)
+
+        h = self.mid(h)
+
+        # Global pooled vector from bottleneck
+        g = F.adaptive_avg_pool2d(h, (1, 1)).flatten(1)  # [B, ch]
+        g = self.global_head(g)  # [B, c_global]
+
+        # Up path (reverse skips)
+        for i, u in enumerate(self.up):
+            h = u["up"](h)  # type: ignore
+            s = skips[-(i + 1)]
+
+            # Handle odd-size mismatches (589/789 not divisible by 2^n_down)
+            if h.shape[-2:] != s.shape[-2:]:
+                Ht = min(h.shape[-2], s.shape[-2])
+                Wt = min(h.shape[-1], s.shape[-1])
+                h = h[..., :Ht, :Wt]
+                s = s[..., :Ht, :Wt]
+
+            h = torch.cat([h, s], dim=1)
+            h = u["blk"](h)  # type: ignore
+
+        feat_full = self.out_proj(h)  # [B, c_feat, H_full', W_full']
+        return feat_full, g
+
+
+class SpatialContextConditioner(nn.Module):
+    """
+    Wrap SpatialContextEncoderMS to produce:
+      ctx_patch:  [B, c_feat, H_hr, W_hr]
+      ctx_global: [B, c_global]
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        *,
+        c_base: int = 32,
+        c_feat: int = 16,
+        c_global: int = 128,
+        n_down: int = 3,
+        groups: int = 8,
+        hr_size: Tuple[int, int] = (128, 128),
+    ):
+        super().__init__()
+        self.encoder = SpatialContextEncoderMS(
+            in_channels,
+            c_base=c_base,
+            c_feat=c_feat,
+            c_global=c_global,
+            n_down=n_down,
+            groups=groups,
+        )
+        self.hr_size = (int(hr_size[0]), int(hr_size[1]))
+        self.c_global = int(c_global)
+
+    def forward(
+        self,
+        x_full: torch.Tensor,
+        *,
+        hr_points: Tuple[int, int, int, int],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        feat_full, g = self.encoder(x_full)
+
+        # The multi-scale encoder may output a spatial size that is slightly smaller than x_full
+        # when H/W are not divisible by 2^n_down. For cropping in full-domain coordinates,
+        # we resample back to the exact full-domain size.
+        if feat_full.shape[-2:] != x_full.shape[-2:]:
+            feat_full = F.interpolate(
+                feat_full,
+                size=x_full.shape[-2:],
+                mode='bilinear',
+                align_corners=False,
+            )
+
+        feat_roi = crop_from_full_by_hr_points(feat_full, hr_points)
+        # enforce exact HR size
+        feat_patch = F.adaptive_avg_pool2d(feat_roi, self.hr_size)
+        return feat_patch, g
+
+
+
 
 
 class SigmaEmbed(nn.Module):
@@ -41,6 +294,7 @@ class SigmaEmbed(nn.Module):
         # c_noise: [B, 1]
         return self.net(c_noise)
 
+
 class EDMPrecondUNet(nn.Module):
     """
         Wraps Encoder/Decoder with EDM preconditioning.
@@ -51,6 +305,7 @@ class EDMPrecondUNet(nn.Module):
                  decoder: nn.Module,
                  sigma_data: float = 1.0,
                  predict_residual: bool = True,
+                 spatial_conditioner: nn.Module | None = None,
                  ):
         super().__init__()
         self.encoder = encoder
@@ -61,6 +316,20 @@ class EDMPrecondUNet(nn.Module):
         # time_embedding size is already defined in encoder
         time_dim = getattr(encoder, "time_embedding", 128)
         self.sigma_emb = SigmaEmbed(time_dim)
+
+        # ---- Option 2: multi-scale spatial context conditioner
+        self.spatial_conditioner = spatial_conditioner
+
+        # Project ctx_global -> time embedding and add to sigma embedding (global bias)
+        self.ctx_global_to_time = None
+        if self.spatial_conditioner is not None:
+            # IMPORTANT: this assumes c_global == 128 in SpatialContextConditioner
+            self.ctx_global_to_time = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(128, time_dim),
+                nn.SiLU(),
+                nn.Linear(time_dim, time_dim),
+            )
 
     def _combine_with_labels(self, t_emb: torch.Tensor, y: torch.Tensor | None) -> torch.Tensor:
         """
@@ -92,30 +361,25 @@ class EDMPrecondUNet(nn.Module):
                 raise ValueError(f"[EDMPrecondUNet] expected DOY sin/cos with last dim==2, got {tuple(y2.shape)}")
             return t_emb + enc.temporal_emb(y2.to(t_emb.device))
 
-        # Otherwise leave unchanged
         return t_emb
 
     def _precond(self, sigma: torch.Tensor):
-        """ Compute preconditioning coefficients. (as in Karras et al. 2022) with strict shape control for """
-        # Accept sigma of shape [B] or [B, 1], [B, 1, 1, 1] - coerce to [B]
+        """ Compute preconditioning coefficients. (as in Karras et al. 2022) with strict shape control """
         if sigma.ndim == 0:
             sigma = sigma.unsqueeze(0)
         if sigma.ndim > 1:
-            sigma = sigma.reshape(sigma.shape[0]) # -> [B]
+            sigma = sigma.reshape(sigma.shape[0])  # -> [B]
 
-        # sigma: [B]
         s2 = sigma**2
         sd = self.sigma_data
         sd2 = sd**2
 
         c_in    = 1.0 / torch.sqrt(s2 + sd2)            # [B]
         c_skip  = sd2 / (s2 + sd2)                      # [B]
-        c_out   = sigma * sd / torch.sqrt(s2 + sd2)     # [B] corrected formula
-        # c_noise = 0.25 * log(sigma^2) = 0.25 * 2 * log(sigma) 
-        # c_noise = 0.5 * log(sigma) as a scalar feature -> [B,1]
-        c_noise = (sigma.log() * 0.5).unsqueeze(-1)  # [B, 1]   
+        c_out   = sigma * sd / torch.sqrt(s2 + sd2)     # [B]
+        c_noise = (sigma.log() * 0.5).unsqueeze(-1)     # [B, 1]
         return c_in, c_skip, c_out, c_noise
-    
+
     def forward(self,
                 x_t: torch.Tensor,
                 sigma: torch.Tensor,
@@ -124,45 +388,191 @@ class EDMPrecondUNet(nn.Module):
                 lsm_cond: torch.Tensor | None = None,
                 topo_cond: torch.Tensor | None = None,
                 y: torch.Tensor | None = None,
-                lr_ups: torch.Tensor | None = None # <- needed if predict_residual = True
+                lr_ups: torch.Tensor | None = None,  # needed if predict_residual=True
+                # ---- Option 2: large-domain spatial context
+                spatial_ctx_full: torch.Tensor | None = None,  # [B, C_ctx, H_full, W_full]
+                hr_points: Tuple[int, int, int, int] | None = None,
                 ) -> torch.Tensor:
+
         B = x_t.shape[0]
-        c_in, c_skip, c_out, c_noise = self._precond(sigma) # c_noise is [B, 1]
+        c_in, c_skip, c_out, c_noise = self._precond(sigma)
 
-        # Sigmaa embedding [B, time_dim]
-        t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
-        assert t_emb.ndim == 2 and t_emb.shape[1] == self.encoder.time_embedding, \
-            f"[EDMPrecondUnet] Expected t_emb to be [B, {self.encoder.time_embedding}], got {tuple(t_emb.shape)}."
+        # Sigma embedding [B, time_dim]
+        t_emb = self.sigma_emb(c_noise)
 
-        # === Residual-aware preconditioning ===
-        # NOTE: LR upsampled must be scaled in HR space!
+        # ---- Option 2 injection: (ctx_patch into cond_img) + (ctx_global into t_emb)
+        if (self.spatial_conditioner is not None) and (spatial_ctx_full is not None):
+            if hr_points is None:
+                raise ValueError("hr_points must be provided when spatial_ctx_full is used.")
+
+            ctx_patch, ctx_global = self.spatial_conditioner(
+                spatial_ctx_full.to(x_t.device),
+                hr_points=hr_points,
+            )
+
+            # concat patch features into cond_img
+            if cond_img is None:
+                cond_img = ctx_patch
+            else:
+                if cond_img.shape[0] != ctx_patch.shape[0] or cond_img.shape[2:] != ctx_patch.shape[2:]:
+                    raise ValueError(f"cond_img {tuple(cond_img.shape)} incompatible with ctx_patch {tuple(ctx_patch.shape)}")
+                cond_img = torch.cat([cond_img, ctx_patch], dim=1)
+
+            # add global vector to time embedding
+            if self.ctx_global_to_time is not None:
+                if ctx_global.ndim != 2:
+                    raise ValueError(f"ctx_global must be [B,C], got {tuple(ctx_global.shape)}")
+                t_emb = t_emb + self.ctx_global_to_time(ctx_global.to(t_emb.device))
 
         # Build combined time for decoder FiLM (season-aware)
-        t_comb = self._combine_with_labels(t_emb, y)  # [B, time_dim]
+        t_comb = self._combine_with_labels(t_emb, y)
 
         if self.predict_residual:
             if lr_ups is None:
                 raise ValueError("lr_ups must be provided when predict_residual is True.")
-            
-            # Shift the noisy input by the baseline so the network denoises the residual r := x0 - lr_ups
+
             x_shift = x_t - lr_ups
-            x_in = c_in.view(B, 1, 1, 1) * x_shift  # [B, C, H, W] Scale residual input
+            x_in = c_in.view(B, 1, 1, 1) * x_shift
 
-            # Encoder gets (t_emb,y) so it will add label/DOY internally; decoder gets season-aware t_comb
             enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
-            out = self.decoder(*enc_fmaps, t=t_comb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+            out = self.decoder(*enc_fmaps, t=t_comb)
 
-            # Predict x0 as: baseline + preconditioned skip residual + network residual head
-            x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_shift + c_out.view(B, 1, 1, 1) * out # As in Karras et al. (2022)
+            x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_shift + c_out.view(B, 1, 1, 1) * out
 
         else:
-            # Standard EDM preconditioning (no residual awareness)
-            x_in = c_in.view(B, 1, 1, 1) * x_t  # [B, C, H, W] Scale input
+            x_in = c_in.view(B, 1, 1, 1) * x_t
             enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
-            out = self.decoder(*enc_fmaps, t=t_comb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+            out = self.decoder(*enc_fmaps, t=t_comb)
             x0_hat = c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out
 
         return x0_hat
+
+
+
+
+# class EDMPrecondUNet(nn.Module):
+#     """
+#         PAPER 1 VERSION (OLD)
+#         Wraps Encoder/Decoder with EDM preconditioning.
+#         Predicts x0 directly (no division by sigma) and combines skip/out as in Karras et al. (2022).
+#     """
+#     def __init__(self,
+#                  encoder: nn.Module,
+#                  decoder: nn.Module,
+#                  sigma_data: float = 1.0,
+#                  predict_residual: bool = True,
+#                  ):
+#         super().__init__()
+#         self.encoder = encoder
+#         self.decoder = decoder
+#         self.sigma_data = sigma_data
+#         self.predict_residual = predict_residual
+
+#         # time_embedding size is already defined in encoder
+#         time_dim = getattr(encoder, "time_embedding", 128)
+#         self.sigma_emb = SigmaEmbed(time_dim)
+
+#     def _combine_with_labels(self, t_emb: torch.Tensor, y: torch.Tensor | None) -> torch.Tensor:
+#         """
+#         Build a season-aware embedding t_comb by adding either a categorical label embedding
+#         or a continuous DOY sin/cos projection to the sigma embedding t_emb.
+
+#         Uses the encoder's embedding modules (label_emb / temporal_emb) to guarantee consistency.
+#         """
+#         if y is None:
+#             return t_emb
+
+#         enc = self.encoder
+#         longs = (torch.long, torch.int64, torch.int32)
+
+#         # Categorical labels
+#         if getattr(enc, "num_classes", None) is not None and y.dtype in longs:
+#             y_in = y
+#             if y_in.ndim == 2 and y_in.shape[1] == 1:
+#                 y_in = y_in[:, 0]
+#             elif y_in.ndim != 1:
+#                 raise ValueError(f"[EDMPrecondUNet] categorical y must be [B] or [B,1], got {tuple(y.shape)}")
+#             y_emb = enc.label_emb(y_in.to(t_emb.device))
+#             return t_emb + y_emb
+
+#         # Continuous DOY sin/cos
+#         if torch.is_floating_point(y):
+#             y2 = y.view(y.shape[0], -1)
+#             if y2.shape[1] != 2:
+#                 raise ValueError(f"[EDMPrecondUNet] expected DOY sin/cos with last dim==2, got {tuple(y2.shape)}")
+#             return t_emb + enc.temporal_emb(y2.to(t_emb.device))
+
+#         # Otherwise leave unchanged
+#         return t_emb
+
+#     def _precond(self, sigma: torch.Tensor):
+#         """ Compute preconditioning coefficients. (as in Karras et al. 2022) with strict shape control for """
+#         # Accept sigma of shape [B] or [B, 1], [B, 1, 1, 1] - coerce to [B]
+#         if sigma.ndim == 0:
+#             sigma = sigma.unsqueeze(0)
+#         if sigma.ndim > 1:
+#             sigma = sigma.reshape(sigma.shape[0]) # -> [B]
+
+#         # sigma: [B]
+#         s2 = sigma**2
+#         sd = self.sigma_data
+#         sd2 = sd**2
+
+#         c_in    = 1.0 / torch.sqrt(s2 + sd2)            # [B]
+#         c_skip  = sd2 / (s2 + sd2)                      # [B]
+#         c_out   = sigma * sd / torch.sqrt(s2 + sd2)     # [B] corrected formula
+#         # c_noise = 0.25 * log(sigma^2) = 0.25 * 2 * log(sigma) 
+#         # c_noise = 0.5 * log(sigma) as a scalar feature -> [B,1]
+#         c_noise = (sigma.log() * 0.5).unsqueeze(-1)  # [B, 1]   
+#         return c_in, c_skip, c_out, c_noise
+    
+#     def forward(self,
+#                 x_t: torch.Tensor,
+#                 sigma: torch.Tensor,
+#                 *,
+#                 cond_img: torch.Tensor | None = None,
+#                 lsm_cond: torch.Tensor | None = None,
+#                 topo_cond: torch.Tensor | None = None,
+#                 y: torch.Tensor | None = None,
+#                 lr_ups: torch.Tensor | None = None # <- needed if predict_residual = True
+#                 ) -> torch.Tensor:
+#         B = x_t.shape[0]
+#         c_in, c_skip, c_out, c_noise = self._precond(sigma) # c_noise is [B, 1]
+
+#         # Sigmaa embedding [B, time_dim]
+#         t_emb = self.sigma_emb(c_noise)  # [B, time_dim]
+#         assert t_emb.ndim == 2 and t_emb.shape[1] == self.encoder.time_embedding, \
+#             f"[EDMPrecondUnet] Expected t_emb to be [B, {self.encoder.time_embedding}], got {tuple(t_emb.shape)}."
+
+#         # === Residual-aware preconditioning ===
+#         # NOTE: LR upsampled must be scaled in HR space!
+
+#         # Build combined time for decoder FiLM (season-aware)
+#         t_comb = self._combine_with_labels(t_emb, y)  # [B, time_dim]
+
+#         if self.predict_residual:
+#             if lr_ups is None:
+#                 raise ValueError("lr_ups must be provided when predict_residual is True.")
+            
+#             # Shift the noisy input by the baseline so the network denoises the residual r := x0 - lr_ups
+#             x_shift = x_t - lr_ups
+#             x_in = c_in.view(B, 1, 1, 1) * x_shift  # [B, C, H, W] Scale residual input
+
+#             # Encoder gets (t_emb,y) so it will add label/DOY internally; decoder gets season-aware t_comb
+#             enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
+#             out = self.decoder(*enc_fmaps, t=t_comb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+
+#             # Predict x0 as: baseline + preconditioned skip residual + network residual head
+#             x0_hat = lr_ups + c_skip.view(B, 1, 1, 1) * x_shift + c_out.view(B, 1, 1, 1) * out # As in Karras et al. (2022)
+
+#         else:
+#             # Standard EDM preconditioning (no residual awareness)
+#             x_in = c_in.view(B, 1, 1, 1) * x_t  # [B, C, H, W] Scale input
+#             enc_fmaps = self.encoder(x_in, t_emb, y=y, cond_img=cond_img, lsm_cond=lsm_cond, topo_cond=topo_cond)
+#             out = self.decoder(*enc_fmaps, t=t_comb) # [B, 1, H, W] (treat as direct x0 head OR residual head)
+#             x0_hat = c_skip.view(B, 1, 1, 1) * x_t + c_out.view(B, 1, 1, 1) * out
+
+#         return x0_hat
     
 
 
@@ -1161,3 +1571,32 @@ diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma_marg)
 #     return loss
 
 
+def smoke_test_spatial_conditioner_option2(
+    B: int = 2,
+    C_ctx: int = 2,
+    H_full: int = 589,
+    W_full: int = 789,
+    hr_points: Tuple[int, int, int, int] = (380, 508, 200, 328),
+    hr_size: Tuple[int, int] = (128, 128),
+) -> None:
+    x_full = torch.randn(B, C_ctx, H_full, W_full)
+    cond = SpatialContextConditioner(
+        in_channels=C_ctx,
+        c_base=32,
+        c_feat=16,
+        c_global=128,
+        n_down=3,
+        groups=8,
+        hr_size=hr_size,
+    )
+    with torch.no_grad():
+        ctx_patch, ctx_global = cond(x_full, hr_points=hr_points)
+
+    print("[opt2 smoke] x_full      :", tuple(x_full.shape))
+    print("[opt2 smoke] ctx_patch   :", tuple(ctx_patch.shape), "expected:", (B, 16, hr_size[0], hr_size[1]))
+    print("[opt2 smoke] ctx_global  :", tuple(ctx_global.shape), "expected:", (B, 128))
+
+    if tuple(ctx_patch.shape) != (B, 16, hr_size[0], hr_size[1]):
+        raise RuntimeError("Option2 smoke test failed: ctx_patch shape mismatch")
+    if tuple(ctx_global.shape) != (B, 128):
+        raise RuntimeError("Option2 smoke test failed: ctx_global shape mismatch")

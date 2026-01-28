@@ -1,6 +1,7 @@
 # .gitignore file for the SBGM_DANRA project
 
-
+# Ignore everything in /models_and_samples/
+models_and_samples/
 
 # Ignore logs
 .log

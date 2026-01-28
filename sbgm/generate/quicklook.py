@@ -2,7 +2,6 @@ import os
 import json
 import logging
 from pathlib import Path
-from venv import logger
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -77,16 +76,26 @@ def quicklook_from_runner(cfg):
     vmax_mm         = ql.get("vmax_mm", None)
     save_png        = bool(ql.get("save_png", True))
 
-    # Seeding
+    # Seeding (robust for CPU/GPU)
     if seed is None:
         seed = np.random.randint(0, 1_000_000)
-    torch.manual_seed(int(seed)); torch.cuda.manual_seed(int(seed)); np.random.seed(int(seed))
+    seed = int(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
-    device = torch.device(cfg["training"].get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    # --- Robust device selection for local runs ---
+    cfg_dev = str(cfg.get("training", {}).get("device", "cuda")).lower()
+    want_cuda = ("cuda" in cfg_dev) or ("gpu" in cfg_dev)
+    has_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if (want_cuda and has_cuda) else "cpu")
 
     # --- Model ---
     model, ckpt_dir, ckpt_name = get_model(cfg)
-    ckpt = torch.load(os.path.join(ckpt_dir, ckpt_name), map_location=device)
+    ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+    # Force-load checkpoint tensors onto CPU when CUDA is unavailable, even if saved from CUDA.
+    ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["network_params"])
     model.eval()
 

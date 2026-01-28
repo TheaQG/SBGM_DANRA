@@ -1,0 +1,29 @@
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Unified log file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56/B2_local__670e0a86__20260127T131824Z.log
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | === ENTERED SBGM_SD MAIN APP ===
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Experiment      : B2_local
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Mode            : full_pipeline
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Config          : /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/config/paper1_test_local.yaml
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Run dir         : /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Log file        : /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56/B2_local__670e0a86__20260127T131824Z.log
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Model key       : B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56
+2026-01-27 14:18:24 | INFO    | B2_local__670e0a86__20260127T131824Z | __main__ | Cfg hash        : 670e0a86
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.logging_utils | 
+════════════════════════
+   TRAINING START
+════════════════════════
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_main | 
+
+=== Starting SBGM_SD Training Pipeline ===
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_main |           Experiment name: B2_local
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_main |           ▸ CUDA is not available, using CPU instead.
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_utils | 
+Using HR data type: DANRA prcp [mm]
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_utils | Using LR data type 1: ERA5 prcp [mm]
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_utils | 
+
+High-resolution data size: (128, 128)
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_utils | Low-resolution data size: (128, 128)
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_utils | SDF weighted loss enabled. Setting lsm and topo to true.
+
+2026-01-27 14:18:25 | INFO    | B2_local__670e0a86__20260127T131824Z | sbgm.training_utils | Using geographical features for sampling.
+

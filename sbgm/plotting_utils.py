@@ -297,6 +297,8 @@ def imshow_variable(
             vmin = max(float(vmin), thr)
 
     im = ax.imshow(arr, cmap=cm_obj, vmin=vmin, vmax=vmax, interpolation="nearest", origin="lower")
+    ax.set_xlim(0, arr.shape[1])
+    ax.set_ylim(0, arr.shape[0])
 
     if ocean_mode == "hatch" and (lsm_mask is not None):
         try:

@@ -1,0 +1,163 @@
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Unified log file: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56/B2_local__141b993d__20260127T133105Z.log
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | === ENTERED SBGM_SD MAIN APP ===
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Experiment      : B2_local
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Mode            : full_pipeline
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Config          : /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/config/paper1_test_local.yaml
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Run dir         : /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Log file        : /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/sbgm/logs/B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56/B2_local__141b993d__20260127T133105Z.log
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Model key       : B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56
+2026-01-27 14:31:05 | INFO    | B2_local__141b993d__20260127T133105Z | __main__ | Cfg hash        : 141b993d
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.logging_utils | 
+════════════════════════
+   TRAINING START
+════════════════════════
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main | 
+
+=== Starting SBGM_SD Training Pipeline ===
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           Experiment name: B2_local
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           ▸ CUDA is not available, using CPU instead.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | 
+Using HR data type: DANRA prcp [mm]
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Using LR data type 1: ERA5 prcp [mm]
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | 
+
+High-resolution data size: (128, 128)
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Low-resolution data size: (128, 128)
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | SDF weighted loss enabled. Setting lsm and topo to true.
+
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Using geographical features for sampling.
+
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | 
+
+
+Number of training samples: 70
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Number of validation samples: 15
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Cache size for training: 35
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Cache size for validation: 7
+
+
+
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Loading zarr group for condition prcp
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data] LR channel layout summary:
+  LR conditions        : ['prcp']
+  Main LR condition    : prcp
+  dual_lr              : False
+  lr_main_var_scale    : LR
+  channel order        : ['prcp']
+  channel slices       : {'prcp': {'main': (0, 1)}}
+  channel spaces       : {'prcp': {'main': 'lr_stats'}}
+  total LR channels    : 1
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Not using fixed cutout for HR.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Not using fixed cutout for LR.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | LR condition: prcp, scaling method: log_zscore
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.special_transforms | Loading stats from /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats/ERA5/prcp/train/global_stats__ERA5__589x789__crop__170_350_340_520__prcp__train.json
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Main LR condition 'prcp' scaled using 'LR' stats from model 'ERA5'.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data] LR transform for 'prcp': single-channel → space=lr_stats
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.special_transforms | Loading stats from /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats/DANRA/prcp/train/global_stats__DANRA__589x789__crop__170_350_340_520__prcp__train.json
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Topography will be scaled to [-1, 1] interval.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Loading zarr group for condition prcp
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data] LR channel layout summary:
+  LR conditions        : ['prcp']
+  Main LR condition    : prcp
+  dual_lr              : False
+  lr_main_var_scale    : LR
+  channel order        : ['prcp']
+  channel slices       : {'prcp': {'main': (0, 1)}}
+  channel spaces       : {'prcp': {'main': 'lr_stats'}}
+  total LR channels    : 1
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Not using fixed cutout for HR.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Not using fixed cutout for LR.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | LR condition: prcp, scaling method: log_zscore
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.special_transforms | Loading stats from /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats/ERA5/prcp/train/global_stats__ERA5__589x789__crop__170_350_340_520__prcp__train.json
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Main LR condition 'prcp' scaled using 'LR' stats from model 'ERA5'.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data] LR transform for 'prcp': single-channel → space=lr_stats
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.special_transforms | Loading stats from /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats/DANRA/prcp/train/global_stats__DANRA__589x789__crop__170_350_340_520__prcp__train.json
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Topography will be scaled to [-1, 1] interval.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Loading zarr group for condition prcp
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data] LR channel layout summary:
+  LR conditions        : ['prcp']
+  Main LR condition    : prcp
+  dual_lr              : False
+  lr_main_var_scale    : LR
+  channel order        : ['prcp']
+  channel slices       : {'prcp': {'main': (0, 1)}}
+  channel spaces       : {'prcp': {'main': 'lr_stats'}}
+  total LR channels    : 1
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Using fixed cutout for HR with bounds: [200, 328, 380, 508]
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Using fixed cutout for LR with bounds: [200, 328, 380, 508]
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Using N=15 fixed sequential dates for generation split starting at index 0.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | LR condition: prcp, scaling method: log_zscore
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.special_transforms | Loading stats from /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats/ERA5/prcp/train/global_stats__ERA5__589x789__crop__170_350_340_520__prcp__train.json
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Main LR condition 'prcp' scaled using 'LR' stats from model 'ERA5'.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data] LR transform for 'prcp': single-channel → space=lr_stats
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.special_transforms | Loading stats from /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/data_analysis_pipeline/saved/statistics_run/stats/DANRA/prcp/train/global_stats__DANRA__589x789__crop__170_350_340_520__prcp__train.json
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | Topography will be scaled to [-1, 1] interval.
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | [seasonal] conditional=True, sin/cos=True, leap_years=True
+
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | 
+Training dataset: 70 samples
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Validation dataset: 15 samples
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Generation dataset: 15 samples
+
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Batch size: 16
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Number of workers: 0
+
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data][sample0] prcp_lr shape=(1, 128, 128) (expected channels=1)
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.data_modules | [data][sample0] prcp_lr stats (per-channel): {'min': -0.3628925681114197, 'max': 0.15981364250183105, 'mean': -0.2743983864784241, 'std': 0.1501885950565338}
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           date: 19970720
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           prcp_lr: torch.Size([1, 128, 128])
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |               prcp_lr device: cpu
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           prcp_hr: torch.Size([1, 128, 128])
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |               prcp_hr device: cpu
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           lsm_hr: torch.Size([1, 128, 128])
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |               lsm_hr device: cpu
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           lsm: torch.Size([1, 128, 128])
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |               lsm device: cpu
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           topo: torch.Size([1, 128, 128])
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |               topo device: cpu
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           y: torch.Size([2])
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |               y device: cpu
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           sdf: torch.Size([1, 128, 128])
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |               sdf device: cpu
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           hr_points: [192, 320, 357, 485]
+2026-01-27 14:31:06 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           lr_points: [192, 320, 357, 485]
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main | 
+
+          ▸ Saved initial sample plot to /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/generated_samples/samples/B2_local__HR_prcp_DANRA__SIZE_128x128__LR_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56/Figures/Initial_sample_plot.png
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Input channels: 3
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Output channels: 1
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | Using device: cpu
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_utils | [MODEL] use_resize_conv: False, decoder_norm: group, decoder_gn_groups: 8, decoder_activation: SiLU
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           ▸ Using learning rate scheduler: ReduceLROnPlateau
+2026-01-27 14:31:07 | WARNING | B2_local__141b993d__20260127T133105Z | py.warnings | /Users/au728490/opt/anaconda3/envs/torch/lib/python3.11/site-packages/torch/optim/lr_scheduler.py:28: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn("The verbose parameter is deprecated. Please use get_last_lr() "
+
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | [train] LR channel layout (cfg mirror):
+  lr_vars            : ['prcp']
+  main_lr_cond       : prcp
+  slices             : {'prcp': {'main': (0, 1)}}
+  spaces             : {'prcp': {'main': 'lr_stats'}}
+  n_channels_total   : 1
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | Determined LR scaling method for target variable 'prcp': log_zscore
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | → RainGate auxiliary head enabled
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | → Model weights initialized with Xavier uniform initialization.
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | → Checkpoint directory already exists at /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | → Rain gating head enabled: True, c_hidden: 1
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           ▸ No checkpoint found at /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models. Starting training from scratch.
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main | 
+
+          ▸ Using CPU for training.
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           ▸ Number of parameters in model: 18,101,315
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           ▸ Number of trainable parameters in model: 18,101,315
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main |           ▸ Number of non-trainable parameters in model: 0
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training_main | 
+
+          === STARTING TRAINING MAIN LOOP ===
+
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | → Classifier-Free Guidance (CFG) enabled: False
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | → EMA enabled: False; decay: 0.999; eval_use_ema: False
+2026-01-27 14:31:07 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | 
+
+      ▸ Starting epoch 1/400...
+2026-01-27 14:31:08 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | [train] edm.predict_residual=False → lr_ups_baseline not built; residual diagnostics will be None (expected).
+2026-01-27 14:31:19 | INFO    | B2_local__141b993d__20260127T133105Z | sbgm.training | → Epoch 1 completed: Avg. training Loss: 0.9952

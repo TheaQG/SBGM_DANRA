@@ -43,6 +43,7 @@ from sbgm.special_transforms import (
 
 # Colormap helper for variables
 from sbgm.variable_utils import get_cmap_for_variable
+from sbgm.utils import crop_bounds_to_str
 
 # ------------------------- helpers -------------------------
 
@@ -527,9 +528,10 @@ def test_one_sample(
 
         # forward transform used in Dataset is not directly accessible here;
         # rebuild forward from stats (same params as dataset)
+        order = cfg['data_handling'].get('crop_str_order', 'xy')
         domain_str_hr = f"{cfg['highres']['full_domain_dims'][0]}x{cfg['highres']['full_domain_dims'][1]}" if cfg["highres"]["full_domain_dims"] is not None else "full_domain"
         crop_hr = cfg["highres"]["cutout_domains"]
-        crop_region_str_hr = "_".join(map(str, crop_hr)) if crop_hr is not None else "full"
+        crop_region_str_hr = crop_bounds_to_str(crop_hr, order=order) if crop_hr is not None else "full"
         split = cfg["transforms"].get("scaling_split", "train")
         stats_root = cfg["paths"]["stats_load_dir"]
         hr_buffer = float(cfg["highres"].get("buffer_frac", 0.0))
@@ -559,7 +561,8 @@ def test_one_sample(
     # LR round-trip tests for each condition if original exists
     domain_str_lr = f"{cfg['lowres']['full_domain_dims'][0]}x{cfg['lowres']['full_domain_dims'][1]}" if cfg["lowres"]["full_domain_dims"] is not None else "full_domain"
     crop_lr = cfg["lowres"]["cutout_domains"]
-    crop_region_str_lr = "_".join(map(str, crop_lr)) if crop_lr is not None else "full"
+    order = cfg['data_handling'].get('crop_str_order', 'xy')
+    crop_region_str_lr = crop_bounds_to_str(crop_lr, order=order) if crop_lr is not None else "full"
     split = cfg["transforms"].get("scaling_split", "train")
     stats_root = cfg["paths"]["stats_load_dir"]
     lr_buffer = float(cfg["lowres"].get("buffer_frac", 0.0))
@@ -800,8 +803,9 @@ def main():
 
     crop_region_hr = cfg["highres"].get("cutout_domains", None)
     crop_region_lr = cfg["lowres"].get("cutout_domains", None)
-    crop_region_str_hr = "_".join(map(str, crop_region_hr)) if crop_region_hr is not None else "full"
-    crop_region_str_lr = "_".join(map(str, crop_region_lr)) if crop_region_lr is not None else "full"
+    order = cfg['data_handling'].get('crop_str_order', 'xy')
+    crop_region_str_hr = crop_bounds_to_str(crop_region_hr, order=order) if crop_region_hr is not None else "full"
+    crop_region_str_lr = crop_bounds_to_str(crop_region_lr, order=order) if crop_region_lr is not None else "full"
 
     back_transforms = build_back_transforms_from_stats(
         hr_var=cfg["highres"]["variable"],
