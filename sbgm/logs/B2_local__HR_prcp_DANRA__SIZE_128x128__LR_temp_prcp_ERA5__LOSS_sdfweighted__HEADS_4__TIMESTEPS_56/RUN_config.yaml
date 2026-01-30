@@ -1,7 +1,7 @@
 experiment:
   name: B2_local
   config_name: B2_local
-  date: '20260127'
+  date: '20260129'
 paths:
   data_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/../../Data/data_DiffMod_small
   checkpoint_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models
@@ -133,6 +133,15 @@ visualization:
   add_boxplot_per_panel: true
   add_boxplot_summary: true
   plot_dual_lr_channel: 0
+  ocean_background: hatch
+  ocean_facecolor: '#f3f3f3'
+  ocean_hatch: ++
+  ocean_alpha: 1.0
+  ocean_hatch_linewidth: 0.3
+  outline_color: lightgrey
+  outline_linewidth: 0.6
+  prcp_zero_color: '#ffffff'
+  prcp_zero_frac: 0.06
 model:
   use_resize_conv: false
   decoder_norm: group
@@ -353,14 +362,14 @@ full_gen_eval:
   ensemble_reduction_fallback: pmm
   ensemble_cache_members: false
   dist_ensemble_pool_mode: pool
-  do_prob: true
-  do_scale: true
-  do_dist: true
-  do_ext: true
+  do_prob: false
+  do_scale: false
+  do_dist: false
+  do_ext: false
   do_spat: true
-  do_temp: true
-  do_feat: true
-  do_dates: true
+  do_temp: false
+  do_feat: false
+  do_dates: false
   plot_only: false
   baselines_overlay:
     enabled: false

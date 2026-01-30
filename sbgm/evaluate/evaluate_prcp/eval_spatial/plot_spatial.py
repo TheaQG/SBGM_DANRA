@@ -64,22 +64,22 @@ def _draw_single(
 
     if add_stats:
         if dk_mask is not None and dk_mask.shape == arr.shape:
-            flat = arr[dk_mask]
+            flat = arr_plot[dk_mask]
         else:
-            flat = arr.ravel()
+            flat = arr_plot.ravel()
         flat = flat[np.isfinite(flat)]
         if flat.size > 0:
             mu = float(np.nanmean(flat))
             sd = float(np.nanstd(flat))
             title = f"{title}  |  {mu:.2f} ± {sd:.2f}"
 
-    ax.set_title(title)
+    ax.set_title(title, fontsize=12)
     ax.set_xticks([])
     ax.set_yticks([])
 
     cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
     if cbar_label:
-        cb.set_label(cbar_label)
+        cb.set_label(cbar_label, fontsize=12)
 
     return im
 
@@ -240,5 +240,5 @@ def plot_spatial_maps(eval_root: str | Path) -> None:
                 )
                 axs[2, idx_map["lr"]].axis("on")
 
-            fig.suptitle(f"{group}: {var}")
+            fig.suptitle(f"{group}: {var}", fontsize=16)
             _savefig(fig, figs / f"spatial_{group}_{var}.png", dpi=SET_DPI)

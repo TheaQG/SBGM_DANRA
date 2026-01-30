@@ -123,6 +123,19 @@ visualization:
   add_boxplot_per_panel: true # Whether to add boxplot per panel in visualization
   add_boxplot_summary: true # Whether to add summary boxplot in visualization
   plot_dual_lr_channel: 0 # What LR channel to plot when dual_lr is True (0 or 1)
+  
+  ocean_background: hatch # hatch | solid | none
+  ocean_facecolor: "#f3f3f3" # Color for ocean facecolor when ocean_background is 'solid'. "#f3f3f3" is light gray
+  ocean_hatch: "++" # Hatch pattern for ocean when ocean_background is 'hatch'. "////" | "\\\\\\" | "xxxx" | "...." | "++++"
+  ocean_alpha: 1.0
+  ocean_hatch_linewidth: 0.3 # Line width for ocean hatch (Matplotlib rcParams setting)
+
+  outline_color: "lightgrey" # Color for outline (e.g., Denmark outline)
+  outline_linewidth: 0.6 # Line width for outline
+
+  prcp_zero_color: "#ffffff" # Color for zero precipitation in plots (white)
+  prcp_zero_frac: 0.06 # Fraction of colorbar for zero precipitation
+  # prcp_min_positive: 0.001 # Minimum positive precipitation value for color scaling
   # summary_boxplot_keys: # <-- optional; overrides default [generated, hr, matching-lr]
   #   - generated
   #   - prcp_hr
@@ -351,14 +364,14 @@ full_gen_eval:
   dist_ensemble_pool_mode: pool # pool | member_mean
   
   # Which tasks to perform.
-  do_prob: true
-  do_scale: true
-  do_dist: true
-  do_ext: true
+  do_prob: false
+  do_scale: false
+  do_dist: false
+  do_ext: false
   do_spat: true
-  do_temp: true
-  do_feat: true
-  do_dates: true
+  do_temp: false
+  do_feat: false
+  do_dates: false
   plot_only: false  
 
   # Benchmark overlay settings

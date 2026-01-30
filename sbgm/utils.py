@@ -483,11 +483,13 @@ def build_data_path(base_path, model, var, full_domain_dims, split, zarr_file=Tr
 
 
 def crop_to_region(data, crop_region):
-    """
-    Crop the data to a specific subregion: [x_start, x_end, y_start, y_end].
-    """
-    [x_start, x_end, y_start, y_end] = crop_region
-    return data[x_start:x_end, y_start:y_end]
+    """crop_region = [x1, x2, y1, y2]; data indexed as [y, x]."""
+    x1, x2, y1, y2 = [int(v) for v in crop_region]
+    if data.ndim == 2:
+        return data[y1:y2, x1:x2]
+    if data.ndim == 3:  # [C,H,W]
+        return data[:, y1:y2, x1:x2]
+    raise ValueError(f"Expected 2D or 3D (C,H,W), got {data.shape}")
 
 
 

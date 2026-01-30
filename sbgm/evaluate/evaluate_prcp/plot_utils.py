@@ -60,11 +60,11 @@ def _season_from_month(m: int) -> str:
 # ------------------------------
 # DK outline via LSM (cached)
 # ------------------------------
-_DK_LSM_CACHE: np.ndarray | None = None
+_DK_LSM_CACHE: dict[tuple[int, int, int, int], np.ndarray] | np.ndarray | None = None
 
 def _load_dk_lsm_outline(
     bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
-    base: str = "/scratch/project_465001695/quistgaa/Data/Data_DiffMod",
+    base: str | None = None,
     rel_path: str = "data_lsm/truth_fullDomain/lsm_full.npz",
     key_candidates: tuple[str, ...] = ("lsm_hr", "lsm", "mask", "roi", "lsm_full", "data", "arr_0"),
 ) -> np.ndarray | None:
@@ -72,10 +72,14 @@ def _load_dk_lsm_outline(
     bounds is interpreted as (y0, y1, x0, x1) with y1/x1 exclusive; e.g., (200,328,380,508) → 128x128.
     """
     try:
+        # Resolve base path for data directory
+        if base is None:
+            base = os.environ.get("DATA_DIR", None)
+        if base is None:
+            logger.warning("[DK_LSM] DATA_DIR not set and no base path provided; cannot load LSM.")
+            return None
+
         logger.info("[DEBUG] Loading DK LSM outline from %s/%s", base, rel_path)
-        # base = os.environ.get(env_key, None)
-        # if not base:
-        #     return None
         p = Path(base) / rel_path
         if not p.exists():
             logger.warning("[DEBUG] DK LSM outline file not found: %s", str(p))
@@ -109,12 +113,34 @@ def _load_dk_lsm_outline(
         logger.exception("[DEBUG] Exception while loading DK LSM outline: %s", str(e))
         return None
 
-def get_dk_lsm_outline() -> np.ndarray | None:
-    """Return cached DK outline mask (boolean [H,W]) or None if unavailable."""
+def get_dk_lsm_outline(
+    bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
+    base: str | None = None,
+) -> np.ndarray | None:
+    """
+    Return cached DK outline mask (boolean [H,W]) for the requested `bounds`.
+    Caches per-bounds so different crops return correctly sized masks.
+    """
     global _DK_LSM_CACHE
-    if _DK_LSM_CACHE is None:
-        _DK_LSM_CACHE = _load_dk_lsm_outline()
-    return _DK_LSM_CACHE
+    # For backward compat, treat _DK_LSM_CACHE as a dict if needed
+    if isinstance(_DK_LSM_CACHE, dict):
+        cache = _DK_LSM_CACHE
+    else:
+        # Single cache for default bounds (legacy)
+        cache = {}
+        if _DK_LSM_CACHE is not None:
+            cache[(200, 328, 380, 508)] = _DK_LSM_CACHE
+        _DK_LSM_CACHE = cache
+    try:
+        key = (int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3]))
+    except Exception:
+        key = (200, 328, 380, 508)
+    if key in _DK_LSM_CACHE:
+        return _DK_LSM_CACHE[key]
+    m = _load_dk_lsm_outline(bounds=key, base=base)
+    if m is not None:
+        _DK_LSM_CACHE[key] = m
+    return m
 
 def overlay_outline(ax, mask: np.ndarray | None, *, color: str = "black", linewidth: float = 0.8):
     """Overlay a contour outline (level 0.5) on the given axes if mask is provided."""
