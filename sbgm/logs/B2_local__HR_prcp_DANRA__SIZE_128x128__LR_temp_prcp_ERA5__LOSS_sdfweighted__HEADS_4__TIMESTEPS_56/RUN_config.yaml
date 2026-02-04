@@ -1,7 +1,7 @@
 experiment:
   name: B2_local
   config_name: B2_local
-  date: '20260129'
+  date: '20260202'
 paths:
   data_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/../../Data/data_DiffMod_small
   checkpoint_dir: /Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models
@@ -136,8 +136,8 @@ visualization:
   ocean_background: hatch
   ocean_facecolor: '#f3f3f3'
   ocean_hatch: ++
-  ocean_alpha: 1.0
-  ocean_hatch_linewidth: 0.3
+  ocean_alpha: 0.4
+  ocean_hatch_linewidth: 0.2
   outline_color: lightgrey
   outline_linewidth: 0.6
   prcp_zero_color: '#ffffff'
@@ -365,8 +365,8 @@ full_gen_eval:
   do_prob: false
   do_scale: false
   do_dist: false
-  do_ext: false
-  do_spat: true
+  do_ext: true
+  do_spat: false
   do_temp: false
   do_feat: false
   do_dates: false
@@ -374,8 +374,8 @@ full_gen_eval:
   baselines_overlay:
     enabled: false
     types:
+    - bilinear
     - qm
-    - unet_sr
     split: test
     labels:
       bilinear: LR bilinear
@@ -433,7 +433,7 @@ full_gen_eval:
   variogram_max_pairs: 5000
   psd_ignore_low_k_bins: 2
   psd_normalize: none
-  low_k_max: 0.005
+  low_k_max: 0.01613
   high_k_max: 0.05
   random_ref_kind: phase_randomized
   seasonal_summaries: true
@@ -478,7 +478,7 @@ full_gen_eval:
   spatial_include_lr: true
   temporal_include_lr: true
   temporal_wet_thr_mm: 1.0
-  temporal_max_lag: 30
+  temporal_max_lag: 8
   temporal_max_spell: 25
   temporal_group_by: year
   temporal_ensemble_pool_mode: member_mean
@@ -489,10 +489,8 @@ full_gen_eval:
   sal_min_area_px: 16
   sal_smooth_sigma: 1.0
   sal_peakedness_mode: herfindahl
-  dates_list:
-  - '20190107'
-  - '20190203'
-  - '20190312'
+  dates_list: null
+  dates_max: 4
   dates_include_lr: true
   dates_include_members: true
   dates_n_members: 3

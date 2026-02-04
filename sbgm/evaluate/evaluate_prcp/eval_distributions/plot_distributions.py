@@ -134,7 +134,7 @@ def plot_distributional(dist_root: str | Path, eval_cfg: Any | None = None) -> N
                 txt = (
                     f"{comp.upper()} vs {ref.upper()}:\n"
                     f"  W1  = {w1:.3f}\n"
-                    f"  KS  = {kss:.3f} (p={ksp:.2f})\n"
+                    f"  KS  = {kss:.3f}\n" #(p={ksp:.2f})
                     f"  KL  = {kl:.3f}"
                 )
                 gen_parts.append(txt)

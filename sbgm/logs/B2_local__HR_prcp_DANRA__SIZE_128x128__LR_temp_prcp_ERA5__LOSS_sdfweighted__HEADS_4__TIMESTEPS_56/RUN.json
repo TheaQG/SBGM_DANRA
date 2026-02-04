@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-01-29T17:14:57.218557Z",
-  "run_name": "B2_local__67938858__20260129T171457Z",
+  "timestamp": "2026-02-02T14:51:07.870269Z",
+  "run_name": "B2_local__e0a98c58__20260202T145107Z",
   "model_name": "B2_local__HR_prcp_DANRA__SIZE_128x128__LR_temp_prcp_ERA5__LOSS_sdfweighted__HEADS_4__TIMESTEPS_56",
-  "cfg_hash": "67938858",
+  "cfg_hash": "e0a98c58",
   "paths": {
     "data_dir": "/Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/../../Data/data_DiffMod_small",
     "checkpoint_dir": "/Users/au728490/OneDrive - Aarhus universitet/PhD_AU/Python_Scripts/DiffusionModels/SBGM_SD/models_and_samples/trained_models",
@@ -20,7 +20,7 @@
   "experiment": {
     "name": "B2_local",
     "config_name": "B2_local",
-    "date": "20260129"
+    "date": "20260202"
   },
   "training": {
     "seed": 504,

@@ -6,7 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sbgm.variable_utils import get_cmap_for_variable
-from sbgm.evaluate.evaluate_prcp.plot_utils import _nice, _savefig, _ensure_dir, get_dk_lsm_outline, overlay_outline
+from sbgm.evaluate.evaluate_prcp.plot_utils import _nice, _savefig, _ensure_dir
+from sbgm.plotting_utils import get_dk_lsm_outline, overlay_outline
 logger = logging.getLogger(__name__)
 
 SET_DPI = 300

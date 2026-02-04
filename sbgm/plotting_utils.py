@@ -253,10 +253,11 @@ def _shared_minmax(arrs: list[np.ndarray], land_mask: np.ndarray | None = None) 
     vcat = np.concatenate(vals, axis=0)
     return float(vcat.min()), float(vcat.max())
 
+
 # ------------------------------
 # DK outline via LSM (cached)
 # ------------------------------
-_DK_LSM_CACHE: Dict[Tuple[int, int, int, int], np.ndarray] = {}
+_DK_LSM_CACHE: dict[tuple[int, int, int, int], np.ndarray] | np.ndarray | None = None
 
 def _load_dk_lsm_outline(
     bounds: tuple[int, int, int, int] = (200, 328, 380, 508),
@@ -318,10 +319,18 @@ def get_dk_lsm_outline(
     Caches per-bounds so different crops return correctly sized masks.
     """
     global _DK_LSM_CACHE
+    # For backward compat, treat _DK_LSM_CACHE as a dict if needed
+    if isinstance(_DK_LSM_CACHE, dict):
+        cache = _DK_LSM_CACHE
+    else:
+        # Single cache for default bounds (legacy)
+        cache = {}
+        if _DK_LSM_CACHE is not None:
+            cache[(200, 328, 380, 508)] = _DK_LSM_CACHE
+        _DK_LSM_CACHE = cache
     try:
         key = (int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3]))
     except Exception:
-        # Fallback to default if bounds malformed
         key = (200, 328, 380, 508)
     if key in _DK_LSM_CACHE:
         return _DK_LSM_CACHE[key]
@@ -332,7 +341,6 @@ def get_dk_lsm_outline(
 
 def overlay_outline(ax, mask: np.ndarray | None, *, color: str = "black", linewidth: float = 0.8):
     """Overlay a contour outline (level 0.5) on the given axes if mask is provided."""
-    mask = _to_numpy_2d(mask)
     if mask is None:
         return
     try:

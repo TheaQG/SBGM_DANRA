@@ -14,8 +14,8 @@ from sbgm.variable_utils import get_color_for_model, get_cmap_for_variable
 from sbgm.evaluate.data_resolver import EvalDataResolver
 
 # New imports for plotting utilities and DK outline
-from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _nice, _savefig, get_dk_lsm_outline, overlay_outline
-from sbgm.plotting_utils import _add_colorbar_and_boxplot
+from sbgm.evaluate.evaluate_prcp.plot_utils import _ensure_dir, _nice, _savefig
+from sbgm.plotting_utils import _add_colorbar_and_boxplot, get_dk_lsm_outline, overlay_outline
 
 SET_DPI = 300
 
