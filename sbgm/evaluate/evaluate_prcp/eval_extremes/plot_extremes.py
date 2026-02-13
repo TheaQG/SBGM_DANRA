@@ -136,7 +136,7 @@ def plot_return_levels(gev_csv: Path, out_png: Path, bo: Optional[Dict[str, Any]
         ax.set_xscale("log")
         ax.set_xlabel("Return period (years)")
         ax.set_ylabel("Return level (mm)")
-        ax.set_title(f"Rx{k}day – GEV")
+        ax.set_title(f"Rx{k}day - GEV")
         ax.grid(True, ls=":")
         ax.legend(fontsize=8, loc="best")
 

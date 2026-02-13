@@ -264,7 +264,7 @@ def plot_scale_psd(scale_root: Path, eval_cfg: Any | None = None) -> None:
 
     _nice()
     # a bit wider so the legend can sit outside without crushing the axes
-    fig, ax = plt.subplots(figsize=(8.1, 5.2))
+    fig, ax = plt.subplots(figsize=(7.1, 5.5))
 
     # HR
     ax.plot(
@@ -351,7 +351,7 @@ def plot_scale_psd(scale_root: Path, eval_cfg: Any | None = None) -> None:
 
         ax.axvline(
             x=lam_nyq, color="black", lw=0.6, linestyle="--",
-            label="LR Nyq", zorder=ZORDER_ANNOT,
+            zorder=ZORDER_ANNOT, #label="LR Nyq",
         )
 
         # Solid, trusted LR (native spacing) on top of its ghost
@@ -414,7 +414,7 @@ def plot_scale_psd(scale_root: Path, eval_cfg: Any | None = None) -> None:
     xform = ax.get_xaxis_transform()  # x=data, y=axes
 
     ax.text(
-        lam_low * 1.03, 0.74,
+        lam_low * 1.029, 0.74,
         f"low-k λ={lam_low:.0f} km",
         transform=xform,
         rotation=90, color="gray", fontsize=7,
@@ -425,7 +425,7 @@ def plot_scale_psd(scale_root: Path, eval_cfg: Any | None = None) -> None:
     )
 
     ax.text(
-        lam_high * 1.03, 0.74,
+        lam_high * 1.029, 0.74,
         f"high-k λ={lam_high:.0f} km",
         transform=xform,
         rotation=90, color="gray", fontsize=7,
@@ -461,7 +461,9 @@ def plot_scale_psd(scale_root: Path, eval_cfg: Any | None = None) -> None:
 
     # Set y-limits after plotting (and before placing data-anchored annotations)
     ymin, ymax = ax.get_ylim()
-    ax.set_ylim(bottom=max(5e-6, ymin), top=ymax)
+    # Focus on dynamically relevant scales; suppress visually irrelevant LR tail
+    # ax.set_ylim(bottom=max(5e-6, ymin), top=ymax)
+    ax.set_ylim(bottom=1e-3, top=ymax)
 
     # --- annotate band ratios (more precision) ---
     lines = [
@@ -554,9 +556,9 @@ def plot_scale_psd(scale_root: Path, eval_cfg: Any | None = None) -> None:
         ax.legend(handles, labels,
                 loc="upper right", bbox_to_anchor=(0.98, 0.98),
                 fontsize=8, frameon=True)
-        # never go below 1e-8 on y
-        ymin, ymax = ax.get_ylim()
-        ax.set_ylim(bottom=5e-6, top=max(ymax, 1e-7))        
+        # # never go below 1e-8 on y
+        # ymin, ymax = ax.get_ylim()
+        # ax.set_ylim(bottom=5e-6, top=max(ymax, 1e-7))        
 
     fig.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
     _savefig(fig, figs / "scale_psd.png", dpi=SET_DPI)
